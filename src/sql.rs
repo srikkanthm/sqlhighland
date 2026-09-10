@@ -194,6 +194,17 @@ pub fn statement_at(sql: &str, offset: usize) -> Option<String> {
     if let Some(stmt) = statements.iter().find(|s| offset == s.end) {
         return Some(stmt.text.clone());
     }
+    // Caret in trailing spaces/tabs on the terminator's own line also
+    // belongs to the statement just ended (`SELECT 1;␣` with the caret at
+    // end of line runs statement 1, not 2). Newlines are excluded: a caret
+    // past a line break — empty lines, next-line indentation — keeps the
+    // existing next-statement preference below.
+    if let Some(prev) = statements.iter().rev().find(|s| s.end <= offset) {
+        let gap = sql.get(prev.end..offset).unwrap_or("");
+        if !gap.is_empty() && gap.chars().all(|c| c == ' ' || c == '\t') {
+            return Some(prev.text.clone());
+        }
+    }
     // Own segment.
     if let Some(stmt) = statements
         .iter()
@@ -1017,6 +1028,27 @@ mod tests {
         // Interior positions are unaffected.
         assert_eq!(statement_at(sql, 2).as_deref(), Some("SELECT 1;"));
         assert_eq!(statement_at(sql, 12).as_deref(), Some("SELECT 2;"));
+    }
+
+    #[test]
+    fn statement_at_trailing_space_runs_current_line() {
+        // End of line 1 with trailing spaces still belongs to statement 1.
+        let sql = "SELECT 1;  \nSELECT 2;";
+        let eol = sql.find('\n').unwrap();
+        assert_eq!(statement_at(sql, eol).as_deref(), Some("SELECT 1;"));
+        // Same line, two statements: the gap after `;` runs the first.
+        let sql = "SELECT 1; SELECT 2;";
+        assert_eq!(statement_at(sql, 9).as_deref(), Some("SELECT 1;"));
+        assert_eq!(statement_at(sql, 10).as_deref(), Some("SELECT 1;"));
+        assert_eq!(statement_at(sql, 11).as_deref(), Some("SELECT 2;"));
+    }
+
+    #[test]
+    fn statement_at_next_line_indent_runs_next() {
+        // Leading indentation of the next line belongs to the next statement.
+        let sql = "SELECT 1;\n   SELECT 2;";
+        let indent = sql.find("SELECT 2").unwrap() - 1;
+        assert_eq!(statement_at(sql, indent).as_deref(), Some("SELECT 2;"));
     }
 
     #[test]

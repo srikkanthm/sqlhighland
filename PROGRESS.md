@@ -174,3 +174,19 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - Splitter doesn't understand Oracle `q'[...]'` quoting.
 - Pane sizes are session-only (not persisted); no query history; no export;
   no schema browser; single active session.
+
+## Code folding (2026-09-11)
+
+- No new parser dep: `datafusion-sqlparser-rs` rejected (heavy, hard-fails on
+  PL/SQL blocks/scripts/`&` vars). The kit already parses `tree-sitter-sequel`
+  in the background and folds every named node spanning 2+ lines (outermost
+  per start line); gutter chevrons need no app code.
+- Probe (throwaway test, since removed) confirmed sane regions: subquery,
+  per-CTE bodies, `CASE..END`, `BEGIN..END` block, `IN (...)` list, block
+  comments; single-line statements yield no folds. No Phase-2 custom
+  highlighter needed.
+- Folding is gutter-only by user call: a `cmd-alt-right` unfold shortcut was
+  added then removed (it no-oped unless the cursor sat on a hidden line, and
+  keyboard fold has no kit API — `display_map` is crate-private).
+- Verified: clean `clippy`, 43 lib tests, release smoke. Visual pass
+  (chevron rendering in both themes) is manual.

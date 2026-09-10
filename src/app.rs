@@ -54,7 +54,9 @@ gpui_kit::actions!(
         CommitTxn,
         RollbackTxn,
         OpenSettings,
-        Quit
+        Quit,
+        NextTab,
+        PrevTab
     ]
 );
 
@@ -541,6 +543,31 @@ fn submit_bind_fields(
     true
 }
 
+/// Bind the tab to the picked connection and run the deferred statement
+/// (variables dialog next, if needed). Shared by picker click and number-key
+/// handlers so both paths behave identically.
+fn pick_connection_and_run(
+    view: &WeakEntity<SqlHighlandView>,
+    tab_id: &str,
+    sql: &str,
+    conn_id: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    // Close the picker first so a variables dialog opened below lands on a
+    // clean dialog stack.
+    window.close_dialog(cx);
+    view.update(cx, |this, cx| {
+        if let Some(t) = this.tab_by_id(tab_id) {
+            t.connection_id = Some(conn_id.to_string());
+        }
+        this.pending_pick = None;
+        this.persist_tabs();
+        this.start_run(tab_id, sql.to_string(), window, cx);
+    })
+    .ok();
+}
+
 /// Return keyboard focus to the tab's editor so the next Cmd+Enter works
 /// immediately after the dialog closes (no reliance on focus-restore alone).
 fn focus_tab_editor(
@@ -627,12 +654,17 @@ impl SqlHighlandView {
         // Cmd+C copies the grid selection, scoped to the table's `DataTable`
         // context so the editor's own copy is untouched.
         // Shortcuts below verified free in the kit's `Input` bindings
-        // (notably cmd-shift-f is taken by Replace, hence shift-alt-f).
+        // (notably cmd-shift-f is taken by Replace, hence shift-alt-f;
+        // cmd-alt-up/down are multi-cursor).
         cx.bind_keys([KeyBinding::new("cmd-enter", RunQuery, Some("Input"))]);
         cx.bind_keys([KeyBinding::new("cmd-c", CopySelection, Some("DataTable"))]);
         cx.bind_keys([KeyBinding::new("shift-alt-f", FormatQuery, Some("Input"))]);
         cx.bind_keys([KeyBinding::new("cmd-shift-c", CommitTxn, Some("Input"))]);
         cx.bind_keys([KeyBinding::new("cmd-shift-r", RollbackTxn, Some("Input"))]);
+        // Tab switching is global (no context) so it works from the editor
+        // and the grid alike; nothing in the kit binds ctrl-tab.
+        cx.bind_keys([KeyBinding::new("ctrl-tab", NextTab, None)]);
+        cx.bind_keys([KeyBinding::new("ctrl-shift-tab", PrevTab, None)]);
 
         let mut this = Self {
             pool: SessionPool::new(),
@@ -838,6 +870,16 @@ impl SqlHighlandView {
         let editor = self.tabs[ix].editor.clone();
         editor.update(cx, |editor, cx| editor.focus(window, cx));
         cx.notify();
+    }
+
+    /// Cycle tabs with wrapping (`ctrl-tab` / `ctrl-shift-tab`). Focus
+    /// follows so the next Cmd+Enter runs in the newly shown tab.
+    fn cycle_tab(&mut self, dir: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.len() < 2 {
+            return;
+        }
+        let next = (self.active as isize + dir).rem_euclid(self.tabs.len() as isize) as usize;
+        self.select_tab(next, window, cx);
     }
 
     fn persist_tabs(&self) {
@@ -1511,24 +1553,45 @@ impl SqlHighlandView {
             name: String,
             detail: String,
             env: Environment,
+            focus: FocusHandle,
         }
         let rows: Vec<PickRow> = self
             .connections
             .iter()
-            .map(|c| PickRow {
+            .enumerate()
+            .map(|(rix, c)| PickRow {
                 id: c.id.clone(),
                 name: c.name.clone(),
                 detail: format!("{}@{}/{}", c.user, c.host, c.service_name),
                 env: c.environment,
+                // Explicitly tracked handles do NOT inherit the element's
+                // tab settings (those only apply to auto-created handles),
+                // and fresh handles default to tab_stop: false — without
+                // these flags the rows are focusable by API but invisible
+                // to Tab navigation.
+                focus: cx.focus_handle().tab_stop(true).tab_index(rix as isize),
             })
             .collect();
         let rows: Rc<Vec<PickRow>> = Rc::new(rows);
         let view = cx.entity().downgrade();
         let tab_id = pending.tab_id.clone();
         let sql = pending.sql.clone();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        // Keyboard flow: the first row takes focus on open; Tab moves between
+        // rows, Enter picks. Handles are owned here so open can focus first.
+        // The builder re-runs every render, so focusing happens one-shot on
+        // the first build (a pre-mount focus call alone may not stick).
+        let first_focus = rows.first().map(|r| r.focus.clone());
+        let focused_once: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+        window.open_dialog(cx, move |dialog, window, cx| {
             let rows = rows.clone();
+            if !focused_once.get() {
+                focused_once.set(true);
+                if let Some(first) = rows.first() {
+                    window.focus(&first.focus, cx);
+                }
+            }
             let muted = cx.theme().muted_foreground;
+            let accent = cx.theme().accent;
             let mut body = v_flex().gap_1().w_full();
             if rows.is_empty() {
                 body = body.child(
@@ -1536,6 +1599,13 @@ impl SqlHighlandView {
                         .text_sm()
                         .text_color(muted)
                         .child("No connections yet — add one to run this statement."),
+                );
+            } else {
+                body = body.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child("Tab to choose, Enter to run on that connection."),
                 );
             }
             for (rix, r) in rows.iter().enumerate() {
@@ -1552,12 +1622,15 @@ impl SqlHighlandView {
                     .rounded_md()
                     .cursor_pointer()
                     .hover(|this| this.bg(muted.opacity(0.15)))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .child(div().text_sm().child(r.name.clone()))
-                            .child(div().text_xs().text_color(muted).child(r.detail.clone())),
-                    );
+                    .track_focus(&r.focus)
+                    .tab_index(rix as isize)
+                    .focus(|this| this.bg(accent.opacity(0.35)));
+                line = line.child(
+                    v_flex()
+                        .flex_1()
+                        .child(div().text_sm().child(r.name.clone()))
+                        .child(div().text_xs().text_color(muted).child(r.detail.clone())),
+                );
                 if let Some(tag) = env_tag(r.env, cx) {
                     line = line.child(tag);
                 }
@@ -1567,28 +1640,37 @@ impl SqlHighlandView {
                         .w_full()
                         .child(line)
                         .on_click(move |_, window, cx: &mut App| {
-                            // Close the picker first so a variables dialog
-                            // opened below lands on a clean dialog stack.
-                            window.close_dialog(cx);
-                            pick_view
-                                .update(cx, |this, cx| {
-                                    if let Some(t) = this.tab_by_id(&pick_tab) {
-                                        t.connection_id = Some(conn_id.clone());
-                                    }
-                                    this.pending_pick = None;
-                                    this.persist_tabs();
-                                    this.start_run(&pick_tab, pick_sql.clone(), window, cx);
-                                })
-                                .ok();
+                            pick_connection_and_run(
+                                &pick_view,
+                                &pick_tab,
+                                &pick_sql,
+                                &conn_id,
+                                window,
+                                cx,
+                            );
                         }),
                 );
             }
+            let ok_view = view.clone();
+            let ok_rows = rows.clone();
+            let ok_tab = tab_id.clone();
+            let ok_sql = sql.clone();
+            let ok_view = view.clone();
+            let ok_rows = rows.clone();
+            let ok_tab = tab_id.clone();
+            let ok_sql = sql.clone();
             let cancel_view = view.clone();
             let cancel_tab = tab_id.clone();
+            let esc_view = view.clone();
+            let esc_tab = tab_id.clone();
             let mut footer = h_flex()
                 .gap_2()
                 .child(div().flex_1())
-                .child(Button::new("pick-cancel").label("Cancel").on_click(
+                // Tab order: connection rows (0..n) come first; footer
+                // buttons sit far above so Tab cycles rows before reaching
+                // them. The dialog X is hidden for the same reason (Esc
+                // cancels).
+                .child(Button::new("pick-cancel").label("Cancel").tab_index(100).on_click(
                     move |_, window, cx: &mut App| {
                         cancel_view
                             .update(cx, |this, cx| {
@@ -1603,7 +1685,7 @@ impl SqlHighlandView {
             if rows.is_empty() {
                 let add_view = view.clone();
                 footer = footer.child(
-                    Button::new("pick-add").primary().label("Add connection…").on_click(
+                    Button::new("pick-add").primary().label("Add connection…").tab_index(101).on_click(
                         move |_, window, cx: &mut App| {
                             window.close_dialog(cx);
                             add_view
@@ -1619,9 +1701,53 @@ impl SqlHighlandView {
             dialog
                 .title("Select connection")
                 .w(px(400.))
+                .close_button(false)
                 .child(body)
+                // Enter picks the focused row (Tab moves between rows), or
+                // the first row when focus is on the dialog itself. False:
+                // the dialog is already closed manually above.
+                .on_ok(move |_, window, cx: &mut App| {
+                    let focused = window.focused(cx);
+                    let pick = ok_rows
+                        .iter()
+                        .find(|r| Some(&r.focus) == focused.as_ref())
+                        .or(ok_rows.first());
+                    match pick {
+                        Some(row) => {
+                            window.close_dialog(cx);
+                            ok_view
+                                .update(cx, |this, cx| {
+                                    if let Some(t) = this.tab_by_id(&ok_tab) {
+                                        t.connection_id = Some(row.id.clone());
+                                    }
+                                    this.pending_pick = None;
+                                    this.persist_tabs();
+                                    this.start_run(&ok_tab, ok_sql.clone(), window, cx);
+                                })
+                                .ok();
+                            false
+                        }
+                        None => false,
+                    }
+                })
+                // Escape cancels: drop the deferred run and refocus.
+                .on_cancel(move |_, window, cx: &mut App| {
+                    esc_view
+                        .update(cx, |this, cx| {
+                            this.pending_pick = None;
+                            cx.notify();
+                        })
+                        .ok();
+                    focus_tab_editor(&esc_view, &esc_tab, window, cx);
+                    true
+                })
                 .footer(footer)
         });
+        // First row takes focus on open (open_dialog focuses the dialog
+        // layer; the row must win so Tab/Enter work immediately).
+        if let Some(handle) = first_focus {
+            window.focus(&handle, cx);
+        }
     }
 
     /// Variables dialog: one blank field per `&name` / `:name` (always blank,
@@ -2869,6 +2995,12 @@ impl SqlHighlandView {
             .h_full()
             .on_action(cx.listener(|this, _: &CopySelection, window, cx| {
                 this.copy_selection(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextTab, window, cx| {
+                this.cycle_tab(1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
+                this.cycle_tab(-1, window, cx);
             }))
             .child(self.render_tab_bar(cx))
             .child(
