@@ -231,6 +231,12 @@ pub fn statement_kind(sql: &str) -> StatementKind {
     if keyword.eq_ignore_ascii_case("select") {
         return StatementKind::Query;
     }
+    // SQL*Plus DESCRIBE/DESC: not server SQL, but our emulation answers it
+    // with a result set (see `db::rewrite_describe`), so it must ride the
+    // query path — the execute path sends it raw and Oracle answers ORA-00900.
+    if keyword.eq_ignore_ascii_case("describe") || keyword.eq_ignore_ascii_case("desc") {
+        return StatementKind::Query;
+    }
     if keyword.eq_ignore_ascii_case("with") {
         // Scan top-level keywords past the CTE definitions.
         let mut depth = 0usize;
@@ -1072,6 +1078,9 @@ mod tests {
         assert_eq!(statement_kind("DECLARE x NUMBER; BEGIN x := 1; END;"), Execute);
         assert_eq!(statement_kind("COMMIT"), Execute);
         assert_eq!(statement_kind(""), Execute);
+        // DESCRIBE rides the query path (emulated via ALL_TAB_COLUMNS).
+        assert_eq!(statement_kind("DESCRIBE emp"), Query);
+        assert_eq!(statement_kind("  desc scott.emp;"), Query);
     }
 
     #[test]

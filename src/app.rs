@@ -478,6 +478,14 @@ struct PendingBind {
     binds: Vec<String>,
 }
 
+/// A run deferred for connection choice: the statement waits while the user
+/// picks the tab's connection. Only one pick dialog opens at a time.
+#[derive(Debug, Clone)]
+struct PendingPick {
+    tab_id: String,
+    sql: String,
+}
+
 /// One row in the variables dialog: `&name` substitution or `:name` bind.
 struct BindField {
     /// Display key: `&name` or `:name`.
@@ -587,6 +595,8 @@ pub struct SqlHighlandView {
     defines: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     /// Run waiting on the bind dialog (cleared on submit or cancel).
     pending_bind: Option<PendingBind>,
+    /// Run waiting on the connection picker (cleared on pick or cancel).
+    pending_pick: Option<PendingPick>,
     /// Window-lifetime subscriptions (OS appearance observer for System
     /// theme mode). Kept alive by ownership, like per-tab `_subs`.
     _subs: Vec<Subscription>,
@@ -643,6 +653,7 @@ impl SqlHighlandView {
             status: "".into(),
             defines: std::collections::HashMap::new(),
             pending_bind: None,
+            pending_pick: None,
             _subs: Vec::new(),
         };
         // Follow the OS appearance while the theme mode is System. The
@@ -1427,7 +1438,8 @@ impl SqlHighlandView {
 
     /// Entry point for a run: checks the connection binding, detects `&`/`&&`
     /// substitution variables and `:binds`, and either runs directly or opens
-    /// the variables dialog first.
+    /// the variables dialog first. With no connection bound, offers the
+    /// connection picker first and runs right after the pick.
     fn start_run(
         &mut self,
         tab_id: &str,
@@ -1439,12 +1451,20 @@ impl SqlHighlandView {
             return;
         };
         // Connection check first so we never prompt for variables just to
-        // then error "Select a connection for this tab".
+        // then fail. Unbound (or dangling) tabs get the picker, and the run
+        // continues automatically once a connection is chosen.
         let conn_id = match self.tabs[ix].connection_id.clone() {
-            Some(id) => id,
-            None => {
-                self.tabs[ix].output = Some(Output::error("Select a connection for this tab"));
-                cx.notify();
+            Some(id)
+                if self.connections.iter().any(|c| c.id == id) =>
+            {
+                id
+            }
+            _ => {
+                self.pending_pick = Some(PendingPick {
+                    tab_id: tab_id.to_string(),
+                    sql,
+                });
+                self.open_conn_pick_dialog(window, cx);
                 return;
             }
         };
@@ -1476,6 +1496,132 @@ impl SqlHighlandView {
             binds: bind_names,
         });
         self.open_bind_dialog(window, cx);
+    }
+
+    /// Connection picker for unbound runs: choosing binds the tab and the
+    /// deferred statement runs immediately (variables dialog next, if needed).
+    /// Builder-safe like the other dialogs: everything is cloned in, the
+    /// builder never touches the view entity.
+    fn open_conn_pick_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_pick.clone() else {
+            return;
+        };
+        struct PickRow {
+            id: String,
+            name: String,
+            detail: String,
+            env: Environment,
+        }
+        let rows: Vec<PickRow> = self
+            .connections
+            .iter()
+            .map(|c| PickRow {
+                id: c.id.clone(),
+                name: c.name.clone(),
+                detail: format!("{}@{}/{}", c.user, c.host, c.service_name),
+                env: c.environment,
+            })
+            .collect();
+        let rows: Rc<Vec<PickRow>> = Rc::new(rows);
+        let view = cx.entity().downgrade();
+        let tab_id = pending.tab_id.clone();
+        let sql = pending.sql.clone();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let rows = rows.clone();
+            let muted = cx.theme().muted_foreground;
+            let mut body = v_flex().gap_1().w_full();
+            if rows.is_empty() {
+                body = body.child(
+                    div()
+                        .text_sm()
+                        .text_color(muted)
+                        .child("No connections yet — add one to run this statement."),
+                );
+            }
+            for (rix, r) in rows.iter().enumerate() {
+                let pick_view = view.clone();
+                let pick_tab = tab_id.clone();
+                let pick_sql = sql.clone();
+                let conn_id = r.id.clone();
+                let mut line = h_flex()
+                    .gap_2()
+                    .items_center()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|this| this.bg(muted.opacity(0.15)))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .child(div().text_sm().child(r.name.clone()))
+                            .child(div().text_xs().text_color(muted).child(r.detail.clone())),
+                    );
+                if let Some(tag) = env_tag(r.env, cx) {
+                    line = line.child(tag);
+                }
+                body = body.child(
+                    div()
+                        .id(("conn-pick", rix))
+                        .w_full()
+                        .child(line)
+                        .on_click(move |_, window, cx: &mut App| {
+                            // Close the picker first so a variables dialog
+                            // opened below lands on a clean dialog stack.
+                            window.close_dialog(cx);
+                            pick_view
+                                .update(cx, |this, cx| {
+                                    if let Some(t) = this.tab_by_id(&pick_tab) {
+                                        t.connection_id = Some(conn_id.clone());
+                                    }
+                                    this.pending_pick = None;
+                                    this.persist_tabs();
+                                    this.start_run(&pick_tab, pick_sql.clone(), window, cx);
+                                })
+                                .ok();
+                        }),
+                );
+            }
+            let cancel_view = view.clone();
+            let cancel_tab = tab_id.clone();
+            let mut footer = h_flex()
+                .gap_2()
+                .child(div().flex_1())
+                .child(Button::new("pick-cancel").label("Cancel").on_click(
+                    move |_, window, cx: &mut App| {
+                        cancel_view
+                            .update(cx, |this, cx| {
+                                this.pending_pick = None;
+                                cx.notify();
+                            })
+                            .ok();
+                        window.close_dialog(cx);
+                        focus_tab_editor(&cancel_view, &cancel_tab, window, cx);
+                    },
+                ));
+            if rows.is_empty() {
+                let add_view = view.clone();
+                footer = footer.child(
+                    Button::new("pick-add").primary().label("Add connection…").on_click(
+                        move |_, window, cx: &mut App| {
+                            window.close_dialog(cx);
+                            add_view
+                                .update(cx, |this, cx| {
+                                    this.pending_pick = None;
+                                    this.start_add(window, cx);
+                                })
+                                .ok();
+                        },
+                    ),
+                );
+            }
+            dialog
+                .title("Select connection")
+                .w(px(400.))
+                .child(body)
+                .footer(footer)
+        });
     }
 
     /// Variables dialog: one blank field per `&name` / `:name` (always blank,
@@ -1727,6 +1873,18 @@ impl SqlHighlandView {
         self.tabs[ix].run_token = self.tabs[ix].run_token.wrapping_add(1);
         self.tabs[ix].run_started = Some(std::time::Instant::now());
         let run_token = self.tabs[ix].run_token;
+        // Drop stale results NOW, not on completion: otherwise the previous
+        // query's rows keep painting (flash) while the new one runs. The
+        // grid repaints empty with `Running…` in the status bar until the
+        // fresh fetch lands. `has_result` stays true so the first-run
+        // placeholder doesn't flash in its place.
+        self.tabs[ix].fetch = None;
+        self.tabs[ix].copy_sel = None;
+        self.tabs[ix].table.update(cx, |table, cx| {
+            table.delegate_mut().set_fetch(None);
+            table.clear_selection(cx);
+            table.refresh(cx);
+        });
         cx.notify();
 
         let session = self.pool.get_or_create(&conn_id);
