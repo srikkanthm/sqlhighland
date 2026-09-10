@@ -190,3 +190,26 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   keyboard fold has no kit API — `display_map` is crate-private).
 - Verified: clean `clippy`, 43 lib tests, release smoke. Visual pass
   (chevron rendering in both themes) is manual.
+
+## Export CSV/XLSX (2026-09-11)
+
+- Uncapped by design: drains the tab's shared cursor past the grid cap to
+  true exhaustion (grid fills with everything too, so paging stays
+  consistent — no second execution/snapshot skew).
+- Entry points: grid right-click context menu + header Export dropdown
+  (`Export as CSV…` / `Export as Excel (.xlsx)…`).
+- Flow: native save dialog first (`<tab>-<timestamp>.<ext>`, HOME dir),
+  then background drain (1000-row pages) with `Exporting… N rows` status +
+  Cancel; writes to a `.part` sibling, renames on success, deletes on
+  cancel/failure. Scroll-fetching pauses via held `loading` flag.
+- CSV streams line by line through tested RFC-4180 `csv_row`; XLSX via
+  pinned `rust_xlsxwriter =0.99.0` (`constant_memory` worksheets, bold
+  header, all cells strings, data sheet named after tab) plus a second
+  `query` sheet holding the exported SQL (one line per row) as the audit
+  trail. Headers included, NULL → empty in both.
+- Finish: `Exported N rows (…) to <file>` status; focus stays on the
+  results tab (no extra tabs created).
+  New runs are blocked while exporting (message, not silent).
+- Verified: clean `clippy`, 50 lib + 8 live tests, 2505-row/3-page live
+  drain composition check (CSV + XLSX byte-exact), release smoke. Manual
+  pass (save dialog, progress, cancel, open .xlsx in Excel) outstanding.

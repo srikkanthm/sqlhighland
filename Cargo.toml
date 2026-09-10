@@ -22,6 +22,9 @@ gpui = { package = "gpui-pre", version = "=0.3.4", optional = true }
 # (Without a grammar feature the Editor falls back to plain text.)
 gpui-kit = { version = "=0.6.1", optional = true, features = ["tree-sitter-sql"] }
 gpui-kit-assets = { version = "=0.6.1", optional = true }
+# Native .xlsx export (pure Rust, no native deps). Pinned like the rest.
+# `constant_memory` streams worksheet writes (uncapped exports stay lean).
+rust_xlsxwriter = { version = "=0.99.0", features = ["constant_memory"] }
 
 [features]
 default = []
