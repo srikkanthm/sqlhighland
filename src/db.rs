@@ -32,6 +32,11 @@ pub trait DbClient {
     fn is_connected(&self) -> bool;
     fn disconnect(&mut self);
     fn run_query(&mut self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError>;
+    /// Execute a non-query statement (DML/DDL/PL/SQL). Returns rows affected.
+    /// The driver does not autocommit — call `commit` explicitly.
+    fn exec(&mut self, sql: &str) -> Result<(u64, u128), DbError>;
+    fn commit(&mut self) -> Result<(), DbError>;
+    fn rollback(&mut self) -> Result<(), DbError>;
 }
 
 /// Thin-driver session holding one connection plus at most one open cursor.
@@ -78,6 +83,16 @@ impl OracledbSession {
             .as_ref()
             .ok_or_else(|| DbError("not connected".to_string()))?;
         let sql = sanitize_statement(sql)?;
+        // DESCRIBE is a SQL*Plus client command, not SQL — the server
+        // rejects it (ORA-00900). Emulate it via ALL_TAB_COLUMNS.
+        let rewritten;
+        let sql = match rewrite_describe(sql) {
+            Some(q) => {
+                rewritten = q;
+                rewritten.as_str()
+            }
+            None => sql,
+        };
         let cursor = conn.query(sql, &[]).map_err(DbError::from)?;
 
         let columns: Vec<ColumnInfo> = cursor
@@ -108,8 +123,7 @@ impl OracledbSession {
 
     /// Pull the next page from the open cursor. Stale generations and a
     /// missing connection yield a non-current page the UI must discard.
-    pub fn fetch_more(&mut self, query_id: u64, n: usize) -> Result<FetchPage, DbError> {
-        if query_id != self.query_id || self.conn.is_none() {
+    pub fn fetch_more(&mut self, query_id: u64, n: usize) -> Result<FetchPage, DbError> {        if query_id != self.query_id || self.conn.is_none() {
             return Ok(FetchPage {
                 rows: Vec::new(),
                 exhausted: true,
@@ -133,6 +147,39 @@ impl OracledbSession {
             exhausted,
             current: true,
         })
+    }
+
+    /// Execute a DML/DDL/PL-SQL statement. Returns `(rows_affected, elapsed_ms)`.
+    /// Supersedes any open cursor (an execute invalidates server-side state
+    /// sibling tabs may be paging through — the UI marks them exhausted).
+    pub fn exec(&mut self, sql: &str) -> Result<(u64, u128), DbError> {
+        let conn = self
+            .conn
+            .as_ref()
+            .ok_or_else(|| DbError("not connected".to_string()))?;
+        let sql = sanitize_statement(sql)?;
+        let started = Instant::now();
+        let result = conn.execute(sql, &[]).map_err(DbError::from)?;
+        self.cursor = None;
+        self.pending = None;
+        self.query_id = self.query_id.wrapping_add(1);
+        Ok((result.rows_affected(), started.elapsed().as_millis()))
+    }
+
+    pub fn commit(&mut self) -> Result<(), DbError> {
+        let conn = self
+            .conn
+            .as_ref()
+            .ok_or_else(|| DbError("not connected".to_string()))?;
+        conn.commit().map_err(DbError::from)
+    }
+
+    pub fn rollback(&mut self) -> Result<(), DbError> {
+        let conn = self
+            .conn
+            .as_ref()
+            .ok_or_else(|| DbError("not connected".to_string()))?;
+        conn.rollback().map_err(DbError::from)
     }
 
     /// Pull up to `limit` converted rows; probe one extra row to learn
@@ -235,22 +282,150 @@ impl DbClient for OracledbSession {
             truncated: !page.exhausted,
         })
     }
+
+    fn exec(&mut self, sql: &str) -> Result<(u64, u128), DbError> {
+        OracledbSession::exec(self, sql)
+    }
+
+    fn commit(&mut self) -> Result<(), DbError> {
+        OracledbSession::commit(self)
+    }
+
+    fn rollback(&mut self) -> Result<(), DbError> {
+        OracledbSession::rollback(self)
+    }
 }
 
 /// Strip editor-style statement terminators (`;`) and reject empty input.
 ///
 /// Only trailing semicolons are removed, so `SELECT ';' FROM dual;`
-/// correctly keeps the one inside the string literal.
+/// correctly keeps the one inside the string literal. Anonymous PL/SQL
+/// blocks are the exception: the server *requires* their trailing `;`,
+/// so it is preserved (duplicates collapsed to one).
 fn sanitize_statement(sql: &str) -> Result<&str, DbError> {
+    use crate::sql::is_plsql_block;
     let mut s = sql.trim();
-    while let Some(stripped) = s.strip_suffix(';') {
-        s = stripped.trim_end();
+    if is_plsql_block(s) {
+        while s.ends_with(";;") {
+            s = s[..s.len() - 1].trim_end();
+        }
+    } else {
+        while let Some(stripped) = s.strip_suffix(';') {
+            s = stripped.trim_end();
+        }
     }
     if s.is_empty() {
         return Err(DbError("empty statement".to_string()));
     }
     Ok(s)
 }
+/// Rewrite SQL*Plus `DESCRIBE`/`DESC <object>` into a query against
+/// `ALL_TAB_COLUMNS`. Returns `None` when the text is not a describe command.
+///
+/// Accepts schema-qualified and double-quoted names (`scott."Emp"`); unquoted
+/// identifiers fold to uppercase like Oracle does. Anything else (extra
+/// tokens, garbage) falls through so the server reports the real error.
+fn rewrite_describe(sql: &str) -> Option<String> {
+    let rest = strip_keyword(sql, "describe").or_else(|| strip_keyword(sql, "desc"))?;
+    let (owner, table) = parse_object_name(rest)?;
+    let owner_filter = owner
+        .map(|o| format!("AND owner = '{}' ", escape_literal(&o)))
+        .unwrap_or_default();
+    Some(format!(
+        "SELECT column_name AS \"Name\", \
+            DECODE(nullable, 'N', 'NOT NULL', NULL) AS \"Null?\", \
+            CASE \
+              WHEN data_type IN ('VARCHAR2','NVARCHAR2','CHAR','NCHAR') \
+                THEN data_type || '(' || data_length || ')' \
+              WHEN data_type IN ('NUMBER','FLOAT','DECIMAL','NUMERIC') AND data_precision IS NOT NULL \
+                THEN data_type || '(' || data_precision || NVL2(data_scale, ',' || data_scale, '') || ')' \
+              ELSE data_type \
+            END AS \"Type\" \
+         FROM all_tab_columns \
+         WHERE table_name = '{}' {}ORDER BY owner, column_id",
+        escape_literal(&table),
+        owner_filter
+    ))
+}
+
+/// Strip a leading keyword (case-insensitive) requiring a word boundary.
+/// Returns the remainder, or `None` on mismatch.
+fn strip_keyword<'a>(sql: &'a str, keyword: &str) -> Option<&'a str> {
+    let trimmed = sql.trim_start();
+    if trimmed.len() < keyword.len() {
+        return None;
+    }
+    if !trimmed[..keyword.len()].eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    let rest = &trimmed[keyword.len()..];
+    // `descending` is not `desc`; `described` is not `describe`.
+    if rest.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '$' || c == '#') {
+        return None;
+    }
+    Some(rest)
+}
+
+/// Parse `[owner.]table` with double-quoted identifier support.
+/// Returns uppercase-folded names (quoted parts keep case). The remainder
+/// after the object name must be whitespace-only.
+fn parse_object_name(rest: &str) -> Option<(Option<String>, String)> {
+    let rest = rest.trim_start();
+    let (first, after_first) = parse_identifier(rest)?;
+    let after_first = after_first.trim_start();
+    if let Some(after_dot) = after_first.strip_prefix('.') {
+        let (second, after_second) = parse_identifier(after_dot.trim_start())?;
+        if !after_second.trim().is_empty() {
+            return None;
+        }
+        Some((Some(first), second))
+    } else {
+        if !after_first.trim().is_empty() {
+            return None;
+        }
+        Some((None, first))
+    }
+}
+
+/// Parse one identifier: `"quoted"` (with `""` escape) or bare
+/// `[A-Za-z][A-Za-z0-9_$#]*`. Bare folds to uppercase; quoted keeps case.
+fn parse_identifier(s: &str) -> Option<(String, &str)> {
+    if let Some(quoted) = s.strip_prefix('"') {
+        let mut name = String::new();
+        let mut chars = quoted.char_indices();
+        loop {
+            let (i, c) = chars.next()?;
+            if c == '"' {
+                // `""` is an escaped quote; a lone `"` ends the identifier.
+                if quoted[i + 1..].starts_with('"') {
+                    name.push('"');
+                    chars.next();
+                } else {
+                    return Some((name, &quoted[i + 1..]));
+                }
+            } else {
+                name.push(c);
+            }
+        }
+    } else {
+        let end = s
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '#'))
+            .unwrap_or(s.len());
+        if end == 0 {
+            return None;
+        }
+        let (ident, rest) = s.split_at(end);
+        if ident.starts_with(|c: char| c.is_ascii_digit()) {
+            return None;
+        }
+        Some((ident.to_ascii_uppercase(), rest))
+    }
+}
+
+fn escape_literal(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
 /// Convert one owned row to display cells.
 fn convert_row(mut row: oracledb::Row, columns: &[ColumnInfo]) -> Vec<Option<String>> {
     columns
@@ -302,7 +477,7 @@ fn cell_to_display(row: &mut oracledb::Row, ix: usize, db_type: &str) -> Option<
             .get::<Option<oracledb::JsonValue>>(ix)
             .ok()
             .flatten()
-            .map(|v| format!("{v:?}")),
+            .map(|v| capped_debug(&v, 300)),
         "DB_TYPE_VECTOR" => row
             .get::<Option<oracledb::Vector>>(ix)
             .ok()
@@ -350,10 +525,15 @@ fn hex_preview(bytes: &[u8]) -> String {
 
 fn vector_preview(v: &oracledb::Vector) -> String {
     // `Vector` exposes no public element accessors in beta.3; Debug it is.
-    const CAP: usize = 300;
+    capped_debug(v, 300)
+}
+
+/// Debug-format with a char cap so huge values (JSON docs, vectors) don't
+/// stall text layout in the grid. Full values come later (cell detail view).
+fn capped_debug(v: &impl std::fmt::Debug, cap: usize) -> String {
     let s = format!("{v:?}");
-    if s.len() > CAP {
-        format!("{}…", s.chars().take(CAP).collect::<String>())
+    if s.len() > cap {
+        format!("{}…", s.chars().take(cap).collect::<String>())
     } else {
         s
     }
@@ -382,5 +562,28 @@ mod tests {
         assert_eq!(sanitize_statement("SELECT ';' FROM dual;").unwrap(), "SELECT ';' FROM dual");
         assert!(sanitize_statement("   ;  ").is_err());
         assert!(sanitize_statement("").is_err());
+    }
+
+    #[test]
+    fn describe_rewrites_to_tab_columns() {
+        let q = rewrite_describe("DESCRIBE emp").unwrap();
+        assert!(q.contains("FROM all_tab_columns"), "{q}");
+        assert!(q.contains("table_name = 'EMP'"), "{q}");
+        assert!(!q.contains("owner = "), "{q}");
+
+        let q = rewrite_describe("  desc scott.emp  ").unwrap();
+        assert!(q.contains("table_name = 'EMP'"), "{q}");
+        assert!(q.contains("owner = 'SCOTT'"), "{q}");
+
+        // Quoted identifiers keep case; unquoted fold to uppercase.
+        let q = rewrite_describe("describe \"MixedCase\"").unwrap();
+        assert!(q.contains("table_name = 'MixedCase'"), "{q}");
+
+        // Not describe commands: fall through for the server to reject.
+        assert_eq!(rewrite_describe("SELECT 1 FROM dual"), None);
+        assert_eq!(rewrite_describe("describe"), None);
+        assert_eq!(rewrite_describe("describe emp extra"), None);
+        assert_eq!(rewrite_describe("descending"), None);
+        assert_eq!(rewrite_describe("described emp"), None);
     }
 }

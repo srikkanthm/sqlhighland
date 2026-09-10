@@ -120,3 +120,61 @@ fn live_trailing_semicolon_is_tolerated() {
     show("semicolon", &r);
     assert_eq!(r.row_count(), 1);
 }
+
+#[test]
+fn live_describe_emulated() {
+    // DESCRIBE is a SQL*Plus client command; the app rewrites it to
+    // ALL_TAB_COLUMNS. DUAL has one VARCHAR2(1) column, DUMMY.
+    let mut s = OracledbSession::new();
+    s.connect(&cfg()).expect("connect");
+    for stmt in ["DESCRIBE dual", "desc sys.dual;"] {
+        let r = s.run_query(stmt, 1000).expect("describe");
+        show("describe", &r);
+        assert_eq!(
+            r.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["Name", "Null?", "Type"]
+        );
+        assert_eq!(r.row_count(), 1);
+        assert_eq!(r.rows[0][0].as_deref(), Some("DUMMY"));
+        assert_eq!(r.rows[0][2].as_deref(), Some("VARCHAR2(1)"));
+    }
+    // Unknown tables describe to zero rows, not an error.
+    let r = s.run_query("DESCRIBE no_such_table_xyz", 1000).expect("describe");
+    assert_eq!(r.row_count(), 0);
+}
+
+#[test]
+fn live_ddl_dml_commit_rollback() {
+    use sqlhighland::db::DbClient;
+    let mut s = OracledbSession::new();
+    s.connect(&cfg()).expect("connect");
+    let table = "sh_test_txn";
+    // Best-effort cleanup from any previous interrupted run.
+    let _ = s.exec(&format!("DROP TABLE {table}"));
+    s.exec(&format!("CREATE TABLE {table} (id NUMBER, name VARCHAR2(30))"))
+        .expect("create");
+    // DDL auto-commits; insert then roll back: row must vanish.
+    let (affected, _) = s
+        .exec(&format!("INSERT INTO {table} VALUES (1, 'a')"))
+        .expect("insert");
+    assert_eq!(affected, 1);
+    s.rollback().expect("rollback");
+    let r = s
+        .run_query(&format!("SELECT COUNT(*) AS c FROM {table}"), 1000)
+        .expect("count");
+    assert_eq!(r.rows[0][0].as_deref(), Some("0"));
+    // Insert then commit: row must persist across a fresh session.
+    s.exec(&format!("INSERT INTO {table} VALUES (2, 'b')"))
+        .expect("insert");
+    s.commit().expect("commit");
+    let mut s2 = OracledbSession::new();
+    s2.connect(&cfg()).expect("connect");
+    let r = s2
+        .run_query(&format!("SELECT COUNT(*) AS c FROM {table}"), 1000)
+        .expect("count");
+    assert_eq!(r.rows[0][0].as_deref(), Some("1"));
+    // PL/SQL block executes (success is what matters; Oracle reports a
+    // driver-defined rowcount for blocks, so don't assert its value).
+    s2.exec("BEGIN NULL; END;").expect("plsql");
+    s2.exec(&format!("DROP TABLE {table}")).expect("drop");
+}

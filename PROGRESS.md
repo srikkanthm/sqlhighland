@@ -56,7 +56,7 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   dialog fields don't trigger it). Statement splitter respects strings,
   quotes, `--`/`/* */` comments; caret past end re-runs last, blank line
   prefers next. Run button follows the same path.
-- **Results grid** — virtualized `DataTable`, NULL styling, error banner.
+- **Results grid** — virtualized `DataTable`, NULL styling, leading 1-based row-number column (muted, right-aligned; excluded from CSV copy).
 - **Incremental fetching (core)** — initial 1000 rows, then on-demand 1000-row
   pages as scrolling nears the bottom (200-row trigger), appended in place.
   Server-side cursor held open (owned `Cursor`, no re-execution); one-row
@@ -65,6 +65,67 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - **Status bar** — action status left (`Running…` / `N rows · M ms` /
   `Fetching more…`), single connection status right. (Connection text had two
   sources once — fixed by construction; `connected_to` field deleted.)
+- **Client-command emulation** — `DESCRIBE`/`DESC` is a SQL*Plus command, not
+  SQL (server rejects it with ORA-00900). The app rewrites it to an
+  `ALL_TAB_COLUMNS` query (Name / Null? / Type, with length/precision
+  decoration), supporting schema-qualified and quoted names.
+- **Full statement support** — the driver has no SQL*Plus layer (verified:
+  zero `sqlplus` references in its source) but full PL/SQL via `execute()`.
+  Run routes by leading keyword (`SELECT`/`WITH…SELECT` → paged query path,
+  everything else → execute with verb-specific summaries: "1 row inserted",
+  "Table EMP created", "PL/SQL block executed"). The splitter is
+  BEGIN/DECLARE/END depth-aware so PL/SQL blocks stay whole, and the
+  sanitizer preserves the `;` blocks require. Manual-commit model (driver
+  never autocommits): Commit/Rollback buttons in the query header plus an
+  amber `● Uncommitted` indicator; transaction state is per-connection.
+- **SQL Developer statement parity** — Cmd+Enter resolves like the worksheet:
+  cursor anywhere on a statement (including just after its `;`) runs it,
+  blank lines prefer the next statement, and a `/` alone on a line terminates
+  the preceding statement (required after PL/SQL, allowed without `;`).
+- **Query header** — icon buttons (Play/Format/Wand, Check/Commit,
+  Undo2/Rollback) with tooltips and shortcuts: `⌘↵` run, `⇧⌥F` format
+  (`⌘⇧F` is taken by the editor's Replace), `⇧⌘C` commit, `⇧⌘R` rollback.
+  The tab's connection picker is an outlined Database button with a live
+  dot — no longer mistaken for plain text.
+- **Status bar: single source of truth** — connection *state* is derived live
+  from the session pool every render (dot + per-tab text); the center slot
+  holds only transient event notices, so contradictory "Disconnected" /
+  "Connected to …" text is impossible by construction.
+- **Output pane** — the results area shows the tab's latest action outcome:
+  failures red ("Query failed"), DML/DDL confirmations neutral ("Statement
+  executed", e.g. "1 row inserted · 3 ms"); successful SELECTs
+  show the grid. A new run returns automatically; Dismiss reveals prior
+  results without re-running. The status line stamps failures too (`Failed ·
+  12 ms`, `Fetch failed — scroll to retry`) instead of showing the previous
+  run's success summary.
+- **Run lifecycle** — live `Running… Ns` status (500 ms ticker), and Cancel.
+  The driver has no break API (verified in its source), so Cancel is
+  client-side abandon: a per-tab run token is bumped, late completions are
+  discarded, and the server finishes in the background. Same-connection
+  re-runs queue behind the abandoned worker's session lock, then proceed
+  normally with the fresh token.
+- **Render path never blocks on sessions** — connection liveness is cached in
+  view state (`live` set, updated on connect/disconnect/run outcomes) because
+  locking a session mutex during render froze the whole UI behind in-flight
+   queries (`std` Mutex blocks, never yields). `pool.remove` uses `try_lock`,
+   and the execute path carries its generation id out of the bg task instead
+   of locking on the UI thread.
+- **Settings + themes** — `⌘,` (or the sidebar gear) opens a Settings dialog
+  with a flat theme list (System + Default/Nord/Catppuccin-Latte-Frappé-
+  Macchiato-Mocha/Solarized light+dark). Picks apply immediately via the
+  kit's own apply-then-switch order and persist to `preferences.toml`;
+  System follows the OS via a window appearance observer. Legacy
+  family+mode pref files migrate to their concrete variant. All hardcoded
+  UI colors migrated to theme tokens, so every family renders correctly.
+  Repaint root cause, found via the retained-render model: GPUI only
+  re-renders dirty views, and the dialog refactor had dropped the only
+  `notify()` on the main view — self-notifying entities (editor, grid)
+  updated on interaction while everything else stayed stale. Theme picks now
+  notify the view through a handle stashed in an App global (window-level
+  handlers have no view otherwise). Cmd+, is handled at window level via a
+  global action listener (element handlers miss modals, which live in a
+  sibling layer); the dialog shows the live applied name so apply vs. repaint
+  failures are distinguishable.
 
 ## Bugs fixed along the way
 
@@ -76,17 +137,30 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - Switched zed-git deps to crates.io (`gpui-pre`/`gpui-kit`) — reproducible,
   no multi-GB clone. (`gpui-pre` is published by the kit maintainer, not Zed.)
 
-## Tests — 17 unit + 5 live, all passing
+## Tests — 21 unit + 5 live, all passing
 
-- `cargo test --lib` — EZCONNECT builder, TOML round-trip, `Send` bounds for
-  bg tasks, sanitizer cases, formatter + 9 splitter cases, id stability,
-  result summaries.
+- `cargo test --lib` — EZCONNECT builder, TOML round-trips (connections +
+  tabs manifest/drafts), `Send` bounds for bg tasks, sanitizer cases,
+  formatter + 9 splitter cases, id stability, result summaries, tab naming,
+  session-pool sharing.
 - `cargo test --test live` — needs `highlanddb` on `localhost:1521`
   (`system`/`test` @ `highlandpdb`): connect, type coverage, truncation,
   semicolon regression, **2500-row paging (1000/1000/500 + exhaustion +
   stale-id discard)**.
 - GUI verified by compile + `clippy` (clean) + launch smoke tests
   (debug + release, zero panics). No GUI automation — visual pass is manual.
+
+## Tabs + sessions + autosave (2026-09-10)
+
+- One live session per saved connection (`session.rs` pool keyed by
+  connection id), shared by tabs; each tab binds to a connection via a
+  dropdown in the query header. Sidebar rows eager-connect/disconnect;
+  Run auto-connects lazily. Same-connection tabs share one cursor —
+  superseded tabs are marked exhausted via generation guards.
+- Tab bar (`TabBar` + close `X` + `+`), per-tab editor/grid/meta/error/busy.
+  Tab names auto-derive from first SQL line.
+- Auto-save: debounced (1.5s) drafts to `~/.config/sqlhighland/tabs/<id>.sql`
+  + `tabs.toml` manifest; relaunch restores tabs. No dirty prompts by design.
 
 ## Known limitations / next
 

@@ -20,7 +20,6 @@ impl ConnectionConfig {
     pub fn connect_string(&self) -> String {
         format!("{}:{}/{}", self.host, self.port, self.service_name)
     }
-
     /// Assign a fresh id unless one is already set. Returns whether it changed.
     pub fn ensure_id(&mut self) -> bool {
         if self.id.is_empty() {
@@ -83,6 +82,48 @@ impl QueryResult {
     }
 }
 
+/// Derive a tab label from editor text: first non-empty line, trimmed to
+/// 28 chars. Falls back to the provided default (e.g. `Untitled 3`).
+pub fn tab_name_from_sql(text: &str, fallback: &str) -> String {
+    match text.lines().map(str::trim).find(|l| !l.is_empty()) {
+        Some(line) => {
+            const MAX: usize = 28;
+            if line.chars().count() > MAX {
+                format!("{}…", line.chars().take(MAX).collect::<String>())
+            } else {
+                line.to_string()
+            }
+        }
+        None => fallback.to_string(),
+    }
+}
+
+/// Format one result row as CSV for the clipboard (RFC 4180-style).
+/// SQL NULL becomes empty; fields containing a comma, quote, newline, or
+/// leading/trailing space are quoted with embedded quotes doubled.
+/// No headers, no trailing newline.
+///
+/// Takes borrowed text so both `String`- and `SharedString`-backed rows work
+/// without allocating.
+pub fn csv_row<'a>(cells: impl IntoIterator<Item = Option<&'a str>>) -> String {
+    cells
+        .into_iter()
+        .map(|c| csv_field(c.unwrap_or("")))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn csv_field(value: &str) -> String {
+    if value.contains([',', '"', '\n', '\r'])
+        || value.starts_with([' ', '\t'])
+        || value.ends_with([' ', '\t'])
+    {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,6 +148,41 @@ mod tests {
         assert!(!a.id.is_empty() && !b.id.is_empty() && a.id != b.id);
         // Existing ids are preserved.
         assert!(!a.ensure_id());
+    }
+
+    #[test]
+    fn tab_name_from_first_line() {
+        assert_eq!(tab_name_from_sql("\n  SELECT * FROM users;\nSELECT 2;", "Untitled 1"), "SELECT * FROM users;");
+        assert_eq!(tab_name_from_sql("", "Untitled 1"), "Untitled 1");
+        assert_eq!(tab_name_from_sql("   \n  ", "Untitled 1"), "Untitled 1");
+        let long = "SELECT a_very_long_column_list FROM some_table WHERE x = 1;";
+        assert_eq!(tab_name_from_sql(long, "U"), "SELECT a_very_long_column_li…");
+    }
+
+    #[test]
+    fn csv_row_formats_for_clipboard() {
+        let cells = [
+            Some("42".to_string()),
+            None,
+            Some("plain".to_string()),
+        ];
+        assert_eq!(csv_row(cells.iter().map(|c| c.as_deref())), "42,,plain");
+        assert_eq!(csv_row([] as [Option<&str>; 0]), "");
+        assert_eq!(csv_row([None]), "");
+    }
+
+    #[test]
+    fn csv_row_quotes_special_fields() {
+        let cells = [
+            Some("a,b".to_string()),
+            Some("say \"hi\"".to_string()),
+            Some("line1\nline2".to_string()),
+            Some(" padded ".to_string()),
+        ];
+        assert_eq!(
+            csv_row(cells.iter().map(|c| c.as_deref())),
+            "\"a,b\",\"say \"\"hi\"\"\",\"line1\nline2\",\" padded \""
+        );
     }
 
     #[test]
