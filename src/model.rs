@@ -1,5 +1,34 @@
 use serde::{Deserialize, Serialize};
 
+/// Deployment environment tag for a connection. Purely visual (no behavior
+/// attached): callers map variants to theme colors at render time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Environment {
+    /// No tag; renders nothing. Default so pre-tag entries on disk load clean.
+    #[default]
+    Untagged,
+    Prod,
+    Dev,
+    Qa,
+    Uat,
+}
+
+impl Environment {
+    /// All selectable values, in dialog order.
+    pub const ALL: [Self; 5] = [Self::Untagged, Self::Dev, Self::Qa, Self::Uat, Self::Prod];
+
+    /// Short uppercase label for the tag pill. Untagged has none.
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            Self::Untagged => None,
+            Self::Prod => Some("PROD"),
+            Self::Dev => Some("DEV"),
+            Self::Qa => Some("QA"),
+            Self::Uat => Some("UAT"),
+        }
+    }
+}
+
 /// Connection parameters for a single Oracle database.
 /// Password is stored in plaintext in v1 (see PLAN.md debt note).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,6 +42,9 @@ pub struct ConnectionConfig {
     pub service_name: String,
     pub user: String,
     pub password: String,
+    /// Environment tag. Missing on pre-tag entries; defaults to untagged.
+    #[serde(default)]
+    pub environment: Environment,
 }
 
 impl ConnectionConfig {
@@ -41,6 +73,7 @@ impl Default for ConnectionConfig {
             service_name: "highlandpdb".to_string(),
             user: "system".to_string(),
             password: String::new(),
+            environment: Environment::default(),
         }
     }
 }
@@ -196,5 +229,36 @@ mod tests {
         assert_eq!(r.summary(1000), "2 rows · 12 ms");
         let t = QueryResult { truncated: true, ..r };
         assert_eq!(t.summary(1000), "2 rows · 12 ms · truncated at 1000");
+    }
+
+    #[test]
+    fn environment_labels() {
+        assert_eq!(Environment::Untagged.label(), None);
+        assert_eq!(Environment::Prod.label(), Some("PROD"));
+        assert_eq!(Environment::Dev.label(), Some("DEV"));
+        assert_eq!(Environment::Qa.label(), Some("QA"));
+        assert_eq!(Environment::Uat.label(), Some("UAT"));
+        assert_eq!(Environment::default(), Environment::Untagged);
+        assert_eq!(Environment::ALL.len(), 5);
+    }
+
+    #[test]
+    fn environment_survives_toml_round_trip() {
+        let cfg = ConnectionConfig {
+            environment: Environment::Prod,
+            ..Default::default()
+        };
+        let text = toml::to_string(&cfg).unwrap();
+        let back: ConnectionConfig = toml::from_str(&text).unwrap();
+        assert_eq!(back.environment, Environment::Prod);
+    }
+
+    #[test]
+    fn legacy_toml_without_environment_loads_untagged() {
+        let back: ConnectionConfig = toml::from_str(
+            "id = \"x\"\nname = \"n\"\nhost = \"h\"\nport = 1521\nservice_name = \"s\"\nuser = \"u\"\npassword = \"p\"\n",
+        )
+        .unwrap();
+        assert_eq!(back.environment, Environment::Untagged);
     }
 }

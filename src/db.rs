@@ -31,12 +31,36 @@ pub trait DbClient {
     fn connect(&mut self, cfg: &ConnectionConfig) -> Result<(), DbError>;
     fn is_connected(&self) -> bool;
     fn disconnect(&mut self);
-    fn run_query(&mut self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError>;
+    fn run_query(
+        &mut self,
+        sql: &str,
+        max_rows: usize,
+        binds: &[BindParam],
+    ) -> Result<QueryResult, DbError>;
     /// Execute a non-query statement (DML/DDL/PL/SQL). Returns rows affected.
     /// The driver does not autocommit — call `commit` explicitly.
-    fn exec(&mut self, sql: &str) -> Result<(u64, u128), DbError>;
+    fn exec(&mut self, sql: &str, binds: &[BindParam]) -> Result<(u64, u128), DbError>;
     fn commit(&mut self) -> Result<(), DbError>;
     fn rollback(&mut self) -> Result<(), DbError>;
+}
+
+/// One native bind value. `name` is the placeholder without the colon
+/// (`"id"` for `:id`, `"1"` for `:1`); all values are sent as strings
+/// (VARCHAR2) — SQL Developer parity. Callers wrap with
+/// `TO_NUMBER`/`TO_DATE` for other types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindParam {
+    pub name: String,
+    pub value: String,
+}
+
+impl BindParam {
+    pub fn s(name: &str, value: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            value: value.to_string(),
+        }
+    }
 }
 
 /// Thin-driver session holding one connection plus at most one open cursor.
@@ -73,10 +97,15 @@ impl OracledbSession {
     /// Execute and pull the first page, holding the cursor open for more.
     /// Returns the columns, the first page, and the new generation id.
     /// Supersedes any previously open cursor (it is dropped/closed).
+    /// `Cursor` has no close API in beta.3 — drop is the only release, so a
+    /// superseded server cursor is reaped server-side; the poison-drop in
+    /// [`OracledbSession::pull_locked`] covers a desync mid-flight.
+    /// `binds` are native `:name` values, all sent as VARCHAR2 strings.
     pub fn start_query(
         &mut self,
         sql: &str,
         first_n: usize,
+        binds: &[BindParam],
     ) -> Result<(Vec<ColumnInfo>, FetchPage, u64), DbError> {
         let conn = self
             .conn
@@ -93,7 +122,17 @@ impl OracledbSession {
             }
             None => sql,
         };
-        let cursor = conn.query(sql, &[]).map_err(DbError::from)?;
+        let cursor = query_with_binds(conn, sql, binds).map_err(|e| {
+            // A TTC desync poisons the connection: the driver and server no
+            // longer agree on the response stream, so every later run on this
+            // pooled session would fail too. Drop it; the next run reconnects
+            // fresh (the pool's lazy-connect path). Plain ORA- errors leave
+            // the connection usable and must NOT disconnect.
+            if is_poisoned(&e) {
+                self.disconnect();
+            }
+            DbError::from(e)
+        })?;
 
         let columns: Vec<ColumnInfo> = cursor
             .columns()
@@ -123,6 +162,8 @@ impl OracledbSession {
 
     /// Pull the next page from the open cursor. Stale generations and a
     /// missing connection yield a non-current page the UI must discard.
+    /// Protocol-class fetch failures disconnect the session (see
+    /// [`OracledbSession::pull_locked`]); ORA- errors keep it for retry.
     pub fn fetch_more(&mut self, query_id: u64, n: usize) -> Result<FetchPage, DbError> {        if query_id != self.query_id || self.conn.is_none() {
             return Ok(FetchPage {
                 rows: Vec::new(),
@@ -152,14 +193,20 @@ impl OracledbSession {
     /// Execute a DML/DDL/PL-SQL statement. Returns `(rows_affected, elapsed_ms)`.
     /// Supersedes any open cursor (an execute invalidates server-side state
     /// sibling tabs may be paging through — the UI marks them exhausted).
-    pub fn exec(&mut self, sql: &str) -> Result<(u64, u128), DbError> {
+    /// `binds` are native `:name` values, all sent as VARCHAR2 strings.
+    pub fn exec(&mut self, sql: &str, binds: &[BindParam]) -> Result<(u64, u128), DbError> {
         let conn = self
             .conn
             .as_ref()
             .ok_or_else(|| DbError("not connected".to_string()))?;
         let sql = sanitize_statement(sql)?;
         let started = Instant::now();
-        let result = conn.execute(sql, &[]).map_err(DbError::from)?;
+        let result = exec_with_binds(conn, sql, binds).map_err(|e| {
+            if is_poisoned(&e) {
+                self.disconnect();
+            }
+            DbError::from(e)
+        })?;
         self.cursor = None;
         self.pending = None;
         self.query_id = self.query_id.wrapping_add(1);
@@ -184,35 +231,50 @@ impl OracledbSession {
 
     /// Pull up to `limit` converted rows; probe one extra row to learn
     /// end-of-data without losing it (stashed in `pending`).
+    ///
+    /// A protocol-class fetch failure (TTC desync) poisons the whole session,
+    /// so it is dropped — the next run reconnects fresh. Plain ORA- errors
+    /// keep cursor + connection alive for scroll-to-retry.
     fn pull_locked(&mut self, limit: usize) -> Result<PulledRows, DbError> {
         assert!(limit > 0, "fetch limit must be positive");
-        let cursor = self
-            .cursor
-            .as_mut()
-            .expect("pull_locked with no open cursor");
-        let mut rows: Vec<Vec<Option<String>>> = Vec::new();
-        if let Some(row) = self.pending.take() {
-            rows.push(convert_row(row, &self.columns));
-        }
-        let mut exhausted = false;
-        while rows.len() < limit {
-            match cursor.next() {
-                Some(Ok(row)) => rows.push(convert_row(row, &self.columns)),
-                Some(Err(e)) => return Err(DbError::from(e)),
-                None => {
-                    exhausted = true;
-                    break;
+        let outcome: Result<PulledRows, oracledb::Error> = (|| {
+            let cursor = self
+                .cursor
+                .as_mut()
+                .expect("pull_locked with no open cursor");
+            let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+            if let Some(row) = self.pending.take() {
+                rows.push(convert_row(row, &self.columns));
+            }
+            let mut exhausted = false;
+            while rows.len() < limit {
+                match cursor.next() {
+                    Some(Ok(row)) => rows.push(convert_row(row, &self.columns)),
+                    Some(Err(e)) => return Err(e),
+                    None => {
+                        exhausted = true;
+                        break;
+                    }
                 }
             }
-        }
-        if !exhausted {
-            match cursor.next() {
-                Some(Ok(row)) => self.pending = Some(row),
-                Some(Err(e)) => return Err(DbError::from(e)),
-                None => exhausted = true,
+            if !exhausted {
+                match cursor.next() {
+                    Some(Ok(row)) => self.pending = Some(row),
+                    Some(Err(e)) => return Err(e),
+                    None => exhausted = true,
+                }
+            }
+            Ok((rows, exhausted))
+        })();
+        match outcome {
+            Ok(page) => Ok(page),
+            Err(e) => {
+                if is_poisoned(&e) {
+                    self.disconnect();
+                }
+                Err(DbError::from(e))
             }
         }
-        Ok((rows, exhausted))
     }
 }
 
@@ -270,9 +332,14 @@ impl DbClient for OracledbSession {
 
     /// Convenience for non-incremental callers (and tests): run to `max_rows`
     /// like the old implementation, then close the cursor.
-    fn run_query(&mut self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError> {
+    fn run_query(
+        &mut self,
+        sql: &str,
+        max_rows: usize,
+        binds: &[BindParam],
+    ) -> Result<QueryResult, DbError> {
         let started = Instant::now();
-        let (columns, page, _) = self.start_query(sql, max_rows)?;
+        let (columns, page, _) = self.start_query(sql, max_rows, binds)?;
         self.cursor = None;
         self.pending = None;
         Ok(QueryResult {
@@ -283,8 +350,8 @@ impl DbClient for OracledbSession {
         })
     }
 
-    fn exec(&mut self, sql: &str) -> Result<(u64, u128), DbError> {
-        OracledbSession::exec(self, sql)
+    fn exec(&mut self, sql: &str, binds: &[BindParam]) -> Result<(u64, u128), DbError> {
+        OracledbSession::exec(self, sql, binds)
     }
 
     fn commit(&mut self) -> Result<(), DbError> {
@@ -319,6 +386,18 @@ fn sanitize_statement(sql: &str) -> Result<&str, DbError> {
     }
     Ok(s)
 }
+/// True for SQL*Plus DESCRIBE/DESC commands (client-side, emulated via
+/// `ALL_TAB_COLUMNS`). A describe that returns zero rows means the object is
+/// not visible — every real table has at least one column — so callers show
+/// a not-found hint instead of a bare empty grid.
+pub fn is_describe_statement(sql: &str) -> bool {
+    let mut s = sql.trim();
+    while let Some(stripped) = s.strip_suffix(';') {
+        s = stripped.trim_end();
+    }
+    rewrite_describe(s).is_some()
+}
+
 /// Rewrite SQL*Plus `DESCRIBE`/`DESC <object>` into a query against
 /// `ALL_TAB_COLUMNS`. Returns `None` when the text is not a describe command.
 ///
@@ -424,6 +503,78 @@ fn parse_identifier(s: &str) -> Option<(String, &str)> {
 
 fn escape_literal(s: &str) -> String {
     s.replace('\'', "''")
+}
+
+/// True for protocol-level failures that leave the connection unusable.
+/// A TTC desync means driver and server disagree on the response stream, so
+/// the pooled session must be dropped (next run reconnects fresh). Plain
+/// ORA- server errors are NOT poisoning — the connection stays usable.
+fn is_poisoned(err: &oracledb::Error) -> bool {
+    use oracledb::ErrorKind as K;
+    matches!(
+        err.kind(),
+        K::UnknownTtcMessageType(..)
+            | K::UnknownServerSidePiggyback(..)
+            | K::DeadConnection
+            | K::UnableToRecover
+            | K::UnexpectedError
+    )
+}
+
+/// Run a query with native binds. All-numeric placeholders (`:1`, `:2`) go
+/// through the positional API (ordered by number); anything else uses named
+/// binds. All values are sent as VARCHAR2 strings — SQL Developer parity.
+fn query_with_binds(
+    conn: &oracledb::Connection,
+    sql: &str,
+    binds: &[BindParam],
+) -> Result<oracledb::Cursor, oracledb::Error> {
+    if binds.is_empty() {
+        return conn.query(sql, &[]);
+    }
+    if binds
+        .iter()
+        .all(|b| !b.name.is_empty() && b.name.bytes().all(|c| c.is_ascii_digit()))
+    {
+        let mut ordered = binds.to_vec();
+        ordered.sort_by_key(|b| b.name.parse::<u32>().unwrap_or(u32::MAX));
+        let refs: Vec<&dyn oracledb::ToDbValue> =
+            ordered.iter().map(|b| &b.value as &dyn oracledb::ToDbValue).collect();
+        conn.query(sql, &refs)
+    } else {
+        let refs: Vec<(&str, &dyn oracledb::ToDbValue)> = binds
+            .iter()
+            .map(|b| (b.name.as_str(), &b.value as &dyn oracledb::ToDbValue))
+            .collect();
+        conn.query_named(sql, &refs)
+    }
+}
+
+/// Execute a non-query with native binds (same routing as [`query_with_binds`]).
+fn exec_with_binds(
+    conn: &oracledb::Connection,
+    sql: &str,
+    binds: &[BindParam],
+) -> Result<oracledb::ExecResult, oracledb::Error> {
+    if binds.is_empty() {
+        return conn.execute(sql, &[]);
+    }
+    if binds
+        .iter()
+        .all(|b| !b.name.is_empty() && b.name.bytes().all(|c| c.is_ascii_digit()))
+    {
+        let mut ordered = binds.to_vec();
+        ordered.sort_by_key(|b| b.name.parse::<u32>().unwrap_or(u32::MAX));
+        let refs: Vec<&dyn oracledb::ToDbValue> =
+            ordered.iter().map(|b| &b.value as &dyn oracledb::ToDbValue).collect();
+        conn.execute(sql, &refs)
+    } else {
+        let refs: Vec<(&str, &dyn oracledb::ToDbValue)> = binds
+            .iter()
+            .map(|b| (b.name.as_str(), &b.value as &dyn oracledb::ToDbValue))
+            .collect();
+        conn.execute_named(sql, &refs)
+    }
 }
 
 /// Convert one owned row to display cells.
@@ -562,6 +713,16 @@ mod tests {
         assert_eq!(sanitize_statement("SELECT ';' FROM dual;").unwrap(), "SELECT ';' FROM dual");
         assert!(sanitize_statement("   ;  ").is_err());
         assert!(sanitize_statement("").is_err());
+    }
+
+    #[test]
+    fn describe_statement_detects_client_commands() {
+        assert!(is_describe_statement("DESCRIBE emp"));
+        assert!(is_describe_statement("  desc scott.emp;  "));
+        assert!(is_describe_statement("describe \"MixedCase\";;"));
+        assert!(!is_describe_statement("SELECT 1 FROM dual"));
+        assert!(!is_describe_statement("describe emp extra"));
+        assert!(!is_describe_statement("descending"));
     }
 
     #[test]

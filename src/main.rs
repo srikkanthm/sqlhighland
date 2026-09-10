@@ -32,10 +32,30 @@ fn main() {
         // the view constructor. This makes the binding active before any
         // editor/input key context is focused.
         cx.bind_keys([KeyBinding::new("cmd-,", app::OpenSettings, None)]);
+        cx.bind_keys([KeyBinding::new("cmd-q", app::Quit, None)]);
+        cx.on_action(|_: &app::Quit, cx: &mut App| {
+            // Drafts and connections persist continuously, so there is
+            // nothing unsaved to confirm — quit immediately.
+            cx.quit();
+        });
+        // Native application menu. Without this macOS installs no menu bar
+        // entry at all, which is why ⌘Q previously did nothing: there was
+        // no Quit item to invoke. Key equivalents render from the keymap.
+        cx.set_menus(vec![Menu {
+            name: "SQLHighland".into(),
+            items: vec![
+                MenuItem::action("Preferences…", app::OpenSettings),
+                MenuItem::Separator,
+                MenuItem::action("Quit", app::Quit),
+            ],
+            disabled: false,
+        }]);
 
         let window_options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1100.), px(780.)), cx)),
-            ..Default::default()
+            // Custom title bar rendered by the app (themed) instead of the
+            // native one (which follows the OS appearance, not app themes).
+            ..TitleBar::window_options()
         };
 
         cx.spawn(async move |cx| {

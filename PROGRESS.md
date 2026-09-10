@@ -111,12 +111,17 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
    and the execute path carries its generation id out of the bg task instead
    of locking on the UI thread.
 - **Settings + themes** — `⌘,` (or the sidebar gear) opens a Settings dialog
-  with a flat theme list (System + Default/Nord/Catppuccin-Latte-Frappé-
-  Macchiato-Mocha/Solarized light+dark). Picks apply immediately via the
-  kit's own apply-then-switch order and persist to `preferences.toml`;
+  built on the kit's Settings shell: sidebar nav with **Themes** (flat list —
+  System + Default/Nord/Catppuccin-Latte-Frappé-Macchiato-Mocha/Solarized
+  light+dark) and **About** (version, driver note, config file locations)
+  sections, ready for more pages. Picks apply immediately via the kit's own
+  apply-then-switch order and persist to `preferences.toml`;
   System follows the OS via a window appearance observer. Legacy
   family+mode pref files migrate to their concrete variant. All hardcoded
   UI colors migrated to theme tokens, so every family renders correctly.
+  Custom `TitleBar` (kit component + `TitleBar::window_options()`) replaces
+  the native macOS bar, which follows the OS appearance instead of app
+  themes; it sits atop the main column and re-renders with the view.
   Repaint root cause, found via the retained-render model: GPUI only
   re-renders dirty views, and the dialog refactor had dropped the only
   `notify()` on the main view — self-notifying entities (editor, grid)

@@ -8,9 +8,12 @@
 //! Blocking Oracle calls run on the background executor; the view is only
 //! ever mutated on the UI thread.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use gpui_kit::base::SelectableText;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{
     Editor, EditorState, Input, InputContentType, InputEvent, InputState,
@@ -18,6 +21,9 @@ use gpui_kit::component::input::{
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
 use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::setting::{
+    RenderOptions, SettingGroup, SettingItem, SettingPage, Settings,
+};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::*;
@@ -25,11 +31,14 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use gpui_kit_assets::IconName as KitIcon;
 use sqlhighland::config::{Preferences, SavedConfig, SavedTab, TabsManifest, THEME_LIST};
-use sqlhighland::db::{FETCH_CAP, FETCH_CHUNK, DbClient, FetchPage, OracledbSession};
-use sqlhighland::model::{ColumnInfo, ConnectionConfig, csv_row, tab_name_from_sql};
+use sqlhighland::db::{
+    BindParam, FETCH_CAP, FETCH_CHUNK, DbClient, FetchPage, OracledbSession, is_describe_statement,
+};
+use sqlhighland::model::{ColumnInfo, ConnectionConfig, Environment, csv_row, tab_name_from_sql};
 use sqlhighland::session::SessionPool;
 use sqlhighland::sql::{
-    StatementKind, exec_summary, format_sql, is_dml, statement_at, statement_kind, txn_end,
+    StatementKind, SubVar, apply_substitutions, exec_summary, find_bind_vars,
+    find_substitution_vars, format_sql, is_dml, statement_at, statement_kind, txn_end,
 };
 
 const DEFAULT_SQL: &str = "SELECT user, sysdate FROM dual;";
@@ -44,7 +53,8 @@ gpui_kit::actions!(
         FormatQuery,
         CommitTxn,
         RollbackTxn,
-        OpenSettings
+        OpenSettings,
+        Quit
     ]
 );
 
@@ -458,6 +468,92 @@ pub fn app_view(cx: &App) -> Option<Entity<SqlHighlandView>> {
     AppView::global(cx).0.upgrade()
 }
 
+/// A run deferred for variable input: the statement plus the variables that
+/// still need values. Only one bind dialog opens at a time.
+#[derive(Debug, Clone)]
+struct PendingBind {
+    tab_id: String,
+    sql: String,
+    subs: Vec<SubVar>,
+    binds: Vec<String>,
+}
+
+/// One row in the variables dialog: `&name` substitution or `:name` bind.
+struct BindField {
+    /// Display key: `&name` or `:name`.
+    key: String,
+    /// Variable name without prefix.
+    name: String,
+    /// True for substitution (`&`), false for bind (`:`).
+    is_sub: bool,
+    input: Entity<InputState>,
+}
+
+/// Read every dialog field and submit the run. Shared by the Run button and
+/// the dialog's Enter-to-confirm (`on_ok`) so both paths behave identically.
+/// Blank fields block submission: the error slot is filled (shown in the
+/// dialog on rebuild) and false is returned so the dialog stays open.
+fn submit_bind_fields(
+    view: &WeakEntity<SqlHighlandView>,
+    fields: &std::rc::Rc<Vec<BindField>>,
+    error: &std::rc::Rc<std::cell::RefCell<Option<String>>>,
+    cx: &mut App,
+) -> bool {
+    let mut sub_values: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut bind_values: Vec<BindParam> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    for f in fields.iter() {
+        let v = f.input.read(cx).value().to_string();
+        if v.trim().is_empty() {
+            missing.push(f.key.clone());
+            continue;
+        }
+        if f.is_sub {
+            sub_values.insert(f.name.clone(), v);
+        } else {
+            bind_values.push(BindParam {
+                name: f.name.clone(),
+                value: v,
+            });
+        }
+    }
+    if !missing.is_empty() {
+        *error.borrow_mut() = Some(format!("Value required: {}", missing.join(", ")));
+        // Rebuild the dialog so the message paints; the builder never moves
+        // anything out, so this notify is crash-safe (see env-tag fix).
+        view.update(cx, |_, cx| cx.notify()).ok();
+        return false;
+    }
+    *error.borrow_mut() = None;
+    view.update(cx, |this, cx| {
+        this.submit_bind_dialog(sub_values, bind_values, cx);
+    })
+    .ok();
+    true
+}
+
+/// Return keyboard focus to the tab's editor so the next Cmd+Enter works
+/// immediately after the dialog closes (no reliance on focus-restore alone).
+fn focus_tab_editor(
+    view: &WeakEntity<SqlHighlandView>,
+    tab_id: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let editor = view.upgrade().and_then(|v| {
+        v.read(cx)
+            .tabs
+            .iter()
+            .find(|t| t.id == tab_id)
+            .map(|t| t.editor.clone())
+    });
+    if let Some(editor) = editor {
+        let handle = editor.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+    }
+}
+
 pub struct SqlHighlandView {
     pool: SessionPool,
     /// Connection ids with a live pooled session. The ONLY liveness signal
@@ -473,6 +569,10 @@ pub struct SqlHighlandView {
     sidebar_collapsed: bool,
     /// Index being edited in the connection dialog (`None` = adding).
     editing: Option<usize>,
+    /// Pending environment tag for the open connection dialog. Set by
+    /// start_add/start_edit, mutated by the dialog's pill row, read by save.
+    /// (Only one connection dialog opens at a time, like `editing`.)
+    pending_env: Environment,
     // Dialog form fields (entities persist across dialog open/close).
     name: Entity<InputState>,
     host: Entity<InputState>,
@@ -482,6 +582,11 @@ pub struct SqlHighlandView {
     password: Entity<InputState>,
     /// Transient notice for the status bar ("Saved X", "Connecting…").
     status: SharedString,
+    /// `&&name` values defined this session, per connection id. Once defined,
+    /// even `&name` reuses the value without prompting (SQL*Plus parity).
+    defines: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    /// Run waiting on the bind dialog (cleared on submit or cancel).
+    pending_bind: Option<PendingBind>,
     /// Window-lifetime subscriptions (OS appearance observer for System
     /// theme mode). Kept alive by ownership, like per-tab `_subs`.
     _subs: Vec<Subscription>,
@@ -528,6 +633,7 @@ impl SqlHighlandView {
             untitled_counter: 0,
             sidebar_collapsed: false,
             editing: None,
+            pending_env: Environment::default(),
             name,
             host,
             port,
@@ -535,6 +641,8 @@ impl SqlHighlandView {
             user,
             password,
             status: "".into(),
+            defines: std::collections::HashMap::new(),
+            pending_bind: None,
             _subs: Vec::new(),
         };
         // Follow the OS appearance while the theme mode is System. The
@@ -649,9 +757,9 @@ impl SqlHighlandView {
             .map(|p| p.exists())
             .unwrap_or(false);
         for saved in manifest.tabs {
-            let connection_id = saved
-                .connection_id
-                .filter(|cid| self.connections.iter().any(|c| &c.id == cid));
+            // Always start unbound after a restart so the user explicitly
+            // picks a connection per tab; editor text still restores.
+            let connection_id = None;
             let text = TabsManifest::read_draft(&saved.id);
             self.untitled_counter += 1;
             let name = if saved.name.is_empty() {
@@ -662,19 +770,16 @@ impl SqlHighlandView {
             self.make_tab(saved.id, name, connection_id, text, window, cx);
         }
         if self.tabs.is_empty() {
-            // First launch (or empty manifest): one starter tab.
+            // First launch (or empty manifest): one starter tab, unbound so
+            // the user explicitly picks a connection.
             let text = if manifest_existed {
                 String::new()
             } else {
                 DEFAULT_SQL.to_string()
             };
-            self.add_tab(self.active_connection(), text, window, cx);
+            self.add_tab(None, text, window, cx);
         }
         self.active = 0;
-    }
-
-    fn active_connection(&self) -> Option<String> {
-        self.tabs.get(self.active).and_then(|t| t.connection_id.clone())
     }
 
     fn add_tab(
@@ -802,6 +907,7 @@ impl SqlHighlandView {
             service_name: self.service.read(cx).value().to_string(),
             user: self.user.read(cx).value().to_string(),
             password: self.password.read(cx).value().to_string(),
+            environment: self.pending_env,
         }
     }
 
@@ -833,7 +939,20 @@ impl SqlHighlandView {
 
     fn start_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.editing = None;
-        self.fill_form(&ConnectionConfig::default(), window, cx);
+        self.pending_env = Environment::Untagged;
+        // Blank form: text fields empty, standard Oracle port kept.
+        self.fill_form(
+            &ConnectionConfig {
+                name: String::new(),
+                host: String::new(),
+                port: 1521,
+                service_name: String::new(),
+                user: String::new(),
+                ..Default::default()
+            },
+            window,
+            cx,
+        );
         self.open_connection_dialog("Add connection", window, cx);
     }
 
@@ -844,6 +963,7 @@ impl SqlHighlandView {
         let title = format!("Edit {}", self.connections[ix].name);
         self.editing = Some(ix);
         let cfg = self.connections[ix].clone();
+        self.pending_env = cfg.environment;
         self.fill_form(&cfg, window, cx);
         self.open_connection_dialog(&title, window, cx);
     }
@@ -865,77 +985,138 @@ impl SqlHighlandView {
         if window.has_active_dialog(cx) {
             return;
         }
-        let prefs = Preferences::load();
         // Owned for the 'static dialog builder below.
         let view = view.clone();
         window.open_dialog(cx, move |dialog, _, cx| {
             let muted = cx.theme().muted_foreground;
             let hover_bg = cx.theme().accent;
-            // Live applied selection: reopening the dialog after a pick must
-            // show the new name — if it doesn't, applying (not repainting)
-            // is broken.
-            let active = format!("Active: {}", prefs.theme_name());
-            let current = prefs.theme_name();
-            let mut theme_rows = Vec::new();
-            for (row_ix, name) in THEME_LIST.into_iter().enumerate() {
-                let selected = name == current;
-                let id = ("settings-theme", row_ix);
-                let row_view = view.clone();
-                theme_rows.push(
-                    div()
-                        .id(id)
-                        .w_full()
-                        .p_2()
-                        .rounded_md()
-                        .hover(move |this| this.bg(hover_bg))
-                        .on_click(move |_, window, cx| {
-                            let view = row_view.clone();
-                            view.update(cx, |_, cx| {
-                                let mut prefs = Preferences::load();
-                                prefs.theme = name.to_string();
-                                let _ = prefs.save();
-                                crate::guitheme::apply_preferences(&prefs, Some(window), cx);
-                                // Full view re-render: GPUI only repaints
-                                // dirty views, and window refreshes alone
-                                // reuse cached ones. Root too: its background
-                                // paints behind the transparent sidebar/status.
-                                cx.notify();
-                                gpui_kit::component::Root::update(
-                                    window,
-                                    cx,
-                                    |_, _, cx| cx.notify(),
-                                );
+            // Reloaded on every rebuild so the check mark follows the
+            // selection while the dialog stays open.
+            let current = Preferences::load().theme_name();
+            let theme_list_view = view.clone();
+            let theme_list = move |_: &RenderOptions, _: &mut Window, _: &mut App| {
+                let mut rows = Vec::new();
+                for (row_ix, name) in THEME_LIST.into_iter().enumerate() {
+                    let selected = name == current;
+                    let id = ("settings-theme", row_ix);
+                    let row_view = theme_list_view.clone();
+                    rows.push(
+                        div()
+                            .id(id)
+                            .w_full()
+                            .p_2()
+                            .rounded_md()
+                            .hover(move |this| this.bg(hover_bg))
+                            .on_click(move |_, window, cx| {
+                                let view = row_view.clone();
+                                view.update(cx, |_, cx| {
+                                    let mut prefs = Preferences::load();
+                                    prefs.theme = name.to_string();
+                                    let _ = prefs.save();
+                                    crate::guitheme::apply_preferences(&prefs, Some(window), cx);
+                                    // Full view re-render: GPUI only repaints
+                                    // dirty views, and window refreshes alone
+                                    // reuse cached ones. Root too: its background
+                                    // paints behind the transparent sidebar/status.
+                                    cx.notify();
+                                    gpui_kit::component::Root::update(
+                                        window,
+                                        cx,
+                                        |_, _, cx| cx.notify(),
+                                    );
                             });
                             window.refresh();
-                            window.close_dialog(cx);
                         })
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(div().flex_1().text_sm().child(name))
-                                .when(selected, |this| {
-                                    this.child(
-                                        div()
-                                            .text_color(muted)
-                                            .child(KitIcon::Check),
-                                    )
-                                }),
-                        )
-                        .into_any_element(),
-                );
-            }
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(div().flex_1().text_sm().child(name))
+                                    .when(selected, |this| {
+                                        this.child(
+                                            div()
+                                                .text_color(muted)
+                                                .child(KitIcon::Check),
+                                        )
+                                    }),
+                            )
+                            .into_any_element(),
+                    );
+                }
+                v_flex().gap_1().children(rows)
+            };
             dialog
                 .title("Settings")
-                .w(px(340.))
+                .w(px(640.))
                 .child(
-                    v_flex()
-                        .gap_2()
-                        .w_full()
-                        .child(div().text_xs().text_color(muted).child("Applies immediately."))
-                        .child(div().text_xs().text_color(muted).child(active))
-                        .child(div().text_xs().text_color(muted).child("Theme"))
-                        .child(v_flex().gap_1().children(theme_rows)),
+                    div().w_full().h(px(440.)).child(
+                        Settings::new("sqlhighland-settings").pages(vec![
+                            SettingPage::new("Themes")
+                                .icon(KitIcon::Palette)
+                                .groups(vec![SettingGroup::new().title("Appearance").items(
+                                    vec![SettingItem::render(theme_list)],
+                                )]),
+                            SettingPage::new("About")
+                                .icon(KitIcon::Info)
+                                .groups(vec![SettingGroup::new().title("About").items(vec![
+                                    SettingItem::render(move |_, _, _| {
+                                        v_flex().gap_1().child(
+                                            div().text_sm().child(format!(
+                                                "SQLHighland {} — Oracle SQL client",
+                                                env!("CARGO_PKG_VERSION")
+                                            )),
+                                        )
+                                    }),
+                                    SettingItem::render(move |_, _, _| {
+                                        v_flex().gap_1().child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(muted)
+                                                .child(
+                                                    "Oracle-only GUI client built with Rust \
+                                                     and GPUI, using the official thin driver \
+                                                     (no Oracle Client required).",
+                                                ),
+                                        )
+                                    }),
+                                    SettingItem::render(move |_, _, _| {
+                                        v_flex().gap_1().children(
+                                            [
+                                                ("Connections", SavedConfig::default_path()),
+                                                ("Preferences", Preferences::path()),
+                                                (
+                                                    "Tabs",
+                                                    TabsManifest::manifest_path(),
+                                                ),
+                                            ]
+                                            .into_iter()
+                                            .map(|(label, path)| {
+                                                div()
+                                                    .child(
+                                                        div().text_xs().child(label),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(muted)
+                                                            .child(
+                                                                path.map(|p| {
+                                                                    p.to_string_lossy()
+                                                                        .into_owned()
+                                                                })
+                                                                .unwrap_or_else(|_| {
+                                                                    "unknown".to_string()
+                                                                }),
+                                                            ),
+                                                    )
+                                                    .into_any_element()
+                                            })
+                                            .collect::<Vec<_>>(),
+                                        )
+                                    }),
+                                ])]),
+                        ]),
+                    ),
                 )
                 .footer(
                     h_flex()
@@ -961,9 +1142,17 @@ impl SqlHighlandView {
             self.user.clone(),
             self.password.clone(),
         );
+        // Dialog-local copy of the env tag. The dialog builder re-runs on every
+        // render, so it must NOT touch the view entity here (that double-leases
+        // and aborts). Click handlers (safe, outside render) sync the cell back
+        // to `pending_env` and notify to rebuild with the new highlight.
+        let pending_cell: Rc<RefCell<Environment>> = Rc::new(RefCell::new(self.pending_env));
         window.open_dialog(cx, move |dialog, _, cx| {
             let save_view = view.clone();
+            let pending = pending_cell.clone();
             let muted = cx.theme().muted_foreground;
+            // Fresh each rebuild so the picked pill highlights live.
+            let current_env = *pending.borrow();
             dialog
                 .title(title.clone())
                 .w(px(400.))
@@ -984,7 +1173,73 @@ impl SqlHighlandView {
                                 ),
                         )
                         .child(dialog_field("User", &user, false, muted))
-                        .child(dialog_field("Password", &password, true, muted)),
+                        .child(dialog_field("Password", &password, true, muted))
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child("Environment"),
+                                )
+                                .child(
+                                    h_flex().gap_1().children(
+                                        Environment::ALL.iter().enumerate().map(|(ix, env)| {
+                                            let selected =
+                                                current_env == *env;
+                                            let row_view = save_view.clone();
+                                            let pending_click = pending.clone();
+                                            let (label, text_color, bg) = match env_color(
+                                                *env, cx,
+                                            ) {
+                                                Some(color) => (
+                                                    env.label().unwrap_or("").to_string(),
+                                                    color,
+                                                    if selected {
+                                                        color.opacity(0.25)
+                                                    } else {
+                                                        color.opacity(0.0)
+                                                    },
+                                                ),
+                                                None => (
+                                                    "None".to_string(),
+                                                    muted,
+                                                    if selected {
+                                                        muted.opacity(0.25)
+                                                    } else {
+                                                        muted.opacity(0.0)
+                                                    },
+                                                ),
+                                            };
+                                            div()
+                                                .id(("conn-env", ix))
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_md()
+                                                .cursor_pointer()
+                                                .bg(bg)
+                                                .text_xs()
+                                                .text_color(text_color)
+                                                .hover(move |this| {
+                                                    this.bg(text_color.opacity(0.25))
+                                                })
+                                                .on_click(
+                                                    move |_, _, cx: &mut App| {
+                                                        *pending_click.borrow_mut() = *env;
+                                                        row_view
+                                                            .update(cx, |this, cx| {
+                                                                this.pending_env = *env;
+                                                                cx.notify();
+                                                            })
+                                                            .ok();
+                                                    },
+                                                )
+                                                .child(label)
+                                        }),
+                                    ),
+                                ),
+                        ),
                 )
                 .footer(
                     h_flex()
@@ -1100,6 +1355,25 @@ impl SqlHighlandView {
                     WorkOutcome::Failed(msg) => {
                         this.live.remove(&conn_id);
                         this.status = format!("Connection failed: {msg}").into();
+                        // Popup in addition to the status line: a failed
+                        // connect deserves an explicit surface.
+                        let name = this
+                            .connections
+                            .iter()
+                            .find(|c| c.id == conn_id)
+                            .map(|c| c.name.clone())
+                            .unwrap_or_default();
+                        let msg: SharedString = format!("{name}: {msg}").into();
+                        if let Some(handle) = cx.windows().into_iter().next() {
+                            let _ = handle.update(cx, |_, window, cx| {
+                                window.open_alert_dialog(cx, move |alert, _, _| {
+                                    alert
+                                        .icon(KitIcon::TriangleAlert)
+                                        .title("Connection failed")
+                                        .description(msg.clone())
+                                });
+                            });
+                        }
                     }
                 }
                 cx.notify();
@@ -1141,7 +1415,7 @@ impl SqlHighlandView {
         match statement_at(&text, cursor) {
             Some(sql) => {
                 let tab_id = self.active_tab().id.clone();
-                self.run_sql(&tab_id, sql, cx);
+                self.start_run(&tab_id, sql, window, cx);
             }
             None => {
                 let ix = self.active;
@@ -1151,7 +1425,279 @@ impl SqlHighlandView {
         }
     }
 
-    fn run_sql(&mut self, tab_id: &str, sql: String, cx: &mut Context<Self>) {
+    /// Entry point for a run: checks the connection binding, detects `&`/`&&`
+    /// substitution variables and `:binds`, and either runs directly or opens
+    /// the variables dialog first.
+    fn start_run(
+        &mut self,
+        tab_id: &str,
+        sql: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.tab_index(tab_id) else {
+            return;
+        };
+        // Connection check first so we never prompt for variables just to
+        // then error "Select a connection for this tab".
+        let conn_id = match self.tabs[ix].connection_id.clone() {
+            Some(id) => id,
+            None => {
+                self.tabs[ix].output = Some(Output::error("Select a connection for this tab"));
+                cx.notify();
+                return;
+            }
+        };
+        if self.tabs[ix].busy {
+            return;
+        }
+        let sub_vars = find_substitution_vars(&sql);
+        let bind_names = find_bind_vars(&sql);
+        // `&&`-defined values (and any re-reference of them via `&`) reuse
+        // without prompting, like SQL*Plus.
+        let defined: std::collections::HashMap<String, String> = self
+            .defines
+            .get(&conn_id)
+            .cloned()
+            .unwrap_or_default();
+        let subs_needed: Vec<SubVar> = sub_vars
+            .into_iter()
+            .filter(|v| !defined.contains_key(&v.name))
+            .collect();
+        if subs_needed.is_empty() && bind_names.is_empty() {
+            let final_sql = apply_substitutions(&sql, &defined);
+            self.run_sql(tab_id, final_sql, Vec::new(), cx);
+            return;
+        }
+        self.pending_bind = Some(PendingBind {
+            tab_id: tab_id.to_string(),
+            sql,
+            subs: subs_needed,
+            binds: bind_names,
+        });
+        self.open_bind_dialog(window, cx);
+    }
+
+    /// Variables dialog: one blank field per `&name` / `:name` (always blank,
+    /// no memory). Builder-safe: everything the dialog renders is cloned in —
+    /// the builder never touches the view entity (see env-tag crash fix).
+    fn open_bind_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_bind.clone() else {
+            return;
+        };
+        let mut fields: Vec<BindField> = Vec::new();
+        for sub in &pending.subs {
+            let prefix = if sub.double { "&&" } else { "&" };
+            let input = cx.new(|cx| {
+                InputState::new(window, cx).placeholder(format!("Value for {prefix}{}", sub.name))
+            });
+            fields.push(BindField {
+                key: format!("&{}", sub.name),
+                name: sub.name.clone(),
+                is_sub: true,
+                input,
+            });
+        }
+        for b in &pending.binds {
+            let input = cx.new(|cx| {
+                InputState::new(window, cx).placeholder(format!("Value for :{b}"))
+            });
+            fields.push(BindField {
+                key: format!(":{b}"),
+                name: b.clone(),
+                is_sub: false,
+                input,
+            });
+        }
+        // Short single-line preview so users know what they're feeding.
+        let preview: SharedString = {
+            let flat: String = pending.sql.split_whitespace().collect::<Vec<_>>().join(" ");
+            const CAP: usize = 200;
+            if flat.len() > CAP {
+                format!("{}…", flat.chars().take(CAP).collect::<String>()).into()
+            } else {
+                flat.into()
+            }
+        };
+        let view = cx.entity().downgrade();
+        let title: SharedString = if pending.subs.is_empty() {
+            "Enter binds".into()
+        } else if pending.binds.is_empty() {
+            "Enter substitution variables".into()
+        } else {
+            "Enter variables".into()
+        };
+        // Shared across builder re-runs (the dialog rebuilds every render):
+        // the builder is `Fn`, so nothing may be moved out of it.
+        let fields: Rc<Vec<BindField>> = Rc::new(fields);
+        // Validation message slot, dialog-local like the env-tag pill state:
+        // submit handlers write it and notify; the builder only reads it,
+        // so the view entity is never touched during render (no double-lease).
+        let submit_error: Rc<std::cell::RefCell<Option<String>>> =
+            Rc::new(std::cell::RefCell::new(None));
+        // Keyboard flow: focus the first field on open so typing + Enter
+        // works without touching the mouse. (Focusing a handle before its
+        // element mounts is fine — GPUI resolves it on render.)
+        let first_input = fields.first().map(|f| f.input.clone());
+        let tab_id = pending.tab_id.clone();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let fields = fields.clone();
+            let submit_error = submit_error.clone();
+            let muted = cx.theme().muted_foreground;
+            let danger = cx.theme().danger;
+            let mut body = v_flex().gap_2().w_full();
+            body = body.child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(format!("{} variable(s)", fields.len())),
+            );
+            // Substitution section first, then binds (fields already ordered).
+            for (fx, f) in fields.iter().enumerate() {
+                let section = if f.is_sub { "& substitution" } else { ": bind" };
+                body = body.child(
+                    v_flex().gap_1().child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("{} · {}", f.key, section)),
+                    ).child(Input::new(&f.input).w_full()),
+                );
+                let _ = fx;
+            }
+            if let Some(err) = submit_error.borrow().clone() {
+                body = body.child(div().text_xs().text_color(danger).child(err));
+            }
+            body = body.child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(format!("Statement: {preview}")),
+            );
+            let ok_view = view.clone();
+            let ok_fields = fields.clone();
+            let ok_err = submit_error.clone();
+            let ok_tab = tab_id.clone();
+            let cancel_view_ok = view.clone();
+            let cancel_tab_ok = tab_id.clone();
+            let cancel_view_btn = view.clone();
+            let cancel_tab_btn = tab_id.clone();
+            let run_view = view.clone();
+            let run_fields = fields.clone();
+            let run_err = submit_error.clone();
+            let run_tab = tab_id.clone();
+            dialog
+                .title(title.clone())
+                .w(px(440.))
+                .child(body)
+                // Enter confirms (the kit binds `enter` → Confirm in the
+                // dialog context; single-line inputs don't consume it, so it
+                // bubbles here). False keeps the dialog open on empty fields.
+                .on_ok(move |_, window, cx: &mut App| {
+                    if submit_bind_fields(&ok_view, &ok_fields, &ok_err, cx) {
+                        focus_tab_editor(&ok_view, &ok_tab, window, cx);
+                        true
+                    } else {
+                        false
+                    }
+                })
+                // Escape cancels: drop the deferred run and refocus.
+                .on_cancel(move |_, window, cx: &mut App| {
+                    cancel_view_ok
+                        .update(cx, |this, cx| {
+                            this.pending_bind = None;
+                            cx.notify();
+                        })
+                        .ok();
+                    focus_tab_editor(&cancel_view_ok, &cancel_tab_ok, window, cx);
+                    true
+                })
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .child(div().flex_1())
+                        .child(Button::new("bind-cancel").label("Cancel").on_click(
+                            move |_, window, cx: &mut App| {
+                                cancel_view_btn
+                                    .update(cx, |this, cx| {
+                                        this.pending_bind = None;
+                                        cx.notify();
+                                    })
+                                    .ok();
+                                window.close_dialog(cx);
+                                focus_tab_editor(&cancel_view_btn, &cancel_tab_btn, window, cx);
+                            },
+                        ))
+                        .child(
+                            Button::new("bind-run").primary().label("Run").on_click(
+                                move |_, window, cx: &mut App| {
+                                    if submit_bind_fields(&run_view, &run_fields, &run_err, cx) {
+                                        window.close_dialog(cx);
+                                        focus_tab_editor(&run_view, &run_tab, window, cx);
+                                    }
+                                },
+                            ),
+                        ),
+                )
+        });
+        // Focus after opening (open_dialog focuses the dialog layer; the
+        // field must win so keystrokes land in it).
+        if let Some(input) = first_input {
+            let handle = input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
+    }
+
+    /// Run-button handler: stores `&&` values in the session defines, applies
+    /// substitution, and launches the run with native binds.
+    fn submit_bind_dialog(
+        &mut self,
+        sub_values: std::collections::HashMap<String, String>,
+        bind_values: Vec<BindParam>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self.pending_bind.take() else {
+            return;
+        };
+        let Some(ix) = self.tab_index(&pending.tab_id) else {
+            return;
+        };
+        let conn_id = match self.tabs[ix].connection_id.clone() {
+            Some(id) => id,
+            None => {
+                self.tabs[ix].output =
+                    Some(Output::error("Select a connection for this tab"));
+                cx.notify();
+                return;
+            }
+        };
+        // Persist `&&` values for the session; `&`-only values are one-shot.
+        {
+            let entry = self.defines.entry(conn_id).or_default();
+            for sub in &pending.subs {
+                if sub.double {
+                    if let Some(v) = sub_values.get(&sub.name) {
+                        entry.insert(sub.name.clone(), v.clone());
+                    }
+                }
+            }
+            // Full map = previously defined + just-entered.
+            let mut full = entry.clone();
+            for (k, v) in &sub_values {
+                full.insert(k.clone(), v.clone());
+            }
+            let final_sql = apply_substitutions(&pending.sql, &full);
+            self.run_sql(&pending.tab_id, final_sql, bind_values, cx);
+        }
+    }
+
+    fn run_sql(
+        &mut self,
+        tab_id: &str,
+        sql: String,
+        binds: Vec<BindParam>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(ix) = self.tab_index(tab_id) else {
             return;
         };
@@ -1243,14 +1789,14 @@ impl SqlHighlandView {
                         StatementKind::Query => {
                             let inner = std::time::Instant::now();
                             session
-                                .start_query(&sql, FETCH_CHUNK)
+                                .start_query(&sql, FETCH_CHUNK, &binds)
                                 .map(|(columns, page, id)| {
                                     Outcome::Rows(columns, page, id, inner.elapsed().as_millis())
                                 })
                                 .map_err(|e| e.to_string())
                         }
                         StatementKind::Execute => session
-                            .exec(&sql)
+                            .exec(&sql, &binds)
                             .map(|(affected, ms)| {
                                 // Read while holding the bg lock: locking the
                                 // session on the UI thread would block repaints
@@ -1276,6 +1822,14 @@ impl SqlHighlandView {
                 this.tabs[ix].run_started = None;
                 match outcome {
                     Ok(Outcome::Rows(columns, page, query_id, elapsed_ms)) => {
+                        // A DESCRIBE with zero rows means the object isn't
+                        // visible (real tables always have columns) — say so
+                        // instead of showing a bare empty grid.
+                        if page.rows.is_empty() && is_describe_statement(&sql_label) {
+                            this.tabs[ix].output = Some(Output::info(
+                                "Table not found or no access — DESCRIBE returned no columns",
+                            ));
+                        }
                         let fetch = Arc::new(FetchState {
                             session: session.clone(),
                             query_id,
@@ -1503,14 +2057,16 @@ impl SqlHighlandView {
     fn render_connection_row(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let cfg = &self.connections[ix];
         let is_live = self.live.contains(&cfg.id);
-        let dot = if is_live { cx.theme().success } else { cx.theme().muted_foreground };
         let view = cx.entity().downgrade();
         let conn_id = cfg.id.clone();
         div()
             .id(("conn-row", ix))
             .w_full()
-            .p_2()
             .rounded_md()
+            // Live rows get a success-tinted background so the active
+            // connection reads at a glance, not just via the status bar.
+            .when(is_live, |this| this.bg(cx.theme().success.opacity(0.12)))
+            .hover(|this| this.bg(cx.theme().accent.opacity(0.5)))
             .context_menu(move |menu, _, _| {
                 let connect_label = if is_live { "Disconnect" } else { "Connect" };
                 let connect_icon = if is_live { KitIcon::Unplug } else { KitIcon::Plug };
@@ -1527,36 +2083,157 @@ impl SqlHighlandView {
             .child(
                 h_flex()
                     .gap_2()
-                    .items_center()
-                    .child(div().size(px(8.)).rounded_full().bg(dot))
+                    .items_stretch()
+                    .px_2()
+                    .py_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(KitIcon::Database),
+                    )
                     .child(
                         v_flex()
                             .flex_1()
-                            .child(div().text_sm().child(cfg.name.clone()))
+                            .min_w_0()
+                            .justify_center()
+                            // Truncate (not clip): long names/details collapse
+                            // to an ellipsis when the pane shrinks instead of
+                            // overflowing or pushing the layout.
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_sm()
+                                            .truncate()
+                                            .child(cfg.name.clone()),
+                                    )
+                                    .when_some(env_tag(cfg.environment, cx), |this, tag| {
+                                        this.child(tag)
+                                    }),
+                            )
                             .child(
                                 div()
                                     .text_xs()
+                                    .truncate()
                                     .text_color(cx.theme().muted_foreground)
                                     .child(format!("{}@{}/{}", cfg.user, cfg.host, cfg.service_name)),
                             ),
-                    ),
+                    )
+                    // Status bar: the live indicator — success green when
+                    // connected, faint border tone when idle.
+                    .child(div().w(px(3.)).rounded_full().bg(
+                        if is_live {
+                            cx.theme().success
+                        } else {
+                            cx.theme().border
+                        },
+                    )),
             )
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         if self.sidebar_collapsed {
-            return div()
+            // Slim rail: connections stay visible (and status-readable) even
+            // with the pane closed. Clicking anything here expands; all
+            // connection actions live in the full pane's context menu.
+            return v_flex()
                 .w(px(44.))
                 .h_full()
                 .border_r_1()
                 .border_color(cx.theme().border)
                 .items_center()
                 .p_1()
+                .gap_1()
                 .child(
                     Button::new("expand")
                         .icon(KitIcon::PanelLeftOpen)
                         .ghost()
+                        .small()
+                        .tooltip("Expand connections")
                         .on_click(cx.listener(Self::toggle_sidebar)),
+                )
+                .child(
+                    Button::new("rail-add")
+                        .icon(KitIcon::Plus)
+                        .ghost()
+                        .small()
+                        .tooltip("Add connection")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.start_add(window, cx);
+                        })),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .w_full()
+                        .min_h_0()
+                        .overflow_y_scrollbar()
+                        .child(
+                            v_flex()
+                                .w_full()
+                                .items_center()
+                                .gap_1()
+                                .children(self.connections.iter().enumerate().map(
+                                    |(ix, cfg)| {
+                                        let is_live = self.live.contains(&cfg.id);
+                                        let view = cx.entity().downgrade();
+                                        let conn_id = cfg.id.clone();
+                                        div()
+                                            .id(("conn-rail-wrap", ix))
+                                            .context_menu(move |menu, _, _| {
+                                                let connect_label = if is_live { "Disconnect" } else { "Connect" };
+                                                let connect_icon = if is_live { KitIcon::Unplug } else { KitIcon::Plug };
+                                                let connect_op = if is_live {
+                                                    ConnMenuOp::Disconnect
+                                                } else {
+                                                    ConnMenuOp::Connect
+                                                };
+                                                menu.item(conn_menu_item(connect_label, connect_icon, view.clone(), conn_id.clone(), connect_op))
+                                                    .item(conn_menu_item("Edit…", KitIcon::SquarePen, view.clone(), conn_id.clone(), ConnMenuOp::Edit))
+                                                    .separator()
+                                                    .item(conn_menu_item("Delete", KitIcon::X, view.clone(), conn_id.clone(), ConnMenuOp::Delete))
+                                            })
+                                            .child(
+                                        Button::new(("conn-rail", ix))
+                                            .icon(KitIcon::Database)
+                                            .ghost()
+                                            .small()
+                                            .tooltip(format!(
+                                                "{}{} — {}@{}/{}{}",
+                                                cfg.environment
+                                                    .label()
+                                                    .map(|e| format!("[{e}] "))
+                                                    .unwrap_or_default(),
+                                                cfg.name,
+                                                cfg.user,
+                                                cfg.host,
+                                                cfg.service_name,
+                                                if is_live { " (connected)" } else { "" }
+                                            ))
+                                            .when(is_live, |b| {
+                                                b.bg(cx.theme().success.opacity(0.15))
+                                            })
+                                            .on_click(cx.listener(Self::toggle_sidebar))
+                                    )
+                                    },
+                                )),
+                        ),
+                )
+                .child(
+                    Button::new("rail-settings")
+                        .icon(KitIcon::Settings)
+                        .ghost()
+                        .small()
+                        .tooltip("Settings (⌘,)")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.open_settings(window, cx);
+                        })),
                 )
                 .into_any_element();
         }
@@ -1566,49 +2243,91 @@ impl SqlHighlandView {
             .child(
                 h_flex()
                     .gap_1()
-                    .p_2()
+                    .px_2()
+                    .py_1()
                     .items_center()
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    .child(div().flex_1().text_sm().child("Connections"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .truncate()
+                            .child(format!("Connections ({})", self.connections.len())),
+                    )
                     .child(
                         Button::new("collapse")
                             .icon(KitIcon::PanelLeftClose)
                             .ghost()
+                            .small()
                             .on_click(cx.listener(Self::toggle_sidebar)),
-                    )
-                    .child(
-                        Button::new("add")
-                            .icon(KitIcon::Plus)
-                            .ghost()
-                            .tooltip("Add connection")
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.start_add(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("settings")
-                            .icon(KitIcon::Settings)
-                            .ghost()
-                            .tooltip("Settings (⌘,)")
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.open_settings(window, cx);
-                            })),
                     ),
+            )
+            .child(
+                div().w_full().px_1().pt_1().child(
+                    div()
+                        .id("add-connection-row")
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .text_color(cx.theme().muted_foreground)
+                        .hover(|this| this.bg(cx.theme().accent.opacity(0.5)))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.start_add(window, cx);
+                        }))
+                        .child(KitIcon::Plus)
+                        .child(div().text_sm().child("Add New Connection")),
+                ),
             )
             .child(
                 div()
                     .flex_1()
                     .w_full()
+                    .min_w_0()
                     .overflow_y_scrollbar()
-                    .p_2()
-                    .child(
+                    .p_1()
+                    .child(if self.connections.is_empty() {
+                        div()
+                            .w_full()
+                            .p_2()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("No connections yet — click + to add one.")
+                            .into_any_element()
+                    } else {
                         v_flex()
                             .gap_1()
                             .children(
                                 (0..self.connections.len())
                                     .map(|ix| self.render_connection_row(ix, cx)),
-                            ),
+                            )
+                            .into_any_element()
+                    }),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .px_1()
+                    .pb_1()
+                    .pt_1()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        Button::new("settings-labeled")
+                            .icon(KitIcon::Settings)
+                            .ghost()
+                            .small()
+                            .label("Settings")
+                            .tooltip("Settings (⌘,)")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.open_settings(window, cx);
+                            })),
                     ),
             )
             .into_any_element()
@@ -1643,8 +2362,7 @@ impl SqlHighlandView {
                     .small()
                     .tooltip("New tab")
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        let conn = this.active_connection();
-                        this.add_tab(conn, String::new(), window, cx);
+                        this.add_tab(None, String::new(), window, cx);
                     })),
             )
     }
@@ -1657,6 +2375,12 @@ impl SqlHighlandView {
             .as_deref()
             .map(|cid| self.live.contains(cid))
             .unwrap_or(false);
+        let tab_env = tab
+            .connection_id
+            .as_deref()
+            .and_then(|cid| self.connections.iter().find(|c| c.id == cid))
+            .map(|c| c.environment)
+            .unwrap_or(Environment::Untagged);
         let view = cx.entity().downgrade();
         let tab_id = tab.id.clone();
         let current_conn = tab.connection_id.clone();
@@ -1708,6 +2432,7 @@ impl SqlHighlandView {
                         menu
                     }),
             )
+            .when_some(env_tag(tab_env, cx), |this, tag| this.child(tag))
     }
 
     fn render_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1761,6 +2486,7 @@ impl SqlHighlandView {
                     })
                     .child(
                         Button::new("commit")
+                            .success()
                             .icon(KitIcon::Check)
                             .label("Commit")
                             .tooltip("Commit transaction (⇧⌘C)")
@@ -1770,6 +2496,7 @@ impl SqlHighlandView {
                     )
                     .child(
                         Button::new("rollback")
+                            .danger()
                             .icon(KitIcon::Undo2)
                             .label("Rollback")
                             .tooltip("Roll back transaction (⇧⌘R)")
@@ -1779,6 +2506,7 @@ impl SqlHighlandView {
                     )
                     .child(
                         Button::new("format")
+                            .secondary()
                             .icon(KitIcon::WandSparkles)
                             .label("Format")
                             .tooltip("Format SQL (⇧⌥F)")
@@ -1844,6 +2572,8 @@ impl SqlHighlandView {
     fn render_output_pane(&self, tab: &QueryTab, cx: &mut Context<Self>) -> impl IntoElement {
         let output = tab.output.clone().unwrap_or(Output::info(""));
         let tab_id = tab.id.clone();
+        let copy_text = output.text.clone();
+        let select_id = tab.id.clone();
         let is_error = output.kind == OutputKind::Error;
         let (accent, title, icon, bg) = if is_error {
             (
@@ -1869,6 +2599,17 @@ impl SqlHighlandView {
                     .child(div().text_sm().text_color(accent).child(title))
                     .child(div().flex_1())
                     .child(
+                        Button::new("output-copy")
+                            .ghost()
+                            .small()
+                            .icon(KitIcon::Copy)
+                            .label("Copy")
+                            .tooltip("Copy the full message")
+                            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy_text.to_string()));
+                            })),
+                    )
+                    .child(
                         Button::new("output-dismiss")
                             .ghost()
                             .small()
@@ -1893,7 +2634,12 @@ impl SqlHighlandView {
                     .bg(bg)
                     .text_sm()
                     .text_color(cx.theme().foreground)
-                    .child(output.text),
+                    // Drag-selectable message (Cmd+C via the window
+                    // selection layer) plus the header Copy button.
+                    .child(SelectableText::new(
+                        format!("output-text-{select_id}"),
+                        output.text.clone(),
+                    )),
             )
     }
 
@@ -1996,6 +2742,35 @@ fn render_tab_table(table: &Entity<TableState<ResultsDelegate>>) -> impl IntoEle
         .child(DataTable::new(table).xsmall())
 }
 
+/// Theme color for an environment, or `None` when untagged.
+fn env_color(env: Environment, cx: &App) -> Option<Hsla> {
+    match env {
+        Environment::Untagged => None,
+        Environment::Prod => Some(cx.theme().danger),
+        Environment::Dev => Some(cx.theme().success),
+        Environment::Qa => Some(cx.theme().warning),
+        Environment::Uat => Some(cx.theme().info),
+    }
+}
+
+/// Environment tag pill. Returns `None` for untagged connections so callers
+/// can drop it into trees with `.when_some(...)`. Colors come from theme
+/// tokens, so tags adapt to light/dark like everything else.
+fn env_tag(env: Environment, cx: &App) -> Option<AnyElement> {
+    let label = env.label()?;
+    let color = env_color(env, cx)?;
+    Some(
+        div()
+            .px_1()
+            .rounded_md()
+            .bg(color.opacity(0.15))
+            .text_xs()
+            .text_color(color)
+            .child(label)
+            .into_any_element(),
+    )
+}
+
 fn dialog_field(
     label: impl Into<SharedString>,
     state: &Entity<InputState>,
@@ -2044,7 +2819,12 @@ impl Render for SqlHighlandView {
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_settings(window, cx);
             }))
-            .child(content)
+            .child(
+                v_flex()
+                    .size_full()
+                    .child(TitleBar::new().child("SQLHighland"))
+                    .child(div().flex_1().min_h_0().child(content)),
+            )
             .children(Root::render_dialog_layer(window, cx))
     }
 }
