@@ -1,0 +1,34 @@
+[package]
+name = "sqlhighland"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+
+[dependencies]
+# Official Oracle thin driver (pure Rust, no Instant Client). Beta — expect API churn.
+oracledb = "26.0.0-beta.3"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+# Stable ids for saved connections.
+uuid = { version = "1", features = ["v4"] }
+# SQL formatter (https://github.com/shssoichiro/sqlformat-rs).
+sqlformat = "=0.5.0"
+# GUI deps are optional so DB logic + tests build without the Metal toolchain.
+# Registry pins: gpui-pre 0.3.4 (zed snapshot) + gpui-kit 0.6.1 (components).
+# gpui-kit re-exports gpui; keep both pins on the same 0.3.x line.
+gpui = { package = "gpui-pre", version = "=0.3.4", optional = true }
+# `tree-sitter-sql` bundles the SQL grammar for editor highlighting.
+# (Without a grammar feature the Editor falls back to plain text.)
+gpui-kit = { version = "=0.6.1", optional = true, features = ["tree-sitter-sql"] }
+gpui-kit-assets = { version = "=0.6.1", optional = true }
+
+[features]
+default = []
+# Build/run the desktop app with: cargo run --features gui
+gui = ["dep:gpui", "dep:gpui-kit", "dep:gpui-kit-assets"]
+
+[[bin]]
+name = "sqlhighland"
+path = "src/main.rs"
+required-features = ["gui"]
