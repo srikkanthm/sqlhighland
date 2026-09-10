@@ -45,6 +45,10 @@ use sqlhighland::sql::{
 const DEFAULT_SQL: &str = "SELECT user, sysdate FROM dual;";
 /// Quiet period before an editor change is flushed to its draft file.
 const DRAFT_DEBOUNCE: Duration = Duration::from_millis(1500);
+/// Fixed width for the header action buttons so Run/Commit/Rollback/Format
+/// (and Cancel/Export) render identical regardless of label length. Sized to
+/// fit the longest label ("Rollback") with icon at small size.
+const ACTION_BUTTON_W: f32 = 104.0;
 
 gpui_kit::actions!(
     sqlhighland,
@@ -3223,8 +3227,6 @@ impl SqlHighlandView {
                 h_flex()
                     .gap_2()
                     .items_center()
-                    .child(self.render_connection_picker(cx))
-                    .child(div().flex_1())
                     .when(pending, |this| {
                         this.child(
                             h_flex()
@@ -3240,8 +3242,23 @@ impl SqlHighlandView {
                         )
                     })
                     .child(
+                        Button::new("run")
+                            .primary()
+                            .small()
+                            .w(px(ACTION_BUTTON_W))
+                            .icon(KitIcon::Play)
+                            .label("Run")
+                            .tooltip("Run statement at cursor (⌘↵)")
+                            .loading(tab.busy)
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.run_at_cursor(window, cx);
+                            })),
+                    )
+                    .child(
                         Button::new("commit")
                             .success()
+                            .small()
+                            .w(px(ACTION_BUTTON_W))
                             .icon(KitIcon::Check)
                             .label("Commit")
                             .tooltip("Commit transaction (⇧⌘C)")
@@ -3252,6 +3269,8 @@ impl SqlHighlandView {
                     .child(
                         Button::new("rollback")
                             .danger()
+                            .small()
+                            .w(px(ACTION_BUTTON_W))
                             .icon(KitIcon::Undo2)
                             .label("Rollback")
                             .tooltip("Roll back transaction (⇧⌘R)")
@@ -3262,6 +3281,8 @@ impl SqlHighlandView {
                     .child(
                         Button::new("format")
                             .secondary()
+                            .small()
+                            .w(px(ACTION_BUTTON_W))
                             .icon(KitIcon::WandSparkles)
                             .label("Format")
                             .tooltip("Format SQL (⇧⌥F)")
@@ -3269,45 +3290,6 @@ impl SqlHighlandView {
                                 this.format_now(window, cx);
                             })),
                     )
-                    .child(
-                        Button::new("run")
-                            .primary()
-                            .icon(KitIcon::Play)
-                            .label("Run")
-                            .tooltip("Run statement at cursor (⌘↵)")
-                            .loading(tab.busy)
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.run_at_cursor(window, cx);
-                            })),
-                    )
-                    .child({
-                        let view = cx.entity().downgrade();
-                        let tab_id = tab.id.clone();
-                        Button::new("export")
-                            .outline()
-                            .small()
-                            .icon(KitIcon::Download)
-                            .label("Export")
-                            .tooltip("Export all result rows to CSV or Excel")
-                            .dropdown_menu(move |menu, _, _| {
-                                let mut menu = menu;
-                                for fmt in [ExportFormat::Csv, ExportFormat::Xlsx] {
-                                    let view = view.clone();
-                                    let tab_id = tab_id.clone();
-                                    menu = menu.item(
-                                        PopupMenuItem::new(fmt.label()).on_click(
-                                            move |_, window, cx| {
-                                                view.update(cx, |this, cx| {
-                                                    this.start_export(&tab_id, fmt, window, cx);
-                                                })
-                                                .ok();
-                                            },
-                                        ),
-                                    );
-                                }
-                                menu
-                            })
-                    })
                     .when(tab.busy || tab.exporting, |this| {
                         let tab_id = tab.id.clone();
                         let exporting = tab.exporting;
@@ -3319,6 +3301,8 @@ impl SqlHighlandView {
                         this.child(
                             Button::new("cancel-run")
                                 .danger()
+                                .small()
+                                .w(px(ACTION_BUTTON_W))
                                 .icon(KitIcon::X)
                                 .label("Cancel")
                                 .tooltip(tip)
@@ -3330,7 +3314,9 @@ impl SqlHighlandView {
                                     }
                                 })),
                         )
-                    }),
+                    })
+                    .child(div().flex_1())
+                    .child(self.render_connection_picker(cx)),
             )
             .child(
                 div()
@@ -3350,12 +3336,54 @@ impl SqlHighlandView {
         } else {
             let view = cx.entity().downgrade();
             let tab_id = tab.id.clone();
-            div()
+            let exp_view = view.clone();
+            let exp_tab = tab.id.clone();
+            v_flex()
                 .flex_1()
                 .min_w_0()
                 .overflow_hidden()
-                .p_2()
-                .context_menu(move |menu, _, _| {
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_end()
+                        .px_2()
+                        .pt_2()
+                        .pb_1()
+                        .child(
+                            Button::new("export")
+                                .outline()
+                                .small()
+                                .w(px(ACTION_BUTTON_W))
+                                .icon(KitIcon::Download)
+                                .label("Export")
+                                .tooltip("Export all result rows to CSV or Excel")
+                                .dropdown_menu(move |menu, _, _| {
+                                    let mut menu = menu;
+                                    for fmt in [ExportFormat::Csv, ExportFormat::Xlsx] {
+                                        let view = exp_view.clone();
+                                        let tab_id = exp_tab.clone();
+                                        menu = menu.item(
+                                            PopupMenuItem::new(fmt.label()).on_click(
+                                                move |_, window, cx| {
+                                                    view.update(cx, |this, cx| {
+                                                        this.start_export(&tab_id, fmt, window, cx);
+                                                    })
+                                                    .ok();
+                                                },
+                                            ),
+                                        );
+                                    }
+                                    menu
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .p_2()
+                        .context_menu(move |menu, _, _| {
                     let mut menu = menu;
                     for fmt in [ExportFormat::Csv, ExportFormat::Xlsx] {
                         let view = view.clone();
@@ -3371,7 +3399,8 @@ impl SqlHighlandView {
                     }
                     menu
                 })
-                .child(render_tab_table(&tab.table))
+                .child(render_tab_table(&tab.table)),
+                )
                 .into_any_element()
         }
     }
@@ -3505,17 +3534,31 @@ impl SqlHighlandView {
 
     fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
         let tab = self.active_tab();
-        let body: AnyElement = if !tab.has_result && tab.output.is_none() {
+        // Fresh tab (never ran, no output): editor takes the full height —
+        // no empty bottom pane. Once anything runs, the resizable
+        // editor/results split appears and stays.
+        let fresh = !tab.has_result && tab.output.is_none();
+        let content: AnyElement = if fresh {
             div()
                 .flex_1()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("Connect, then run a query to see results here.")
+                .min_h_0()
+                .child(self.render_editor(cx))
                 .into_any_element()
         } else {
-            self.render_results(tab, cx).into_any_element()
+            let body: AnyElement = match tab.output.is_some() {
+                true => self.render_output_pane(tab, cx).into_any_element(),
+                false => self.render_results(tab, cx).into_any_element(),
+            };
+            v_resizable("query-split")
+                .child(
+                    resizable_panel()
+                        .size(px(300.))
+                        .size_range(px(160.)..px(900.))
+                        .flex_none()
+                        .child(self.render_editor(cx)),
+                )
+                .child(body)
+                .into_any_element()
         };
 
         v_flex()
@@ -3532,17 +3575,7 @@ impl SqlHighlandView {
                 this.cycle_tab(-1, window, cx);
             }))
             .child(self.render_tab_bar(cx))
-            .child(
-                v_resizable("query-split")
-                    .child(
-                        resizable_panel()
-                            .size(px(300.))
-                            .size_range(px(160.)..px(900.))
-                            .flex_none()
-                            .child(self.render_editor(cx)),
-                    )
-                    .child(body),
-            )
+            .child(content)
             .child(self.render_status_bar(cx))
             .into_any_element()
     }
