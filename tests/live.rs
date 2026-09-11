@@ -198,3 +198,62 @@ fn live_ddl_dml_commit_rollback() {
     s2.exec("BEGIN NULL; END;", &[]).expect("plsql");
     s2.exec(&format!("DROP TABLE {table}"), &[]).expect("drop");
 }
+
+#[test]
+fn live_dictionary_feeds_autocomplete() {
+    // The metadata cache fetchers behind autocomplete: tables/views,
+    // DUAL's columns, and sequences must all return rows on highlandpdb.
+    use sqlhighland::metadata::{
+        fetch_columns_blocking, fetch_sequences_blocking, fetch_tables_blocking,
+    };
+    let mut s = OracledbSession::new();
+    s.connect(&cfg()).expect("connect");
+    let tables = fetch_tables_blocking(&mut s, true, "").expect("tables");
+    assert!(!tables.is_empty(), "all_tables/all_views should be non-empty");
+    let cols = fetch_columns_blocking(&mut s, true, "").expect("columns");
+    let dual = cols
+        .get(&("SYS".to_string(), "DUAL".to_string()))
+        .expect("SYS.DUAL columns");
+    assert_eq!(dual.len(), 1);
+    assert_eq!(dual[0].name, "DUMMY");
+    // Sequences may legitimately be empty on a fresh PDB — just run it.
+    let seqs = fetch_sequences_blocking(&mut s, true, "").expect("sequences");
+    println!("dict: {} tables, {} seqs", tables.len(), seqs.len());
+    // System filter: unfiltered must cover the filtered set, and DUAL's
+    // SYS owner must drop out of the filtered tables.
+    let tables_f = fetch_tables_blocking(&mut s, false, "").expect("filtered tables");
+    assert!(tables_f.len() < tables.len());
+    assert!(tables_f.iter().all(|t| t.owner != "SYS"));
+    let cols_f = fetch_columns_blocking(&mut s, false, "").expect("filtered columns");
+    assert!(!cols_f.contains_key(&("SYS".to_string(), "DUAL".to_string())));
+}
+
+#[test]
+fn live_fk_fetch_groups_keys() {
+    use sqlhighland::metadata::fetch_fks_blocking;
+    let mut s = OracledbSession::new();
+    s.connect(&cfg()).expect("connect");
+    let (parent, child) = ("sh_fk_parent", "sh_fk_child");
+    let _ = s.exec(&format!("DROP TABLE {child}"), &[]);
+    let _ = s.exec(&format!("DROP TABLE {parent}"), &[]);
+    s.exec(&format!("CREATE TABLE {parent} (id NUMBER, id2 NUMBER, CONSTRAINT {parent}_pk PRIMARY KEY (id, id2))"), &[])
+        .expect("create parent");
+    s.exec(
+        &format!(
+            "CREATE TABLE {child} (id NUMBER, pid NUMBER, pid2 NUMBER, \
+             CONSTRAINT {child}_fk FOREIGN KEY (pid, pid2) REFERENCES {parent}(id, id2))"
+        ),
+        &[],
+    )
+    .expect("create child");
+    let fks = fetch_fks_blocking(&mut s, true, "").expect("fks");
+    let fk = fks
+        .iter()
+        .find(|f| f.name == format!("{child}_fk").to_ascii_uppercase())
+        .expect("composite fk fetched");
+    assert_eq!(fk.from_table, child.to_ascii_uppercase());
+    assert_eq!(fk.from_cols, vec!["PID", "PID2"]);
+    assert_eq!(fk.to_cols, vec!["ID", "ID2"]);
+    s.exec(&format!("DROP TABLE {child}"), &[]).expect("drop child");
+    s.exec(&format!("DROP TABLE {parent}"), &[]).expect("drop parent");
+}

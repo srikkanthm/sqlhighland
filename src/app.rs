@@ -17,7 +17,7 @@ use gpui_kit::base::SelectableText;
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{
-    Editor, EditorState, Input, InputContentType, InputEvent, InputState,
+    CompletionProvider, Editor, EditorState, Input, InputContentType, InputEvent, InputState,
 };
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
@@ -31,11 +31,20 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use gpui_kit_assets::IconName as KitIcon;
-use crate::config::{Preferences, SavedConfig, SavedTab, TabsManifest, THEME_LIST};
+use crate::complete::{
+    Candidate, CandidateKind, CompleteContext, ForeignKey, build_alias_map, byte_to_lsp_pos,
+    classify_context, detect_join_on, is_trivia_position, is_system_schema,
+    join_condition_candidates, rank_candidates, resolve_qualifier, word_prefix, ORACLE_KEYWORDS,
+};
+use crate::config::{CompleteMode, Preferences, SavedConfig, SavedTab, TabsManifest, THEME_LIST};
 use crate::db::{
     BindParam, FETCH_CAP, FETCH_CHUNK, DbClient, FetchPage, OracledbSession, is_describe_statement,
 };
 use crate::export::{XlsxBuilder, csv_header_line, csv_line, sheet_name};
+use crate::metadata::{
+    MetadataCache, SharedCache, fetch_columns_blocking, fetch_fks_blocking,
+    fetch_sequences_blocking, fetch_tables_blocking,
+};
 use crate::model::{ColumnInfo, ConnectionConfig, Environment, csv_row, tab_name_from_sql};
 use crate::session::SessionPool;
 use crate::sql::{
@@ -62,9 +71,62 @@ gpui_kit::actions!(
         OpenSettings,
         Quit,
         NextTab,
-        PrevTab
+        PrevTab,
+        TriggerComplete
     ]
 );
+
+/// Max popup rows per request (ranking already orders them best-first).
+const COMPLETE_LIMIT: usize = 100;
+
+/// Oracle suggestion provider for one tab. Holds only a weak view handle +
+/// tab id and resolves everything live (connection, cache snapshot, prefs),
+/// so tab rebinding needs no reinstall.
+struct OracleCompleter {
+    view: WeakEntity<SqlHighlandView>,
+    tab_id: String,
+}
+
+impl CompletionProvider for OracleCompleter {
+    fn completions(
+        &self,
+        text: &Rope,
+        offset: usize,
+        _trigger: lsp_types::CompletionContext,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<lsp_types::CompletionResponse>> {
+        // NOTE: the editor entity is mutably leased for the whole trigger
+        // path (`handle_completion_trigger` runs inside its update), so this
+        // must NEVER read the editor entity — only the passed-in Rope plus
+        // view-owned state (different entity, safe to touch).
+        let snapshot = text.to_string();
+        let out = self.view.update(cx, |this, _| {
+            this.completion_items_for(&self.tab_id, &snapshot, offset, false)
+        });
+        match out {
+            Ok((items, _, _)) => Task::ready(Ok(lsp_types::CompletionResponse::Array(items))),
+            Err(_) => Task::ready(Ok(lsp_types::CompletionResponse::Array(Vec::new()))),
+        }
+    }
+
+    fn is_completion_trigger(&self, _offset: usize, new_text: &str, cx: &mut App) -> bool {
+        // Same lease rule as above: view-owned flag only, no editor access.
+        // Shape-gating (prefix length, dot, trivia) happens in completions(),
+        // which owns the full buffer text.
+        let last = new_text.chars().last();
+        let wordy = last.is_some_and(|c| {
+            c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '#'
+        });
+        if last != Some('.') && !wordy {
+            return false;
+        }
+        // Manual mode: the shortcut path presents directly; never auto-fire.
+        self.view
+            .update(cx, |this, _| this.complete_auto)
+            .unwrap_or(false)
+    }
+}
 
 /// Buffered query data shared between the view and the table delegate.
 /// Rows only ever grow; a new query swaps in a fresh [`FetchState`].
@@ -873,6 +935,17 @@ pub struct SqlHighlandView {
     pending_bind: Option<PendingBind>,
     /// Run waiting on the connection picker (cleared on pick or cancel).
     pending_pick: Option<PendingPick>,
+    /// Dictionary snapshots per connection id for autocomplete. Filled on
+    /// the background executor; the provider only clones the `Arc`.
+    meta: std::collections::HashMap<String, SharedCache>,
+    /// Usage counts `(connection_id, UPPER_LABEL)` bumping executed table
+    /// names; feeds completion ranking (recency/frequency boost).
+    usage: std::collections::HashMap<(String, String), u64>,
+    /// Suggestion popup fires while typing (vs manual shortcut only).
+    /// Mirrors `Preferences.completion`; toggled in Settings.
+    complete_auto: bool,
+    /// Include SYS/SYSTEM/etc. objects in suggestions. Mirrors preferences.
+    show_system: bool,
     /// Window-lifetime subscriptions (OS appearance observer for System
     /// theme mode). Kept alive by ownership, like per-tab `_subs`.
     _subs: Vec<Subscription>,
@@ -914,7 +987,11 @@ impl SqlHighlandView {
         // and the grid alike; nothing in the kit binds ctrl-tab.
         cx.bind_keys([KeyBinding::new("ctrl-tab", NextTab, None)]);
         cx.bind_keys([KeyBinding::new("ctrl-shift-tab", PrevTab, None)]);
+        // Manual completion trigger (Zed-style); auto-popup is governed by
+        // the completion preference in `is_completion_trigger`.
+        cx.bind_keys([KeyBinding::new("ctrl-space", TriggerComplete, Some("Input"))]);
 
+        let prefs = Preferences::load();
         let mut this = Self {
             pool: SessionPool::new(),
             live: std::collections::HashSet::new(),
@@ -935,6 +1012,10 @@ impl SqlHighlandView {
             defines: std::collections::HashMap::new(),
             pending_bind: None,
             pending_pick: None,
+            meta: std::collections::HashMap::new(),
+            usage: std::collections::HashMap::new(),
+            complete_auto: prefs.completion == CompleteMode::Auto,
+            show_system: prefs.show_system_schemas,
             _subs: Vec::new(),
         };
         // Follow the OS appearance while the theme mode is System. The
@@ -990,6 +1071,18 @@ impl SqlHighlandView {
                 .language("sql")
                 .default_value(text)
         });
+        // Suggestion provider: popup/keyboard rendering is automatic once
+        // installed; candidates resolve live per tab (connection + cache).
+        {
+            let completer = OracleCompleter {
+                view: cx.entity().downgrade(),
+                tab_id: id.clone(),
+            };
+            editor.update(cx, |editor, _| {
+                editor.lsp_mut().completion_provider =
+                    Some(Rc::new(completer) as Rc<dyn CompletionProvider>);
+            });
+        }
         let table = cx.new(|cx| {
             TableState::new(ResultsDelegate::empty(), window, cx).cell_selectable(true)
         });
@@ -1048,10 +1141,12 @@ impl SqlHighlandView {
     }
 
     fn restore_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let manifest = TabsManifest::load().unwrap_or_default();
+        // Corrupt manifests are renamed aside (never silently defaulted —
+        // the next persist would otherwise overwrite them permanently).
         let manifest_existed = TabsManifest::manifest_path()
             .map(|p| p.exists())
             .unwrap_or(false);
+        let manifest = TabsManifest::load_preserving();
         for saved in manifest.tabs {
             // Always start unbound after a restart so the user explicitly
             // picks a connection per tab; editor text still restores.
@@ -1065,6 +1160,21 @@ impl SqlHighlandView {
             };
             self.make_tab(saved.id, name, connection_id, text, window, cx);
         }
+        // Adopt orphaned drafts: `.sql` files with no manifest entry are
+        // leftovers of a lost manifest — restore them as tabs rather than
+        // abandoning the user's queries.
+        let known: std::collections::HashSet<String> =
+            self.tabs.iter().map(|t| t.id.clone()).collect();
+        let orphans = TabsManifest::orphan_drafts(&known);
+        let adopted = !orphans.is_empty();
+        if adopted {
+            self.status = format!("Recovered {} tab(s) from unsaved drafts", orphans.len()).into();
+        }
+        for (id, text) in orphans {
+            self.untitled_counter += 1;
+            let name = tab_name_from_sql(&text, &format!("Untitled {}", self.untitled_counter));
+            self.make_tab(id, name, None, text, window, cx);
+        }
         if self.tabs.is_empty() {
             // First launch (or empty manifest): one starter tab, unbound so
             // the user explicitly picks a connection.
@@ -1074,6 +1184,9 @@ impl SqlHighlandView {
                 DEFAULT_SQL.to_string()
             };
             self.add_tab(None, text, window, cx);
+        } else if adopted {
+            // Manifest now matches the adopted set on disk.
+            self.persist_tabs();
         }
         self.active = 0;
     }
@@ -1351,6 +1464,59 @@ impl SqlHighlandView {
                 }
                 v_flex().gap_1().children(rows)
             };
+            // Reloaded on every rebuild so check marks follow live prefs.
+            let current_mode = Preferences::load().completion;
+            let show_system = Preferences::load().show_system_schemas;
+            let complete_view = view.clone();
+            let system_view = view.clone();
+            // Row helper: label + sublabel + check mark, click applies.
+            let complete_row = move |ix: usize,
+                                    label: &str,
+                                    sub: &str,
+                                    selected: bool,
+                                    apply: CompleteMode,
+                                    view: Entity<SqlHighlandView>| {
+                let row_view = view.clone();
+                div()
+                    .id(("settings-complete", ix))
+                    .w_full()
+                    .p_2()
+                    .rounded_md()
+                    .hover(move |this| this.bg(hover_bg))
+                    .on_click(move |_, _, cx| {
+                        row_view.update(cx, |this, cx| {
+                            let mut prefs = Preferences::load();
+                            prefs.completion = apply;
+                            let _ = prefs.save();
+                            this.complete_auto = apply == CompleteMode::Auto;
+                            cx.notify();
+                        });
+                    })
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .child(div().text_sm().child(label.to_string()))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(sub.to_string()),
+                                    ),
+                            )
+                            .when(selected, |this| {
+                                this.child(
+                                    div().text_color(muted).child(KitIcon::Check),
+                                )
+                            }),
+                    )
+                    .into_any_element()
+            };
+            let system_selected = show_system;
+            let system_view_outer = system_view.clone();
             dialog
                 .title("Settings")
                 .w(px(640.))
@@ -1362,6 +1528,99 @@ impl SqlHighlandView {
                                 .groups(vec![SettingGroup::new().title("Appearance").items(
                                     vec![SettingItem::render(theme_list)],
                                 )]),
+                            SettingPage::new("Editor")
+                                .icon(KitIcon::SquarePen)
+                                .groups(vec![SettingGroup::new()
+                                    .title("Suggestions")
+                                    .items(vec![
+                                        SettingItem::render(move |_, _, _| {
+                                            v_flex().gap_1().children([
+                                                complete_row(
+                                                    0,
+                                                    "Automatic",
+                                                    "Popup while typing (Ctrl+Space also works)",
+                                                    current_mode == CompleteMode::Auto,
+                                                    CompleteMode::Auto,
+                                                    complete_view.clone(),
+                                                ),
+                                                complete_row(
+                                                    1,
+                                                    "Manual",
+                                                    "Popup only on Ctrl+Space",
+                                                    current_mode == CompleteMode::Manual,
+                                                    CompleteMode::Manual,
+                                                    complete_view.clone(),
+                                                ),
+                                            ])
+                                        }),
+                                        SettingItem::render(move |_, _, _| {
+                                            let system_row_view = system_view_outer.clone();
+                                            v_flex().gap_1().child(
+                                                div()
+                                                    .id("settings-system-schemas")
+                                                    .w_full()
+                                                    .p_2()
+                                                    .rounded_md()
+                                                    .hover(move |this| this.bg(hover_bg))
+                                                    .on_click(move |_, _, cx| {
+                                                        system_row_view.update(
+                                                            cx,
+                                                            |this, cx| {
+                                                                let mut prefs =
+                                                                    Preferences::load();
+                                                                prefs.show_system_schemas =
+                                                                    !prefs.show_system_schemas;
+                                                                let _ = prefs.save();
+                                                                this.show_system =
+                                                                    prefs.show_system_schemas;
+                                                                // Scope changed: drop caches so
+                                                                // the next trigger refetches
+                                                                // with the new filter.
+                                                                for cache in this.meta.values() {
+                                                                    if let Ok(mut c) =
+                                                                        cache.lock()
+                                                                    {
+                                                                        c.fetched_at = None;
+                                                                    }
+                                                                }
+                                                                cx.notify();
+                                                            },
+                                                        );
+                                                    })
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_2()
+                                                            .items_center()
+                                                            .child(
+                                                                v_flex()
+                                                                    .flex_1()
+                                                                    .child(
+                                                                        div()
+                                                                            .text_sm()
+                                                                            .child(
+                                                                                "Show system schemas",
+                                                                            ),
+                                                                    )
+                                                                    .child(
+                                                                        div()
+                                                                            .text_xs()
+                                                                            .text_color(muted)
+                                                                            .child(
+                                                                                "Include SYS, SYSTEM, XDB, … in suggestions",
+                                                                            ),
+                                                                    ),
+                                                            )
+                                                            .when(system_selected, |this| {
+                                                                this.child(
+                                                                    div()
+                                                                        .text_color(muted)
+                                                                        .child(KitIcon::Check),
+                                                                )
+                                                            }),
+                                                    ),
+                                            )
+                                        }),
+                                    ])]),
                             SettingPage::new("About")
                                 .icon(KitIcon::Info)
                                 .groups(vec![SettingGroup::new().title("About").items(vec![
@@ -1657,6 +1916,8 @@ impl SqlHighlandView {
                     WorkOutcome::Connected => {
                         this.live.insert(conn_id.clone());
                         this.status = "".into();
+                        // Prefetch suggestions in the background.
+                        this.ensure_meta(&conn_id, cx);
                     }
                     WorkOutcome::Failed(msg) => {
                         this.live.remove(&conn_id);
@@ -2307,6 +2568,11 @@ impl SqlHighlandView {
         let run_token = self.tabs[ix].run_token;
         // Remembered for the export audit tab.
         self.tabs[ix].last_sql = sql.clone();
+        // Executed table names boost future suggestion rankings.
+        self.bump_usage(&conn_id, &sql);
+        // Warm the suggestion cache alongside the run (no-op when fresh),
+        // so typing after a run completes from data, not keywords.
+        self.ensure_meta(&conn_id, cx);
         // Drop stale results NOW, not on completion: otherwise the previous
         // query's rows keep painting (flash) while the new one runs. The
         // grid repaints empty with `Running…` in the status bar until the
@@ -2442,6 +2708,7 @@ impl SqlHighlandView {
                         this.mark_siblings_exhausted(&tab_id, &session);
                         // Lazy auto-connect may have connected just now.
                         this.live.insert(conn_id_bg.clone());
+                        this.ensure_meta(&conn_id_bg, cx);
                         this.tabs[ix].result_meta = describe_fetch(&fetch).into();
                         this.tabs[ix].has_result = true;
                         // Fresh data invalidates any selection: indices belong
@@ -2473,6 +2740,7 @@ impl SqlHighlandView {
                         this.tabs[ix].fetch = Some(fetch.clone());
                         this.mark_siblings_exhausted(&tab_id, &session);
                         this.live.insert(conn_id_bg.clone());
+                        this.ensure_meta(&conn_id_bg, cx);
                         // DDL auto-commits server-side; only DML leaves a
                         // pending transaction (the driver never autocommits).
                         this.tabs[ix].pending_txn = dml;
@@ -2829,6 +3097,451 @@ impl SqlHighlandView {
             editor.set_value(formatted, window, cx);
         });
         cx.notify();
+    }
+
+    // -- Autocomplete --------------------------------------------------------
+
+    /// Build popup items for `text` at byte `offset`: returns
+    /// (items, word_start, prefix). Pure snapshot read — safe from provider
+    /// tasks and the manual shortcut alike. Empty items = no popup.
+    /// Gating lives here (not the trigger) because only this path owns the
+    /// buffer text; the trigger sees just the typed fragment. `force`
+    /// (manual shortcut) skips the 2-char gate but never trivia.
+    fn completion_items_for(
+        &mut self,
+        tab_id: &str,
+        text: &str,
+        offset: usize,
+        force: bool,
+    ) -> (Vec<lsp_types::CompletionItem>, usize, String) {
+        let empty = (Vec::new(), offset, String::new());
+        let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else {
+            return empty;
+        };
+        let conn_id = tab.connection_id.clone();
+        if is_trivia_position(text, offset) {
+            return empty;
+        }
+        let (prefix, word_start) = word_prefix(text, offset);
+        // 2-char gate; a trailing dot forces the column list even empty.
+        if !force && prefix.len() < 2 {
+            let forced = word_start > 0
+                && text[..word_start.min(text.len())].trim_end().ends_with('.');
+            if !forced {
+                return empty;
+            }
+        }
+        // Snapshot the cache (clone the Arc; never lock the session here).
+        // Missing/stale cache kicks a background refresh; this request
+        // completes from keywords + whatever is cached.
+        let cache = conn_id.as_deref().and_then(|id| self.meta.get(id)).cloned();
+        let stale = cache
+            .as_ref()
+            .map(|c| c.lock().map(|c| c.is_stale()).unwrap_or(true))
+            .unwrap_or(true);
+        if stale && conn_id.is_some() {
+            // Bound tab with a cold cache: a refresh is possible (runs,
+            // connects, and the manual trigger all call ensure_meta), so
+            // the notice is honest. Unbound tabs skip it — no connection
+            // means no refresh could ever clear it (stuck-status bug).
+            self.status = "Loading suggestions…".into();
+        }
+        let stmt = statement_at(text, offset).unwrap_or_else(|| text.to_string());
+        let aliases = build_alias_map(&stmt);
+        // JOIN … ON with a fresh condition short-circuits everything else:
+        // FK-derived conditions or no popup at all.
+        let head_end = offset.min(text.len());
+        if let Some((right_alias, right)) = detect_join_on(&text[..head_end], &aliases) {
+            let fks: Vec<ForeignKey> = cache
+                .as_ref()
+                .and_then(|c| c.lock().ok().map(|c| c.fks.clone()))
+                .unwrap_or_default();
+            let cands = join_condition_candidates(&right_alias, &right, &aliases, &fks);
+            if cands.is_empty() {
+                return empty;
+            }
+            return (
+                Self::to_items(cands, text, word_start, offset),
+                word_start,
+                prefix,
+            );
+        }
+        let is_seq = |n: &str| {
+            cache.as_ref().is_some_and(|c| {
+                c.lock().map(|c| c.is_sequence(n)).unwrap_or(false)
+            })
+        };
+        let ctx = classify_context(text, offset, &is_seq);
+        let show_system = self.show_system;
+        let mut cands: Vec<Candidate> = Vec::new();
+        let usage_of = |conn: &Option<String>, label: &str| {
+            conn.as_ref()
+                .and_then(|id| {
+                    self.usage.get(&(id.clone(), label.to_ascii_uppercase())).copied()
+                })
+                .unwrap_or(0)
+        };
+        // Own schema (connected user): its objects rank above the shared
+        // catalog, so a DBA login still sees their own tables first.
+        let own_schema: String = conn_id
+            .as_deref()
+            .and_then(|id| self.connections.iter().find(|c| c.id == id))
+            .map(|c| c.user.clone())
+            .unwrap_or_default();
+        // Client-side mirror of the SQL filter (cache may predate a toggle,
+        // or hold system rows from an unfiltered fetch): hide system owners
+        // except the connected user's own schema.
+        let hide_system = |owner: &str| {
+            !show_system
+                && !owner.eq_ignore_ascii_case(&own_schema)
+                && is_system_schema(owner)
+        };
+        match &ctx {
+            // Handled above via detect_join_on — unreachable here.
+            CompleteContext::JoinOn { .. } => {}
+            CompleteContext::SequenceMember(_) => {
+                for kw in ["NEXTVAL", "CURRVAL"] {
+                    cands.push(Candidate {
+                        label: kw.to_string(),
+                        detail: "SEQUENCE".to_string(),
+                        kind: CandidateKind::Keyword,
+                        owner: None,
+                        usage: 0,
+                    });
+                }
+            }
+            CompleteContext::ColumnOf(q) => {
+                if let Some(tref) = resolve_qualifier(q, &aliases) {
+                    let cols = cache.as_ref().map(|c| {
+                        let c = c.lock().expect("meta lock");
+                        c.columns_for(tref.owner.as_deref(), &tref.name)
+                    });
+                    if let Some(cols) = cols {
+                        for col in cols {
+                            cands.push(Candidate {
+                                label: col.name.clone(),
+                                detail: format!(
+                                    "{}{}",
+                                    if col.data_type.is_empty() {
+                                        "COLUMN".to_string()
+                                    } else {
+                                        col.data_type.clone()
+                                    },
+                                    tref.owner
+                                        .as_ref()
+                                        .map(|o| format!(" · {o}.{}", tref.name))
+                                        .unwrap_or_default()
+                                ),
+                                kind: CandidateKind::ColumnInScope,
+                                owner: tref.owner.clone(),
+                                usage: usage_of(&conn_id, &col.name),
+                            });
+                        }
+                    }
+                }
+            }
+            CompleteContext::AfterFrom => {
+                if let Some(cache) = &cache {
+                    let cache = cache.lock().expect("meta lock");
+                    for t in &cache.tables {
+                        if hide_system(&t.owner) {
+                            continue;
+                        }
+                        let label = format!("{}.{}", t.owner, t.name);
+                        cands.push(Candidate {
+                            label,
+                            detail: "TABLE".to_string(),
+                            kind: CandidateKind::Table,
+                            owner: Some(t.owner.clone()),
+                            usage: usage_of(&conn_id, &t.name),
+                        });
+                    }
+                }
+                for kw in ["SELECT", "FROM", "WHERE", "JOIN", "ORDER BY", "GROUP BY"] {
+                    cands.push(Candidate {
+                        label: kw.to_string(),
+                        detail: "KEYWORD".to_string(),
+                        kind: CandidateKind::Keyword,
+                        owner: None,
+                        usage: 0,
+                    });
+                }
+            }
+            CompleteContext::BareWord => {
+                // Tables (+ views).
+                if let Some(cache) = &cache {
+                    let cache = cache.lock().expect("meta lock");
+                    for t in &cache.tables {
+                        if hide_system(&t.owner) {
+                            continue;
+                        }
+                        cands.push(Candidate {
+                            label: t.name.clone(),
+                            detail: format!("TABLE · {}", t.owner),
+                            kind: CandidateKind::Table,
+                            owner: Some(t.owner.clone()),
+                            usage: usage_of(&conn_id, &t.name),
+                        });
+                    }
+                    // Columns of in-scope tables first.
+                    let mut seen_tables = std::collections::HashSet::new();
+                    for tref in aliases.values() {
+                        let key = (
+                            tref.owner.clone().unwrap_or_default().to_ascii_uppercase(),
+                            tref.name.to_ascii_uppercase(),
+                        );
+                        if !seen_tables.insert(key.clone()) {
+                            continue;
+                        }
+                        let cols = cache.columns_for(tref.owner.as_deref(), &tref.name);
+                        for col in cols {
+                            cands.push(Candidate {
+                                label: col.name.clone(),
+                                detail: format!(
+                                    "{} · {}",
+                                    if col.data_type.is_empty() {
+                                        "COLUMN".to_string()
+                                    } else {
+                                        col.data_type.clone()
+                                    },
+                                    tref.name
+                                ),
+                                kind: CandidateKind::ColumnInScope,
+                                owner: tref.owner.clone(),
+                                usage: usage_of(&conn_id, &col.name),
+                            });
+                        }
+                    }
+                    // Sequences.
+                    for s in &cache.sequences {
+                        if hide_system(&s.owner) {
+                            continue;
+                        }
+                        cands.push(Candidate {
+                            label: s.name.clone(),
+                            detail: format!("SEQUENCE · {}", s.owner),
+                            kind: CandidateKind::Sequence,
+                            owner: Some(s.owner.clone()),
+                            usage: usage_of(&conn_id, &s.name),
+                        });
+                    }
+                }
+                for kw in ORACLE_KEYWORDS {
+                    cands.push(Candidate {
+                        label: kw.to_string(),
+                        detail: "KEYWORD".to_string(),
+                        kind: CandidateKind::Keyword,
+                        owner: None,
+                        usage: 0,
+                    });
+                }
+            }
+        }
+        let ranked = rank_candidates(&prefix, cands, &own_schema, COMPLETE_LIMIT);
+        if ranked.is_empty() {
+            return empty;
+        }
+        (Self::to_items(ranked, text, word_start, offset), word_start, prefix)
+    }
+
+    /// Map ranked candidates to popup items with explicit edit ranges (see
+    /// the sticky-`trigger_start_offset` note in `completion_items_for`).
+    fn to_items(
+        ranked: Vec<Candidate>,
+        text: &str,
+        word_start: usize,
+        offset: usize,
+    ) -> Vec<lsp_types::CompletionItem> {
+        // Explicit edit range per item: the kit falls back to its sticky
+        // `trigger_start_offset` otherwise, which survives across accepts
+        // and replaces the whole buffer on the second completion.
+        let (s_line, s_char) = byte_to_lsp_pos(text, word_start);
+        let (e_line, e_char) = byte_to_lsp_pos(text, offset);
+        ranked
+            .into_iter()
+            .enumerate()
+            .map(|(ix, c)| lsp_types::CompletionItem {
+                label: c.label.clone(),
+                detail: Some(c.detail),
+                kind: Some(match c.kind {
+                    CandidateKind::JoinCondition => lsp_types::CompletionItemKind::SNIPPET,
+                    CandidateKind::ColumnInScope | CandidateKind::Column => {
+                        lsp_types::CompletionItemKind::FIELD
+                    }
+                    CandidateKind::Table => lsp_types::CompletionItemKind::CLASS,
+                    CandidateKind::Sequence => lsp_types::CompletionItemKind::VALUE,
+                    CandidateKind::Keyword => lsp_types::CompletionItemKind::KEYWORD,
+                }),
+                sort_text: Some(format!("{ix:04}")),
+                text_edit: Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
+                    range: lsp_types::Range {
+                        start: lsp_types::Position {
+                            line: s_line,
+                            character: s_char,
+                        },
+                        end: lsp_types::Position {
+                            line: e_line,
+                            character: e_char,
+                        },
+                    },
+                    new_text: c.label,
+                })),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    /// Fetch (or refresh) the dictionary cache for a connection on the
+    /// background executor. No-op when fresh or already loading. Safe to
+    /// call from any run/connect completion or the manual trigger.
+    fn ensure_meta(&mut self, conn_id: &str, cx: &mut Context<Self>) {
+        let cache = self
+            .meta
+            .entry(conn_id.to_string())
+            .or_insert_with(|| {
+                Arc::new(Mutex::new(MetadataCache::default()))
+            })
+            .clone();
+        let stale = cache
+            .lock()
+            .map(|c| c.is_stale() && !c.loading)
+            .unwrap_or(false);
+        if !stale {
+            return;
+        }
+        let Some(cfg) = self
+            .connections
+            .iter()
+            .find(|c| c.id == conn_id)
+            .cloned()
+        else {
+            return;
+        };
+        if let Ok(mut c) = cache.lock() {
+            c.loading = true;
+        }
+        self.status = "Loading suggestions…".into();
+        cx.notify();
+        let session = self.pool.get_or_create(conn_id);
+        let bg = cx.background_executor().clone();
+        let view = cx.entity().downgrade();
+        let conn_bg = conn_id.to_string();
+        // Snapshot the filter: a toggle mid-fetch must not mix scopes.
+        // The connected user's own schema is always exempt server-side.
+        let include_system = self.show_system;
+        let own_schema = cfg.user.clone();
+        cx.spawn(async move |_, cx| {
+            // Per-dictionary outcomes: one failing query must never nuke
+            // the rest (a broken FK query once emptied every cache).
+            struct Parts {
+                tables: Result<Vec<crate::metadata::TableId>, String>,
+                columns: Result<
+                    std::collections::HashMap<(String, String), Vec<crate::metadata::ColumnMeta>>,
+                    String,
+                >,
+                sequences: Result<Vec<crate::metadata::TableId>, String>,
+                fks: Result<Vec<crate::complete::ForeignKey>, String>,
+            }
+            let outcome = bg
+                .spawn(async move {
+                    let mut s = session.lock().expect("session lock");
+                    if !s.is_connected() {
+                        if let Err(e) = s.connect(&cfg).map_err(|e| e.to_string()) {
+                            let e = e.to_string();
+                            return Parts {
+                                tables: Err(e.clone()),
+                                columns: Err(e.clone()),
+                                sequences: Err(e.clone()),
+                                fks: Err(e),
+                            };
+                        }
+                    }
+                    Parts {
+                        tables: fetch_tables_blocking(&mut *s, include_system, &own_schema)
+                            .map_err(|e| e.to_string()),
+                        columns: fetch_columns_blocking(&mut *s, include_system, &own_schema)
+                            .map_err(|e| e.to_string()),
+                        sequences: fetch_sequences_blocking(&mut *s, include_system, &own_schema)
+                            .map_err(|e| e.to_string()),
+                        fks: fetch_fks_blocking(&mut *s, include_system, &own_schema)
+                            .map_err(|e| e.to_string()),
+                    }
+                })
+                .await;
+            view.update(cx, |this, cx| {
+                let Some(cache) = this.meta.get(&conn_bg).cloned() else {
+                    // Entry vanished mid-flight (connection deleted):
+                    // never leave the loading notice up.
+                    this.status = "".into();
+                    cx.notify();
+                    return;
+                };
+                if let Ok(mut c) = cache.lock() {
+                    c.loading = false;
+                    // Install each dictionary independently; anything that
+                    // failed keeps its previous content (possibly empty).
+                    // fetched_at advances on tables (the core set) so a
+                    // partial failure retries next TTL, not every keystroke.
+                    if let Ok(tables) = outcome.tables {
+                        c.tables = tables;
+                        c.fetched_at = Some(std::time::Instant::now());
+                    }
+                    if let Ok(columns) = outcome.columns {
+                        c.columns = columns;
+                    }
+                    if let Ok(sequences) = outcome.sequences {
+                        c.sequences = sequences;
+                    }
+                    if let Ok(fks) = outcome.fks {
+                        c.fks = fks;
+                    }
+                    // Degrade silently: keywords + whatever is cached work.
+                    this.status = "".into();
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Manual trigger (ctrl-space): compute synchronously and present.
+    /// Kicks a metadata refresh first when the cache is stale so the next
+    /// keystroke completes from data.
+    fn trigger_complete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.editor_focused(window, cx) {
+            return;
+        }
+        let tab_id = self.active_tab().id.clone();
+        let conn_id = self.active_tab().connection_id.clone();
+        if let Some(id) = conn_id {
+            self.ensure_meta(&id, cx);
+        }
+        let text = self.active_tab().editor.read(cx).value().to_string();
+        let cursor = self.active_tab().editor.read(cx).cursor();
+        let (items, start, prefix) = self.completion_items_for(&tab_id, &text, cursor, true);
+        if items.is_empty() {
+            return;
+        }
+        self.active_tab().editor.update(cx, |editor, cx| {
+            editor.present_completion_items(start, prefix, items, cx);
+        });
+    }
+
+    /// Bump usage counts for tables named in an executed statement so
+    /// future rankings prefer working objects. Bounded: cleared past 5k.
+    fn bump_usage(&mut self, conn_id: &str, sql: &str) {
+        let map = build_alias_map(sql);
+        if map.is_empty() {
+            return;
+        }
+        for tref in map.values() {
+            let key = (conn_id.to_string(), tref.name.to_ascii_uppercase());
+            *self.usage.entry(key).or_insert(0) += 1;
+        }
+        if self.usage.len() > 5000 {
+            self.usage.clear();
+        }
     }
 
     /// Copy the grid selection to the clipboard: the most recently selected
@@ -3281,6 +3994,9 @@ impl SqlHighlandView {
                 if this.editor_focused(window, cx) {
                     this.commit_now(cx);
                 }
+            }))
+            .on_action(cx.listener(|this, _: &TriggerComplete, window, cx| {
+                this.trigger_complete(window, cx);
             }))
             .on_action(cx.listener(|this, _: &RollbackTxn, window, cx| {
                 if this.editor_focused(window, cx) {

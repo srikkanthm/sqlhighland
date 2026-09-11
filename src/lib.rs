@@ -1,6 +1,8 @@
+pub mod complete;
 pub mod config;
 pub mod db;
 pub mod export;
+pub mod metadata;
 pub mod model;
 pub mod session;
 pub mod sql;

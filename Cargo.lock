@@ -6698,6 +6698,7 @@ dependencies = [
  "gpui-kit",
  "gpui-kit-assets",
  "gpui-pre",
+ "lsp-types",
  "oracledb",
  "rust_xlsxwriter",
  "serde",

@@ -14,6 +14,8 @@ toml = "0.8"
 uuid = { version = "1", features = ["v4"] }
 # SQL formatter (https://github.com/shssoichiro/sqlformat-rs).
 sqlformat = "=0.5.0"
+# LSP types for the editor completion provider (gui-only).
+lsp-types = { version = "=0.97.0", optional = true }
 # GUI deps are optional so DB logic + tests build without the Metal toolchain.
 # Registry pins: gpui-pre 0.3.4 (zed snapshot) + gpui-kit 0.6.1 (components).
 # gpui-kit re-exports gpui; keep both pins on the same 0.3.x line.
@@ -29,7 +31,7 @@ rust_xlsxwriter = { version = "=0.99.0", features = ["constant_memory"] }
 [features]
 default = []
 # Build/run the desktop app with: cargo run --features gui
-gui = ["dep:gpui", "dep:gpui-kit", "dep:gpui-kit-assets"]
+gui = ["dep:gpui", "dep:gpui-kit", "dep:gpui-kit-assets", "dep:lsp-types"]
 
 [[bin]]
 name = "sqlhighland"

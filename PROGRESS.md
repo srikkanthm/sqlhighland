@@ -225,5 +225,39 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   to auto-created handles. This was the Tab-cycle fix.
 - `tests/ui_picker.rs` (gui-gated, `test-support` dev-dep): stages 60
   connections via `SQLHIGHLAND_CONFIG_DIR`, drives the REAL view headless —
-  unbound run opens picker, far rows scroll into view, Tab moves focus,
-  Enter picks and closes. Plus a bare scrollable regression test.
+  unbound run opens picker, far rows scroll into view, typing filters,
+  Enter picks the first match and closes. Plus bare scrollable + editor
+  typing regression tests.
+
+## Autocomplete v1 (2026-09-12)
+
+- Plan: `AUTOCOMPLETE_PLAN.md` (locked decisions + queued follow-ups).
+- `src/complete.rs` (pure): word prefix + quoted identifiers, qualifier
+  detection (`e.` / `scott.emp.`), context classify
+  (BareWord/AfterFrom/ColumnOf/SequenceMember/JoinOn), `FROM`/`JOIN` alias
+  map, qualifier resolution, ranking (kind → exact → own-schema → prefix →
+  usage → length), `is_trivia_position`, `SYSTEM_SCHEMAS` blocklist,
+  Oracle keywords, `byte_to_lsp_pos` (UTF-16).
+- `src/metadata.rs`: per-connection `MetadataCache` (tables/views, columns
+  by `(OWNER,TABLE)`, sequences, FKs, 15-min TTL), blocking dictionary
+  fetchers with SQL-level system filter + connected-user exemption.
+- `src/app.rs`: `OracleCompleter` installed per tab; snapshot-only
+  `completions()` (never touches the leased editor entity);
+  `is_completion_trigger` (Auto: 2+ chars or `.`); `TriggerComplete` on
+  `ctrl-space`; explicit per-item `textEdit` (kit's sticky fallback range
+  replaced whole buffers); `ensure_meta` background refresh (connect/run/
+  manual); usage learning; Settings → Editor page (Auto/Manual + system
+  schemas toggle, persisted).
+- Join suggestions: `JOIN dept d ON |` offers FK-derived
+  `e.DEPTNO = d.DEPTNO` (aliases as written, both directions, composites
+  via `AND`); first-condition-only, no FK → no popup.
+- Fixes along the way: typing-crash (entity double-lease), whole-buffer
+  replace on second accept, tab-loss hardening (atomic writes, corrupt
+  backup, orphan adoption), stuck "Loading suggestions…" (unbound tabs no
+  longer mark loading; runs warm the cache), refresh hardening (filtered
+  FK query composed a double WHERE → ORA-00933, and all-or-nothing install
+  let it empty the cache; now predicates compose with AND and each
+  dictionary installs independently).
+- Verified: clean `clippy`, 72 lib + 10 live (incl. dictionary + composite
+  FK smoke) + 3 UI tests, release smoke. Live probe as SYSTEM: 9779→146
+  tables, columns complete, `SYSTEM.EMPLOYEES` #1 for `emp`.

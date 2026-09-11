@@ -205,3 +205,48 @@ async fn bare_scrollable_list_wheels(cx: &mut TestAppContext) {
     })
     .unwrap();
 }
+
+#[gpui_kit::test]
+async fn typing_in_editor_does_not_crash(cx: &mut TestAppContext) {
+    // Regression: the completion provider aborted the app on first keystroke
+    // (editor entity re-read while mutably leased). Staged config, no DB —
+    // suggestions degrade to keywords; typing must simply not crash.
+    cx.update(gpui_kit::init);
+    let dir = staged_config_dir("typing");
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let handle = cx.open_window(size(px(1100.), px(780.)), |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        // Editor holds focus at launch (view focuses the active tab).
+        assert!(
+            window.focused(cx).is_some(),
+            "editor should hold focus so typing reaches the provider"
+        );
+        // Word chars (auto-trigger gate) + dot (column force).
+        window.input("SEL", cx);
+        window.render_frame(cx);
+        window.input(".", cx);
+        window.render_frame(cx);
+        // Manual trigger path (present_completion_items) + accept the
+        // first item (exercises insert_completion with explicit textEdit
+        // ranges — a stale fallback range once replaced the whole buffer).
+        window.press("ctrl-space", cx);
+        window.render_frame(cx);
+        window.press("enter", cx);
+        window.render_frame(cx);
+        // JOIN … ON with no cached FKs: must show no popup, never crash.
+        window.input(" FROM e JOIN d ON ", cx);
+        window.render_frame(cx);
+        window.press("ctrl-space", cx);
+        window.render_frame(cx);
+        window.press("escape", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    std::env::remove_var("SQLHIGHLAND_CONFIG_DIR");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -6,6 +6,20 @@ use std::path::PathBuf;
 
 use crate::model::ConnectionConfig;
 
+/// Write-then-rename so a crash mid-write never leaves a truncated file
+/// behind (a truncated `tabs.toml` used to read as "no tabs", and the next
+/// persist overwrote it — permanent tab loss from one bad shutdown).
+fn write_atomic(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("moving {}", path.display()))?;
+    Ok(())
+}
+
 /// Base config dir. Overridable via `SQLHIGHLAND_CONFIG_DIR` (tests).
 fn base_dir() -> anyhow::Result<PathBuf> {
     if let Ok(dir) = std::env::var("SQLHIGHLAND_CONFIG_DIR") {
@@ -41,13 +55,8 @@ impl SavedConfig {
     }
 
     pub fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
         let text = toml::to_string_pretty(self).context("encoding saved connections")?;
-        std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
-        Ok(())
+        write_atomic(path, &text)
     }
 }
 
@@ -92,13 +101,64 @@ impl TabsManifest {
 
     pub fn save(&self) -> anyhow::Result<()> {
         let path = Self::manifest_path()?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
         let text = toml::to_string_pretty(self).context("encoding tabs manifest")?;
-        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
-        Ok(())
+        write_atomic(&path, &text)
+    }
+
+    /// Load, preserving evidence on corruption: a present-but-unparseable
+    /// manifest is renamed aside (`tabs.corrupt-<epoch>.toml`) instead of
+    /// silently defaulting (the old `unwrap_or_default` + next persist
+    /// overwrote it — permanent loss). Missing file → default, as before.
+    pub fn load_preserving() -> Self {
+        let path = match Self::manifest_path() {
+            Ok(p) => p,
+            Err(_) => return Self::default(),
+        };
+        if !path.exists() {
+            return Self::default();
+        }
+        match Self::load() {
+            Ok(m) => m,
+            Err(_) => {
+                let secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let backup = path.with_extension(format!("corrupt-{secs}.toml"));
+                let _ = std::fs::rename(&path, &backup);
+                Self::default()
+            }
+        }
+    }
+
+    /// Drafts on disk with no manifest entry (`<id>.sql` files): leftovers
+    /// of a lost manifest, adopted as recovered tabs on next launch.
+    /// Sorted by filename for deterministic order.
+    pub fn orphan_drafts(known_ids: &std::collections::HashSet<String>) -> Vec<(String, String)> {
+        let dir = match Self::tabs_dir() {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => return Vec::new(),
+        };
+        let mut orphans = Vec::new();
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("sql") {
+                continue;
+            }
+            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                if !known_ids.contains(stem) {
+                    if let Ok(text) = std::fs::read_to_string(&p) {
+                        orphans.push((stem.to_string(), text));
+                    }
+                }
+            }
+        }
+        orphans.sort();
+        orphans
     }
 
     pub fn read_draft(tab_id: &str) -> String {
@@ -110,11 +170,7 @@ impl TabsManifest {
 
     pub fn write_draft(tab_id: &str, text: &str) -> anyhow::Result<()> {
         let path = Self::draft_path(tab_id)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(path, text)?;
-        Ok(())
+        write_atomic(&path, text)
     }
 
     pub fn delete_draft(tab_id: &str) {
@@ -150,6 +206,12 @@ pub struct Preferences {
     /// normalizes to system-follow on load.
     #[serde(default)]
     pub theme: String,
+    /// Suggestion popup behavior. Missing (pre-autocomplete files) → Auto.
+    #[serde(default)]
+    pub completion: CompleteMode,
+    /// Include SYS/SYSTEM/etc. objects in suggestions. Default hidden.
+    #[serde(default)]
+    pub show_system_schemas: bool,
     // --- Legacy family+mode matrix (pre-flat themes). Still parsed (via
     // the original key names) so old files migrate instead of resetting;
     // never written back. ---
@@ -165,11 +227,23 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             theme: SYSTEM_THEME.to_string(),
+            completion: CompleteMode::default(),
+            show_system_schemas: false,
             legacy_family: LegacyFamily::default(),
             legacy_mode: LegacyMode::default(),
             legacy_catppuccin_dark: LegacyCatppuccinDark::default(),
         }
     }
+}
+
+/// Suggestion popup behavior for the query editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CompleteMode {
+    /// Popup automatically while typing (2+ chars, `.` forces columns).
+    #[default]
+    Auto,
+    /// Popup only on the manual shortcut (ctrl-space).
+    Manual,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -246,13 +320,8 @@ impl Preferences {
 
     pub fn save(&self) -> anyhow::Result<()> {
         let path = Self::path()?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
         let text = toml::to_string_pretty(self).context("encoding preferences")?;
-        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
-        Ok(())
+        write_atomic(&path, &text)
     }
 }
 
@@ -366,6 +435,57 @@ mod tests {
 
         TabsManifest::delete_draft("tab-1");
         assert_eq!(TabsManifest::read_draft("tab-1"), "");
+
+        unsafe { std::env::remove_var("SQLHIGHLAND_CONFIG_DIR") };
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn corrupt_manifest_is_backed_up_not_lost() {
+        let _guard = env_lock();
+        let dir = std::env::temp_dir().join(format!("sqlhighland-corrupt-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        unsafe { std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir) };
+
+        // Garbage on disk: load_preserving renames it aside, returns default.
+        let path = TabsManifest::manifest_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[[[not toml").unwrap();
+        let loaded = TabsManifest::load_preserving();
+        assert!(loaded.tabs.is_empty());
+        assert!(!path.exists(), "corrupt file moved aside");
+        let backup: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("tabs.corrupt-")
+            })
+            .collect();
+        assert_eq!(backup.len(), 1, "evidence preserved");
+
+        unsafe { std::env::remove_var("SQLHIGHLAND_CONFIG_DIR") };
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn orphan_drafts_are_found_sorted() {
+        let _guard = env_lock();
+        let dir = std::env::temp_dir().join(format!("sqlhighland-orphan-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        unsafe { std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir) };
+
+        TabsManifest::write_draft("zzz", "SELECT 3;").unwrap();
+        TabsManifest::write_draft("aaa", "SELECT 1;").unwrap();
+        // Non-sql files and known ids are ignored.
+        std::fs::write(TabsManifest::tabs_dir().unwrap().join("note.txt"), "x").unwrap();
+        let mut known = std::collections::HashSet::new();
+        known.insert("aaa".to_string());
+        let orphans = TabsManifest::orphan_drafts(&known);
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].0, "zzz");
+        assert_eq!(orphans[0].1, "SELECT 3;");
 
         unsafe { std::env::remove_var("SQLHIGHLAND_CONFIG_DIR") };
         std::fs::remove_dir_all(&dir).ok();
