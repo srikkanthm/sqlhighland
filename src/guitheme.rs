@@ -7,14 +7,13 @@
 //! (`apply_config` then `change`), which keeps pair slots, tokens, and
 //! highlight in agreement.
 
+use crate::config::{Preferences, SYSTEM_THEME};
 use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
 use gpui_kit::*;
-use crate::config::{Preferences, SYSTEM_THEME};
 
 const NORD_THEMES: &str = include_str!("../assets/themes/nord.json");
 const CATPPUCCIN_THEMES: &str = include_str!("../assets/themes/catppuccin.json");
 const SOLARIZED_THEMES: &str = include_str!("../assets/themes/solarized.json");
-
 
 /// Register bundled theme families. Call once after `gpui_kit::init`.
 pub fn register_themes(cx: &mut App) {

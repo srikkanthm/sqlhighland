@@ -64,18 +64,14 @@ impl XlsxBuilder {
         let mut workbook = rust_xlsxwriter::Workbook::new();
         let header_fmt = rust_xlsxwriter::Format::new().set_bold();
         let worksheet = workbook.add_worksheet_with_constant_memory();
-        worksheet
-            .set_name(sheet)
-            .map_err(|e| e.to_string())?;
+        worksheet.set_name(sheet).map_err(|e| e.to_string())?;
         for (col, h) in headers.iter().enumerate() {
             worksheet
                 .write_string_with_format(0, col as u16, h, &header_fmt)
                 .map_err(|e| e.to_string())?;
         }
         let query_sheet = workbook.add_worksheet_with_constant_memory();
-        query_sheet
-            .set_name("query")
-            .map_err(|e| e.to_string())?;
+        query_sheet.set_name("query").map_err(|e| e.to_string())?;
         for (row, line) in query_sql.lines().enumerate() {
             query_sheet
                 .write_string(row as u32, 0, line)
@@ -88,9 +84,11 @@ impl XlsxBuilder {
     }
 
     pub fn push_row(&mut self, cells: &[Option<String>]) -> Result<(), String> {
-        let worksheet = self.workbook.worksheets_mut().first_mut().ok_or_else(|| {
-            "xlsx export lost its worksheet".to_string()
-        })?;
+        let worksheet = self
+            .workbook
+            .worksheets_mut()
+            .first_mut()
+            .ok_or_else(|| "xlsx export lost its worksheet".to_string())?;
         for (col, cell) in cells.iter().enumerate() {
             worksheet
                 .write_string(self.next_row, col as u16, cell.as_deref().unwrap_or(""))
@@ -144,9 +142,12 @@ mod tests {
 
     #[test]
     fn xlsx_builds_valid_zip() {
-        let mut b =
-            XlsxBuilder::new("results", &["A".to_string(), "B".to_string()], "SELECT 1\nFROM dual")
-                .unwrap();
+        let mut b = XlsxBuilder::new(
+            "results",
+            &["A".to_string(), "B".to_string()],
+            "SELECT 1\nFROM dual",
+        )
+        .unwrap();
         b.push_row(&[Some("1".to_string()), None]).unwrap();
         b.push_row(&[None, Some("hi".to_string())]).unwrap();
         assert_eq!(b.row_count(), 2);

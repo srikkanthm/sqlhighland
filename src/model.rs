@@ -185,20 +185,22 @@ mod tests {
 
     #[test]
     fn tab_name_from_first_line() {
-        assert_eq!(tab_name_from_sql("\n  SELECT * FROM users;\nSELECT 2;", "Untitled 1"), "SELECT * FROM users;");
+        assert_eq!(
+            tab_name_from_sql("\n  SELECT * FROM users;\nSELECT 2;", "Untitled 1"),
+            "SELECT * FROM users;"
+        );
         assert_eq!(tab_name_from_sql("", "Untitled 1"), "Untitled 1");
         assert_eq!(tab_name_from_sql("   \n  ", "Untitled 1"), "Untitled 1");
         let long = "SELECT a_very_long_column_list FROM some_table WHERE x = 1;";
-        assert_eq!(tab_name_from_sql(long, "U"), "SELECT a_very_long_column_li…");
+        assert_eq!(
+            tab_name_from_sql(long, "U"),
+            "SELECT a_very_long_column_li…"
+        );
     }
 
     #[test]
     fn csv_row_formats_for_clipboard() {
-        let cells = [
-            Some("42".to_string()),
-            None,
-            Some("plain".to_string()),
-        ];
+        let cells = [Some("42".to_string()), None, Some("plain".to_string())];
         assert_eq!(csv_row(cells.iter().map(|c| c.as_deref())), "42,,plain");
         assert_eq!(csv_row([] as [Option<&str>; 0]), "");
         assert_eq!(csv_row([None]), "");
@@ -227,7 +229,10 @@ mod tests {
             truncated: false,
         };
         assert_eq!(r.summary(1000), "2 rows · 12 ms");
-        let t = QueryResult { truncated: true, ..r };
+        let t = QueryResult {
+            truncated: true,
+            ..r
+        };
         assert_eq!(t.summary(1000), "2 rows · 12 ms · truncated at 1000");
     }
 

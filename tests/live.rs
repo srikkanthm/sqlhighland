@@ -18,10 +18,19 @@ fn cfg() -> ConnectionConfig {
 }
 
 fn show(tag: &str, r: &sqlhighland::model::QueryResult) {
-    println!("--- {tag} ({} rows, {}ms, truncated={})", r.row_count(), r.elapsed_ms, r.truncated);
+    println!(
+        "--- {tag} ({} rows, {}ms, truncated={})",
+        r.row_count(),
+        r.elapsed_ms,
+        r.truncated
+    );
     println!(
         "cols: {}",
-        r.columns.iter().map(|c| format!("{}:{}", c.name, c.db_type)).collect::<Vec<_>>().join(", ")
+        r.columns
+            .iter()
+            .map(|c| format!("{}:{}", c.name, c.db_type))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     for row in &r.rows {
         println!(
@@ -39,7 +48,9 @@ fn live_connect_and_dual() {
     let mut s = OracledbSession::new();
     s.connect(&cfg()).expect("connect");
     assert!(s.is_connected());
-    let r = s.run_query("select user from dual", 1000, &[]).expect("query");
+    let r = s
+        .run_query("select user from dual", 1000, &[])
+        .expect("query");
     show("dual", &r);
     assert_eq!(r.row_count(), 1);
     assert_eq!(r.rows[0][0].as_deref(), Some("SYSTEM"));
@@ -93,7 +104,13 @@ fn live_incremental_paging() {
     let mut s = OracledbSession::new();
     s.connect(&cfg()).expect("connect");
     // 2500 rows, pulled in 1000-row pages: 1000 + 1000 + 500.
-    let (columns, first, id) = s.start_query("SELECT level AS n FROM dual CONNECT BY level <= 2500", 1000, &[]).expect("start");
+    let (columns, first, id) = s
+        .start_query(
+            "SELECT level AS n FROM dual CONNECT BY level <= 2500",
+            1000,
+            &[],
+        )
+        .expect("start");
     assert_eq!(columns.len(), 1);
     assert_eq!(first.rows.len(), 1000);
     assert!(!first.exhausted);
@@ -133,7 +150,10 @@ fn live_describe_emulated() {
         let r = s.run_query(stmt, 1000, &[]).expect("describe");
         show("describe", &r);
         assert_eq!(
-            r.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            r.columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
             ["Name", "Null?", "Type"]
         );
         assert_eq!(r.row_count(), 1);
@@ -141,7 +161,9 @@ fn live_describe_emulated() {
         assert_eq!(r.rows[0][2].as_deref(), Some("VARCHAR2(1)"));
     }
     // Unknown tables describe to zero rows, not an error.
-    let r = s.run_query("DESCRIBE no_such_table_xyz", 1000, &[]).expect("describe");
+    let r = s
+        .run_query("DESCRIBE no_such_table_xyz", 1000, &[])
+        .expect("describe");
     assert_eq!(r.row_count(), 0);
 }
 
@@ -171,8 +193,11 @@ fn live_ddl_dml_commit_rollback() {
     let table = "sh_test_txn";
     // Best-effort cleanup from any previous interrupted run.
     let _ = s.exec(&format!("DROP TABLE {table}"), &[]);
-    s.exec(&format!("CREATE TABLE {table} (id NUMBER, name VARCHAR2(30))"), &[])
-        .expect("create");
+    s.exec(
+        &format!("CREATE TABLE {table} (id NUMBER, name VARCHAR2(30))"),
+        &[],
+    )
+    .expect("create");
     // DDL auto-commits; insert then roll back: row must vanish.
     let (affected, _) = s
         .exec(&format!("INSERT INTO {table} VALUES (1, 'a')"), &[])
@@ -209,7 +234,10 @@ fn live_dictionary_feeds_autocomplete() {
     let mut s = OracledbSession::new();
     s.connect(&cfg()).expect("connect");
     let tables = fetch_tables_blocking(&mut s, true, "").expect("tables");
-    assert!(!tables.is_empty(), "all_tables/all_views should be non-empty");
+    assert!(
+        !tables.is_empty(),
+        "all_tables/all_views should be non-empty"
+    );
     let cols = fetch_columns_blocking(&mut s, true, "").expect("columns");
     let dual = cols
         .get(&("SYS".to_string(), "DUAL".to_string()))
@@ -254,6 +282,8 @@ fn live_fk_fetch_groups_keys() {
     assert_eq!(fk.from_table, child.to_ascii_uppercase());
     assert_eq!(fk.from_cols, vec!["PID", "PID2"]);
     assert_eq!(fk.to_cols, vec!["ID", "ID2"]);
-    s.exec(&format!("DROP TABLE {child}"), &[]).expect("drop child");
-    s.exec(&format!("DROP TABLE {parent}"), &[]).expect("drop parent");
+    s.exec(&format!("DROP TABLE {child}"), &[])
+        .expect("drop child");
+    s.exec(&format!("DROP TABLE {parent}"), &[])
+        .expect("drop parent");
 }

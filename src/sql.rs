@@ -380,9 +380,8 @@ fn ddl_summary(bytes: &[u8], mut i: usize, verb: &str) -> Option<String> {
         first.make_ascii_uppercase();
     }
     // Optional (possibly quoted, schema-qualified) object name.
-    let name = read_object_name(bytes, j).map(|(owner, name)| {
-        owner.map(|o| format!("{o}.{name}")).unwrap_or(name)
-    });
+    let name = read_object_name(bytes, j)
+        .map(|(owner, name)| owner.map(|o| format!("{o}.{name}")).unwrap_or(name));
     match name {
         Some(name) => Some(format!("{type_name} {name} {participle}")),
         None => Some(format!("{type_name} {participle}")),
@@ -482,14 +481,14 @@ fn skip_ws_comments(bytes: &[u8], mut i: usize) -> usize {
 fn read_keyword(bytes: &[u8], i: usize) -> (String, usize) {
     let mut j = i;
     while j < bytes.len()
-        && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b'$' || bytes[j] == b'#')
+        && (bytes[j].is_ascii_alphanumeric()
+            || bytes[j] == b'_'
+            || bytes[j] == b'$'
+            || bytes[j] == b'#')
     {
         j += 1;
     }
-    (
-        String::from_utf8_lossy(&bytes[i..j]).into_owned(),
-        j,
-    )
+    (String::from_utf8_lossy(&bytes[i..j]).into_owned(), j)
 }
 
 /// If `i` starts a slash-terminator line (`/ `alone, optional surrounding
@@ -1062,10 +1061,7 @@ mod tests {
     #[test]
     fn statement_at_past_end_reruns_last() {
         let sql = "SELECT 1;\nSELECT 2;   ";
-        assert_eq!(
-            statement_at(sql, sql.len()).as_deref(),
-            Some("SELECT 2;")
-        );
+        assert_eq!(statement_at(sql, sql.len()).as_deref(), Some("SELECT 2;"));
     }
 
     #[test]
@@ -1083,10 +1079,7 @@ mod tests {
 
     #[test]
     fn single_statement_ignores_caret() {
-        assert_eq!(
-            statement_at("SELECT 1;", 99).as_deref(),
-            Some("SELECT 1;")
-        );
+        assert_eq!(statement_at("SELECT 1;", 99).as_deref(), Some("SELECT 1;"));
     }
 
     #[test]
@@ -1107,7 +1100,10 @@ mod tests {
         assert_eq!(statement_kind("DELETE FROM t"), Execute);
         assert_eq!(statement_kind("CREATE TABLE t (a NUMBER)"), Execute);
         assert_eq!(statement_kind("BEGIN NULL; END;"), Execute);
-        assert_eq!(statement_kind("DECLARE x NUMBER; BEGIN x := 1; END;"), Execute);
+        assert_eq!(
+            statement_kind("DECLARE x NUMBER; BEGIN x := 1; END;"),
+            Execute
+        );
         assert_eq!(statement_kind("COMMIT"), Execute);
         assert_eq!(statement_kind(""), Execute);
         // DESCRIBE rides the query path (emulated via ALL_TAB_COLUMNS).
@@ -1144,11 +1140,23 @@ mod tests {
 
     #[test]
     fn exec_summary_uses_action_verbs() {
-        assert_eq!(exec_summary("INSERT INTO t VALUES (1)", 1), "1 row inserted");
-        assert_eq!(exec_summary("insert into t select * from s", 5), "5 rows inserted");
+        assert_eq!(
+            exec_summary("INSERT INTO t VALUES (1)", 1),
+            "1 row inserted"
+        );
+        assert_eq!(
+            exec_summary("insert into t select * from s", 5),
+            "5 rows inserted"
+        );
         assert_eq!(exec_summary("UPDATE t SET a = 1", 0), "0 rows updated");
         assert_eq!(exec_summary("-- gone\nDELETE FROM t", 2), "2 rows deleted");
-        assert_eq!(exec_summary("MERGE INTO t USING s ON (1=1) WHEN MATCHED THEN UPDATE SET a=1", 1), "1 row merged");
+        assert_eq!(
+            exec_summary(
+                "MERGE INTO t USING s ON (1=1) WHEN MATCHED THEN UPDATE SET a=1",
+                1
+            ),
+            "1 row merged"
+        );
         assert_eq!(exec_summary("BEGIN NULL; END;", 1), "PL/SQL block executed");
         assert_eq!(exec_summary("COMMIT", 0), "Committed");
         assert_eq!(exec_summary("rollback", 0), "Rolled back");
@@ -1157,10 +1165,22 @@ mod tests {
 
     #[test]
     fn exec_summary_names_ddl_objects() {
-        assert_eq!(exec_summary("CREATE TABLE emp (a NUMBER)", 0), "Table emp created");
-        assert_eq!(exec_summary("create or replace view v as select 1 from dual", 0), "View v created");
-        assert_eq!(exec_summary("DROP INDEX \"My Index\"", 0), "Index My Index dropped");
-        assert_eq!(exec_summary("ALTER TABLE scott.emp ADD (b NUMBER)", 0), "Table scott.emp altered");
+        assert_eq!(
+            exec_summary("CREATE TABLE emp (a NUMBER)", 0),
+            "Table emp created"
+        );
+        assert_eq!(
+            exec_summary("create or replace view v as select 1 from dual", 0),
+            "View v created"
+        );
+        assert_eq!(
+            exec_summary("DROP INDEX \"My Index\"", 0),
+            "Index My Index dropped"
+        );
+        assert_eq!(
+            exec_summary("ALTER TABLE scott.emp ADD (b NUMBER)", 0),
+            "Table scott.emp altered"
+        );
         assert_eq!(exec_summary("TRUNCATE TABLE t", 0), "Table t truncated");
         // Unparseable DDL falls back to generic text, never panics.
         assert_eq!(exec_summary("CREATE", 0), "0 rows affected");
@@ -1179,7 +1199,9 @@ mod tests {
         assert!(is_dml("INSERT INTO t VALUES (1)"));
         assert!(is_dml("  update t set a = 1"));
         assert!(is_dml("-- fix\nDELETE FROM t"));
-        assert!(is_dml("MERGE INTO t USING s ON (t.a = s.a) WHEN MATCHED THEN UPDATE SET a = 1"));
+        assert!(is_dml(
+            "MERGE INTO t USING s ON (t.a = s.a) WHEN MATCHED THEN UPDATE SET a = 1"
+        ));
         assert!(!is_dml("SELECT 1 FROM dual"));
         assert!(!is_dml("CREATE TABLE t (a NUMBER)"));
         assert!(!is_dml("BEGIN NULL; END;"));
@@ -1191,8 +1213,14 @@ mod tests {
         assert_eq!(
             vars,
             vec![
-                SubVar { name: "tab".into(), double: true },
-                SubVar { name: "1".into(), double: false },
+                SubVar {
+                    name: "tab".into(),
+                    double: true
+                },
+                SubVar {
+                    name: "1".into(),
+                    double: false
+                },
             ]
         );
     }
@@ -1206,8 +1234,14 @@ mod tests {
         assert_eq!(
             vars,
             vec![
-                SubVar { name: "dept".into(), double: false },
-                SubVar { name: "real".into(), double: false },
+                SubVar {
+                    name: "dept".into(),
+                    double: false
+                },
+                SubVar {
+                    name: "real".into(),
+                    double: false
+                },
             ]
         );
     }
@@ -1217,7 +1251,10 @@ mod tests {
         let vars = find_substitution_vars("SELECT * FROM &schema.emp");
         assert_eq!(
             vars,
-            vec![SubVar { name: "schema".into(), double: false }]
+            vec![SubVar {
+                name: "schema".into(),
+                double: false
+            }]
         );
         let mut map = std::collections::HashMap::new();
         map.insert("schema".to_string(), "scott".to_string());
@@ -1232,7 +1269,10 @@ mod tests {
         let mut map = std::collections::HashMap::new();
         map.insert("d".to_string(), "&e".to_string());
         // Value containing `&` is NOT re-expanded.
-        assert_eq!(apply_substitutions("SELECT &d FROM dual", &map), "SELECT &e FROM dual");
+        assert_eq!(
+            apply_substitutions("SELECT &d FROM dual", &map),
+            "SELECT &e FROM dual"
+        );
         // Missing names stay in place; escapes unescape.
         assert_eq!(
             apply_substitutions("SELECT &missing, \\&lit FROM dual", &map),
@@ -1242,13 +1282,19 @@ mod tests {
 
     #[test]
     fn bind_vars_detect_and_skip_pseudo() {
-        assert_eq!(find_bind_vars("SELECT * FROM t WHERE a = :id AND b = :1"), vec!["id", "1"]);
+        assert_eq!(
+            find_bind_vars("SELECT * FROM t WHERE a = :id AND b = :1"),
+            vec!["id", "1"]
+        );
         // Dedup, `:=` skipped, trigger pseudo-binds skipped.
         assert_eq!(
             find_bind_vars("BEGIN x := :v; IF :v > 0 THEN :NEW.x := 1; END; -- :c\n/* :d */"),
             vec!["v"]
         );
         assert!(find_bind_vars("SELECT ':not_a_bind', \":neither\" FROM dual").is_empty());
-        assert_eq!(find_bind_vars("SELECT :OLD, :old, :Parent FROM dual"), Vec::<String>::new());
+        assert_eq!(
+            find_bind_vars("SELECT :OLD, :old, :Parent FROM dual"),
+            Vec::<String>::new()
+        );
     }
 }

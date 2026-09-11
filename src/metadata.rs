@@ -28,6 +28,8 @@ pub struct TableId {
 pub struct ColumnMeta {
     pub name: String,
     pub data_type: String,
+    /// `ALL_COL_COMMENTS` text (may be empty). Shown in popup detail.
+    pub comments: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -64,10 +66,7 @@ impl MetadataCache {
         match owner {
             Some(o) => {
                 let o = o.to_ascii_uppercase();
-                self.columns
-                    .get(&(o, t))
-                    .cloned()
-                    .unwrap_or_default()
+                self.columns.get(&(o, t)).cloned().unwrap_or_default()
             }
             None => {
                 let mut out = Vec::new();
@@ -144,8 +143,7 @@ pub fn fetch_tables_blocking(
         DICT_MAX_ROWS,
         &[],
     )?;
-    Ok(r
-        .rows
+    Ok(r.rows
         .iter()
         .filter_map(|row| match row.as_slice() {
             [Some(o), Some(t)] => Some(TableId {
@@ -157,28 +155,34 @@ pub fn fetch_tables_blocking(
         .collect())
 }
 
-/// Fetch columns grouped by `(OWNER, TABLE)` (uppercased keys).
+/// Fetch columns grouped by `(OWNER, TABLE)` (uppercased keys), left-joined
+/// to `ALL_COL_COMMENTS` for popup detail text.
 pub fn fetch_columns_blocking(
     db: &mut impl DbClient,
     include_system: bool,
     own_schema: &str,
 ) -> Result<HashMap<(String, String), Vec<ColumnMeta>>, crate::db::DbError> {
-    let filter = system_filter_sql("owner", include_system, own_schema);
+    let filter = system_filter_sql("t.owner", include_system, own_schema);
     let r = db.run_query(
         &format!(
-            "SELECT owner, table_name, column_name, data_type FROM all_tab_columns{filter}"
+            "SELECT t.owner, t.table_name, t.column_name, t.data_type, c.comments \
+               FROM all_tab_columns t \
+               LEFT JOIN all_col_comments c \
+                 ON c.owner = t.owner AND c.table_name = t.table_name \
+                AND c.column_name = t.column_name{filter}"
         ),
         DICT_MAX_ROWS,
         &[],
     )?;
     let mut map: HashMap<(String, String), Vec<ColumnMeta>> = HashMap::new();
     for row in &r.rows {
-        if let [Some(o), Some(t), Some(c), dt] = row.as_slice() {
+        if let [Some(o), Some(t), Some(c), dt, cm] = row.as_slice() {
             map.entry((o.to_ascii_uppercase(), t.to_ascii_uppercase()))
                 .or_default()
                 .push(ColumnMeta {
                     name: c.clone(),
                     data_type: dt.clone().unwrap_or_default(),
+                    comments: cm.clone().unwrap_or_default(),
                 });
         }
     }
@@ -256,8 +260,7 @@ pub fn fetch_sequences_blocking(
         DICT_MAX_ROWS,
         &[],
     )?;
-    Ok(r
-        .rows
+    Ok(r.rows
         .iter()
         .filter_map(|row| match row.as_slice() {
             [Some(o), Some(t)] => Some(TableId {
@@ -273,8 +276,8 @@ pub fn fetch_sequences_blocking(
 mod tests {
     use super::*;
     use crate::db::{BindParam, DbError};
-    use crate::model::QueryResult;
     use crate::model::ColumnInfo;
+    use crate::model::QueryResult;
 
     struct FakeDb {
         tables: QueryResult,
@@ -316,20 +319,11 @@ mod tests {
             _binds: &[BindParam],
         ) -> Result<QueryResult, DbError> {
             if sql.contains("all_tab_columns") {
-                Ok(std::mem::replace(
-                    &mut self.columns,
-                    qr(&[], &[]),
-                ))
+                Ok(std::mem::replace(&mut self.columns, qr(&[], &[])))
             } else if sql.contains("all_sequences") {
-                Ok(std::mem::replace(
-                    &mut self.sequences,
-                    qr(&[], &[]),
-                ))
+                Ok(std::mem::replace(&mut self.sequences, qr(&[], &[])))
             } else if sql.contains("all_constraints") {
-                Ok(std::mem::replace(
-                    &mut self.constraints,
-                    qr(&[], &[]),
-                ))
+                Ok(std::mem::replace(&mut self.constraints, qr(&[], &[])))
             } else {
                 Ok(std::mem::replace(&mut self.tables, qr(&[], &[])))
             }
@@ -356,13 +350,34 @@ mod tests {
                 ],
             ),
             columns: qr(
-                &["OWNER", "TABLE_NAME", "COLUMN_NAME", "DATA_TYPE"],
                 &[
-                    vec![Some("SCOTT"), Some("EMP"), Some("EMPNO"), Some("NUMBER")],
-                    vec![Some("SCOTT"), Some("EMP"), Some("ENAME"), Some("VARCHAR2")],
+                    "OWNER",
+                    "TABLE_NAME",
+                    "COLUMN_NAME",
+                    "DATA_TYPE",
+                    "COMMENTS",
+                ],
+                &[
+                    vec![
+                        Some("SCOTT"),
+                        Some("EMP"),
+                        Some("EMPNO"),
+                        Some("NUMBER"),
+                        Some("employee id"),
+                    ],
+                    vec![
+                        Some("SCOTT"),
+                        Some("EMP"),
+                        Some("ENAME"),
+                        Some("VARCHAR2"),
+                        None,
+                    ],
                 ],
             ),
-            sequences: qr(&["SEQUENCE_OWNER", "SEQUENCE_NAME"], &[vec![Some("SCOTT"), Some("EMP_SEQ")]]),
+            sequences: qr(
+                &["SEQUENCE_OWNER", "SEQUENCE_NAME"],
+                &[vec![Some("SCOTT"), Some("EMP_SEQ")]],
+            ),
             constraints: qr(
                 &[
                     "OWNER",
@@ -374,10 +389,34 @@ mod tests {
                     "R_COLUMN_NAME",
                 ],
                 &[
-                    vec![Some("SCOTT"), Some("EMP_DEPT_FK"), Some("EMP"), Some("DEPTNO"), Some("SCOTT"), Some("DEPT"), Some("DEPTNO")],
+                    vec![
+                        Some("SCOTT"),
+                        Some("EMP_DEPT_FK"),
+                        Some("EMP"),
+                        Some("DEPTNO"),
+                        Some("SCOTT"),
+                        Some("DEPT"),
+                        Some("DEPTNO"),
+                    ],
                     // Composite key: two rows, one constraint.
-                    vec![Some("SCOTT"), Some("COMP_FK"), Some("A"), Some("X"), Some("SCOTT"), Some("B"), Some("X")],
-                    vec![Some("SCOTT"), Some("COMP_FK"), Some("A"), Some("Y"), Some("SCOTT"), Some("B"), Some("Y")],
+                    vec![
+                        Some("SCOTT"),
+                        Some("COMP_FK"),
+                        Some("A"),
+                        Some("X"),
+                        Some("SCOTT"),
+                        Some("B"),
+                        Some("X"),
+                    ],
+                    vec![
+                        Some("SCOTT"),
+                        Some("COMP_FK"),
+                        Some("A"),
+                        Some("Y"),
+                        Some("SCOTT"),
+                        Some("B"),
+                        Some("Y"),
+                    ],
                 ],
             ),
         }
@@ -395,11 +434,11 @@ mod tests {
     fn columns_group_by_upper_key() {
         let mut db = fake();
         let m = fetch_columns_blocking(&mut db, true, "").unwrap();
-        let cols = m
-            .get(&("SCOTT".to_string(), "EMP".to_string()))
-            .unwrap();
+        let cols = m.get(&("SCOTT".to_string(), "EMP".to_string())).unwrap();
         assert_eq!(cols.len(), 2);
         assert_eq!(cols[0].data_type, "NUMBER");
+        assert_eq!(cols[0].comments, "employee id");
+        assert_eq!(cols[1].comments, "");
     }
 
     #[test]

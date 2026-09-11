@@ -262,6 +262,10 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   prefix filtering keeps them invisible until typed); empty-prefix popup
   right after operand-expecting keywords (`FROM |` lists tables); JoinOn
   without FK falls back to Predicate columns.
+- Qualify-on-collision + column comments (2026-09-12): columns shared by
+  two scope tables complete qualified (`e.DEPTNO`, alias preferred);
+  popup detail appends the one-line `ALL_COL_COMMENTS` text (joined fetch,
+  capped at 80 chars). Scope resolution factored once per request.
 - Function snippets (2026-09-12): 32 built-ins complete as `NAME()` with
   signatures in detail; true tab-stops impossible (no kit snippet engine,
   no post-accept hook) — upstream gap #2, cursor lands after `)`.

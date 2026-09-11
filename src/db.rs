@@ -164,7 +164,8 @@ impl OracledbSession {
     /// missing connection yield a non-current page the UI must discard.
     /// Protocol-class fetch failures disconnect the session (see
     /// [`OracledbSession::pull_locked`]); ORA- errors keep it for retry.
-    pub fn fetch_more(&mut self, query_id: u64, n: usize) -> Result<FetchPage, DbError> {        if query_id != self.query_id || self.conn.is_none() {
+    pub fn fetch_more(&mut self, query_id: u64, n: usize) -> Result<FetchPage, DbError> {
+        if query_id != self.query_id || self.conn.is_none() {
             return Ok(FetchPage {
                 rows: Vec::new(),
                 exhausted: true,
@@ -538,8 +539,10 @@ fn query_with_binds(
     {
         let mut ordered = binds.to_vec();
         ordered.sort_by_key(|b| b.name.parse::<u32>().unwrap_or(u32::MAX));
-        let refs: Vec<&dyn oracledb::ToDbValue> =
-            ordered.iter().map(|b| &b.value as &dyn oracledb::ToDbValue).collect();
+        let refs: Vec<&dyn oracledb::ToDbValue> = ordered
+            .iter()
+            .map(|b| &b.value as &dyn oracledb::ToDbValue)
+            .collect();
         conn.query(sql, &refs)
     } else {
         let refs: Vec<(&str, &dyn oracledb::ToDbValue)> = binds
@@ -565,8 +568,10 @@ fn exec_with_binds(
     {
         let mut ordered = binds.to_vec();
         ordered.sort_by_key(|b| b.name.parse::<u32>().unwrap_or(u32::MAX));
-        let refs: Vec<&dyn oracledb::ToDbValue> =
-            ordered.iter().map(|b| &b.value as &dyn oracledb::ToDbValue).collect();
+        let refs: Vec<&dyn oracledb::ToDbValue> = ordered
+            .iter()
+            .map(|b| &b.value as &dyn oracledb::ToDbValue)
+            .collect();
         conn.execute(sql, &refs)
     } else {
         let refs: Vec<(&str, &dyn oracledb::ToDbValue)> = binds
@@ -588,7 +593,7 @@ fn convert_row(mut row: oracledb::Row, columns: &[ColumnInfo]) -> Vec<Option<Str
 
 /// Convert one cell to its display string. `None` is SQL NULL.
 ///
- /// The converter is chosen from the column's Oracle type up front (never
+/// The converter is chosen from the column's Oracle type up front (never
 /// probe-and-retry: `Row::take` moves the value out, so a failed conversion
 /// would destroy the cell for the next attempt).
 fn cell_to_display(row: &mut oracledb::Row, ix: usize, db_type: &str) -> Option<String> {
@@ -598,17 +603,27 @@ fn cell_to_display(row: &mut oracledb::Row, ix: usize, db_type: &str) -> Option<
             .ok()
             .flatten()
             .map(|v| v.to_string()),
-        "DB_TYPE_BINARY_FLOAT" => row.get::<Option<f32>>(ix).ok().flatten().map(|v| v.to_string()),
-        "DB_TYPE_BINARY_DOUBLE" => row.get::<Option<f64>>(ix).ok().flatten().map(|v| v.to_string()),
-        "DB_TYPE_BOOLEAN" => row.get::<Option<bool>>(ix).ok().flatten().map(|v| v.to_string()),
-        "DB_TYPE_DATE"
-        | "DB_TYPE_TIMESTAMP"
-        | "DB_TYPE_TIMESTAMP_TZ"
-        | "DB_TYPE_TIMESTAMP_LTZ" => row
-            .get::<Option<oracledb::OracleTimestamp>>(ix)
+        "DB_TYPE_BINARY_FLOAT" => row
+            .get::<Option<f32>>(ix)
             .ok()
             .flatten()
             .map(|v| v.to_string()),
+        "DB_TYPE_BINARY_DOUBLE" => row
+            .get::<Option<f64>>(ix)
+            .ok()
+            .flatten()
+            .map(|v| v.to_string()),
+        "DB_TYPE_BOOLEAN" => row
+            .get::<Option<bool>>(ix)
+            .ok()
+            .flatten()
+            .map(|v| v.to_string()),
+        "DB_TYPE_DATE" | "DB_TYPE_TIMESTAMP" | "DB_TYPE_TIMESTAMP_TZ" | "DB_TYPE_TIMESTAMP_LTZ" => {
+            row.get::<Option<oracledb::OracleTimestamp>>(ix)
+                .ok()
+                .flatten()
+                .map(|v| v.to_string())
+        }
         "DB_TYPE_INTERVAL_DS" => row
             .get::<Option<oracledb::OracleIntervalDS>>(ix)
             .ok()
@@ -706,11 +721,23 @@ mod tests {
 
     #[test]
     fn sanitize_strips_editor_terminators() {
-        assert_eq!(sanitize_statement("SELECT 1 FROM dual;").unwrap(), "SELECT 1 FROM dual");
-        assert_eq!(sanitize_statement("  SELECT 1 FROM dual;;\n").unwrap(), "SELECT 1 FROM dual");
-        assert_eq!(sanitize_statement("SELECT 1 FROM dual").unwrap(), "SELECT 1 FROM dual");
+        assert_eq!(
+            sanitize_statement("SELECT 1 FROM dual;").unwrap(),
+            "SELECT 1 FROM dual"
+        );
+        assert_eq!(
+            sanitize_statement("  SELECT 1 FROM dual;;\n").unwrap(),
+            "SELECT 1 FROM dual"
+        );
+        assert_eq!(
+            sanitize_statement("SELECT 1 FROM dual").unwrap(),
+            "SELECT 1 FROM dual"
+        );
         // Semicolons inside literals are preserved.
-        assert_eq!(sanitize_statement("SELECT ';' FROM dual;").unwrap(), "SELECT ';' FROM dual");
+        assert_eq!(
+            sanitize_statement("SELECT ';' FROM dual;").unwrap(),
+            "SELECT ';' FROM dual"
+        );
         assert!(sanitize_statement("   ;  ").is_err());
         assert!(sanitize_statement("").is_err());
     }

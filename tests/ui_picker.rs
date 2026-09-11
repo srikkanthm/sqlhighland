@@ -11,15 +11,13 @@ use std::time::Duration;
 use gpui_kit::component::Root;
 use gpui_kit::test::{TestAppContextExt, TestWindowExt};
 use gpui_kit::{
-    AppContext, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled,
-    TestAppContext, div, px, size,
+    div, px, size, AppContext, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, TestAppContext,
 };
 use sqlhighland::app::SqlHighlandView;
 
-fn staged_config_dir(tag: &str) -> std::path::PathBuf {    let dir = std::env::temp_dir().join(format!(
-        "sqlhighland-ui-{tag}-{}",
-        std::process::id()
-    ));
+fn staged_config_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("sqlhighland-ui-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let mut toml = String::from("[[connections]]\n");
@@ -30,13 +28,18 @@ fn staged_config_dir(tag: &str) -> std::path::PathBuf {    let dir = std::env::t
         ));
     }
     // Trim the trailing empty table header the loop leaves behind.
-    let toml = toml.trim_end_matches("[[connections]]\n").trim_end().to_string() + "\n";
+    let toml = toml
+        .trim_end_matches("[[connections]]\n")
+        .trim_end()
+        .to_string()
+        + "\n";
     std::fs::write(dir.join("connections.toml"), toml).unwrap();
     dir
 }
 
 #[gpui_kit::test]
-async fn pick_dialog_scrolls_tabs_and_picks(cx: &mut TestAppContext) {    cx.update(gpui_kit::init);
+async fn pick_dialog_scrolls_tabs_and_picks(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
     let dir = staged_config_dir("pick");
     std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
     let handle = cx.open_window(size(px(1100.), px(780.)), |window, cx| {
@@ -62,8 +65,7 @@ async fn pick_dialog_scrolls_tabs_and_picks(cx: &mut TestAppContext) {    cx.upd
     })
     .unwrap();
     cx.wait_for(handle.into(), Duration::from_secs(2), |window, _| {
-        window.try_find("conn-pick-scroll").is_some()
-            || window.try_find("pick-cancel").is_some()
+        window.try_find("conn-pick-scroll").is_some() || window.try_find("pick-cancel").is_some()
     })
     .await;
     cx.update_window(handle.into(), |_, window, cx| {
@@ -145,6 +147,106 @@ async fn pick_dialog_scrolls_tabs_and_picks(cx: &mut TestAppContext) {    cx.upd
         window.try_find("dialog").is_none()
     })
     .await;
+    std::env::remove_var("SQLHIGHLAND_CONFIG_DIR");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[gpui_kit::test]
+async fn cmd_w_closes_active_query_tab(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let dir = staged_config_dir("close-tab");
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let handle = cx.open_window(size(px(1100.), px(780.)), |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("tab-add", cx);
+        window.render_frame(cx);
+        assert!(
+            window
+                .try_find(("tab-close", 1usize))
+                .as_ref()
+                .is_some_and(|tab| tab.visible()),
+            "new tab should be visible"
+        );
+
+        // The new tab is active, so Cmd+W removes it and leaves the original.
+        window.press("cmd-w", cx);
+        window.render_frame(cx);
+        assert!(
+            window.try_find(("tab-close", 1usize)).is_none(),
+            "Cmd+W should close the active tab"
+        );
+        assert!(
+            window
+                .try_find(("tab-close", 0usize))
+                .as_ref()
+                .is_some_and(|tab| tab.visible()),
+            "the original tab should remain"
+        );
+
+        // Closing the final tab preserves the app's existing one-blank-tab
+        // invariant rather than leaving the editor without a tab.
+        window.press("cmd-w", cx);
+        window.render_frame(cx);
+        assert!(
+            window
+                .try_find(("tab-close", 0usize))
+                .as_ref()
+                .is_some_and(|tab| tab.visible()),
+            "closing the final tab should create a replacement tab"
+        );
+        assert!(
+            window.try_find(("tab-close", 1usize)).is_none(),
+            "only one replacement tab should remain"
+        );
+    })
+    .unwrap();
+
+    std::env::remove_var("SQLHIGHLAND_CONFIG_DIR");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[gpui_kit::test]
+async fn cmd_t_opens_and_focuses_new_query_tab(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let dir = staged_config_dir("new-tab");
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let handle = cx.open_window(size(px(1100.), px(780.)), |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press("cmd-t", cx);
+        window.render_frame(cx);
+        assert!(
+            window
+                .try_find(("tab-close", 1usize))
+                .as_ref()
+                .is_some_and(|tab| tab.visible()),
+            "Cmd+T should open a second tab"
+        );
+
+        // Input reaches the newly created tab without clicking the editor.
+        window.input("SELECT 1", cx);
+        window.render_frame(cx);
+        window.press("cmd-w", cx);
+        window.render_frame(cx);
+        assert!(
+            window
+                .try_find(("tab-close", 0usize))
+                .as_ref()
+                .is_some_and(|tab| tab.visible()),
+            "the original tab should remain after closing the new tab"
+        );
+    })
+    .unwrap();
+
     std::env::remove_var("SQLHIGHLAND_CONFIG_DIR");
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -2,6 +2,7 @@ pub mod complete;
 pub mod config;
 pub mod db;
 pub mod export;
+pub mod filetab;
 pub mod metadata;
 pub mod model;
 pub mod session;

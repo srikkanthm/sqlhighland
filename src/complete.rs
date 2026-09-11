@@ -160,7 +160,9 @@ pub fn qualifier_before(text: &str, word_start: usize) -> Option<String> {
         let before = before.strip_suffix('.').unwrap_or(before).trim_end();
         let owner = if before.ends_with('"') {
             let inner = before.strip_suffix('"').unwrap_or(before);
-            inner.rfind('"').map(|q| before[q + 1..before.len() - 1].to_string())
+            inner
+                .rfind('"')
+                .map(|q| before[q + 1..before.len() - 1].to_string())
         } else {
             before
                 .char_indices()
@@ -260,8 +262,9 @@ fn clause_keyword(word_upper: &str) -> Option<Clause> {
     match word_upper {
         "SELECT" | "DISTINCT" => Some(Clause::Select),
         "FROM" | "JOIN" | "INTO" | "UPDATE" | "TABLE" | "USING" => Some(Clause::From),
-        "WHERE" | "GROUP" | "ORDER" | "HAVING" | "BY" | "AND" | "OR" | "SET" | "WHEN"
-        | "ON" => Some(Clause::Predicate),
+        "WHERE" | "GROUP" | "ORDER" | "HAVING" | "BY" | "AND" | "OR" | "SET" | "WHEN" | "ON" => {
+            Some(Clause::Predicate)
+        }
         _ => None,
     }
 }
@@ -321,10 +324,18 @@ fn scan_clause(toks: &[String]) -> Clause {
         }
         match clause_keyword(up.as_str()) {
             Some(Clause::Select) => {
-                return if saw_ident { Clause::Bare } else { Clause::Select };
+                return if saw_ident {
+                    Clause::Bare
+                } else {
+                    Clause::Select
+                };
             }
             Some(Clause::From) => {
-                return if saw_ident { Clause::Bare } else { Clause::From };
+                return if saw_ident {
+                    Clause::Bare
+                } else {
+                    Clause::From
+                };
             }
             Some(other) => return other,
             None => saw_ident = true,
@@ -390,6 +401,59 @@ pub fn is_trivia_position(text: &str, offset: usize) -> bool {
         }
     }
     singles % 2 == 1 || doubles % 2 == 1
+}
+/// Column names (uppercase) appearing in more than one scope table.
+/// Inserting those bare is ambiguous SQL — callers qualify them.
+/// `scope` is `(owner, table, column_names...)` per in-scope table.
+pub fn ambiguous_columns(scope: &[ScopeTable]) -> std::collections::HashSet<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for t in scope {
+        for c in &t.cols {
+            *counts.entry(c.name.to_ascii_uppercase()).or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|(c, _)| c)
+        .collect()
+}
+
+use crate::metadata::ColumnMeta;
+
+/// Scope table entry for ambiguity analysis: owner, table, and its columns.
+pub struct ScopeTable {
+    pub owner: Option<String>,
+    pub table: String,
+    pub cols: Vec<ColumnMeta>,
+}
+
+/// A scope table's display label for qualified inserts: the alias as
+/// written when one exists (`e`), else the table name itself. `table` must
+/// be in scope (callers fall back to it when this returns `None`).
+pub fn scope_label(
+    owner: &Option<String>,
+    table: &str,
+    aliases: &HashMap<String, TableRef>,
+) -> Option<String> {
+    let mut names: Vec<&String> = aliases.keys().collect();
+    names.sort();
+    names.into_iter().find_map(|a| {
+        let t = &aliases[a.as_str()];
+        (t.name.eq_ignore_ascii_case(table) && owners_match(&t.owner, owner)).then(|| a.clone())
+    })
+}
+
+/// One-line popup detail for a column comment: trimmed, single-spaced,
+/// capped at 80 chars.
+pub fn short_comment(comment: &str) -> String {
+    let one: String = comment.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = one.trim();
+    if trimmed.chars().count() <= 80 {
+        trimmed.to_string()
+    } else {
+        format!("{}…", trimmed.chars().take(79).collect::<String>())
+    }
 }
 /// Insert text for a candidate: keywords append a trailing space so the
 /// next word starts cleanly (`SELECT |`, `ORDER BY |`); everything else
@@ -490,9 +554,13 @@ pub fn build_alias_map(statement: &str) -> HashMap<String, TableRef> {
                     alias = Some(toks[i].trim_matches('"').to_string());
                     i += 1;
                 }
-                let tref = TableRef { owner, name: name.clone() };
+                let tref = TableRef {
+                    owner,
+                    name: name.clone(),
+                };
                 // Bare name always addressable (lowercased).
-                map.entry(name.to_lowercase()).or_insert_with(|| tref.clone());
+                map.entry(name.to_lowercase())
+                    .or_insert_with(|| tref.clone());
                 if let Some(a) = alias {
                     if !a.is_empty() {
                         map.insert(a.to_lowercase(), tref);
@@ -548,27 +616,57 @@ fn tokenize(s: &str) -> Vec<String> {
 fn is_clause_keyword(up: &str) -> bool {
     matches!(
         up,
-        "WHERE" | "GROUP" | "ORDER" | "HAVING" | "ON" | "USING" | "SET" | "VALUES"
-            | "SELECT" | "FROM" | "JOIN" | "INNER" | "LEFT" | "RIGHT" | "FULL" | "CROSS"
-            | "UNION" | "MINUS" | "INTERSECT" | "LIMIT" | "FETCH" | "FOR" | "WHEN" | "THEN"
-            | "ELSE" | "END" | "AND" | "OR" | "INTO" | "UPDATE" | "BY" | "(" | ")" | "AS"
+        "WHERE"
+            | "GROUP"
+            | "ORDER"
+            | "HAVING"
+            | "ON"
+            | "USING"
+            | "SET"
+            | "VALUES"
+            | "SELECT"
+            | "FROM"
+            | "JOIN"
+            | "INNER"
+            | "LEFT"
+            | "RIGHT"
+            | "FULL"
+            | "CROSS"
+            | "UNION"
+            | "MINUS"
+            | "INTERSECT"
+            | "LIMIT"
+            | "FETCH"
+            | "FOR"
+            | "WHEN"
+            | "THEN"
+            | "ELSE"
+            | "END"
+            | "AND"
+            | "OR"
+            | "INTO"
+            | "UPDATE"
+            | "BY"
+            | "("
+            | ")"
+            | "AS"
     )
 }
 
 /// Resolve a qualifier (`e`, `emp`, `scott.emp`) through the alias map.
 /// Returns the concrete table (owner may be None).
-pub fn resolve_qualifier(
-    qualifier: &str,
-    aliases: &HashMap<String, TableRef>,
-) -> Option<TableRef> {
+pub fn resolve_qualifier(qualifier: &str, aliases: &HashMap<String, TableRef>) -> Option<TableRef> {
     let (owner, name) = split_dotted(qualifier);
     if let Some(o) = owner {
-        return Some(TableRef { owner: Some(o), name });
+        return Some(TableRef {
+            owner: Some(o),
+            name,
+        });
     }
-    aliases.get(&name.to_lowercase()).cloned().or(Some(TableRef {
-        owner: None,
-        name,
-    }))
+    aliases
+        .get(&name.to_lowercase())
+        .cloned()
+        .or(Some(TableRef { owner: None, name }))
 }
 
 /// A referential constraint between two tables. Column vectors are
@@ -646,8 +744,7 @@ fn find_last_keyword(head: &str, keyword: &str, from: usize) -> Option<usize> {
 /// are out of scope for suggestions).
 fn has_and_or(tail: &str) -> bool {
     let clean = strip_string_literals(tail);
-    find_last_keyword(&clean, "AND", 0).is_some()
-        || find_last_keyword(&clean, "OR", 0).is_some()
+    find_last_keyword(&clean, "AND", 0).is_some() || find_last_keyword(&clean, "OR", 0).is_some()
 }
 
 /// Detect `JOIN <table> [[AS] alias] ON |` with the cursor in a fresh
@@ -763,9 +860,8 @@ pub fn join_condition_candidates(
     for (left_alias, left) in lefts {
         for fk in fks {
             // Either direction; rendering is always left-first.
-            let pairs = fk_pairs(fk, left, right).or_else(|| {
-                fk_pairs(fk, right, left).map(|(rcols, lcols)| (lcols, rcols))
-            });
+            let pairs = fk_pairs(fk, left, right)
+                .or_else(|| fk_pairs(fk, right, left).map(|(rcols, lcols)| (lcols, rcols)));
             let Some((lcols, rcols)) = pairs else {
                 continue;
             };
@@ -809,8 +905,8 @@ fn owners_match(a: &Option<String>, b: &Option<String>) -> bool {
 
 /// Statement starters for empty statement heads.
 pub const STMT_KEYWORDS: &[&str] = &[
-    "SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "DROP", "ALTER",
-    "TRUNCATE", "DESCRIBE", "EXPLAIN", "COMMIT", "ROLLBACK", "BEGIN", "DECLARE",
+    "SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "DROP", "ALTER", "TRUNCATE",
+    "DESCRIBE", "EXPLAIN", "COMMIT", "ROLLBACK", "BEGIN", "DECLARE",
 ];
 
 /// Expression keywords for select lists.
@@ -827,29 +923,113 @@ pub const PRED_KEYWORDS: &[&str] = &[
 /// (`SELECT * fro|` must offer FROM — strictness is about the prefix
 /// matching, not about hiding transitions).
 pub const SELECT_FOLLOW: &[&str] = &[
-    "FROM", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "UNION", "INTERSECT", "MINUS",
-    "INTO", "FETCH",
+    "FROM",
+    "WHERE",
+    "GROUP",
+    "ORDER",
+    "HAVING",
+    "LIMIT",
+    "UNION",
+    "INTERSECT",
+    "MINUS",
+    "INTO",
+    "FETCH",
 ];
 
 /// Clause-transition keywords valid after a predicate
 /// (`WHERE x=1 ord|` must offer ORDER).
 pub const PRED_FOLLOW: &[&str] = &[
-    "ORDER", "GROUP", "HAVING", "LIMIT", "UNION", "INTERSECT", "MINUS", "FETCH", "OFFSET",
+    "ORDER",
+    "GROUP",
+    "HAVING",
+    "LIMIT",
+    "UNION",
+    "INTERSECT",
+    "MINUS",
+    "FETCH",
+    "OFFSET",
 ];
 
 /// Oracle keywords worth completing (v1 set — statements, clauses, common
 /// functions, sequence pseudo-columns). Uppercase; matching is case-insensitive.
 pub const ORACLE_KEYWORDS: &[&str] = &[
-    "SELECT", "FROM", "WHERE", "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "ON",
-    "GROUP", "BY", "ORDER", "HAVING", "UNION", "UNION ALL", "MINUS", "INTERSECT",
-    "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "MERGE", "USING",
-    "WHEN", "THEN", "ELSE", "END", "CASE", "AND", "OR", "NOT", "IN", "EXISTS",
-    "BETWEEN", "LIKE", "IS", "NULL", "DISTINCT", "ALL", "AS", "ASC", "DESC",
-    "WITH", "CONNECT", "START", "PRIOR", "SIBLINGS", "ROWNUM", "ROWID",
-    "NEXTVAL", "CURRVAL", "SYSDATE", "SYSTIMESTAMP", "DUAL",
-    "COMMIT", "ROLLBACK",
-    "CREATE", "DROP", "ALTER", "TRUNCATE", "TABLE", "VIEW", "INDEX", "SEQUENCE", "DESCRIBE", "EXPLAIN",
-    "GRANT", "ORDER", "SIBLINGS", "BEGIN", "DECLARE", "LIMIT", "OFFSET", "FETCH",
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "JOIN",
+    "INNER",
+    "LEFT",
+    "RIGHT",
+    "FULL",
+    "OUTER",
+    "ON",
+    "GROUP",
+    "BY",
+    "ORDER",
+    "HAVING",
+    "UNION",
+    "UNION ALL",
+    "MINUS",
+    "INTERSECT",
+    "INSERT",
+    "INTO",
+    "VALUES",
+    "UPDATE",
+    "SET",
+    "DELETE",
+    "MERGE",
+    "USING",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "CASE",
+    "AND",
+    "OR",
+    "NOT",
+    "IN",
+    "EXISTS",
+    "BETWEEN",
+    "LIKE",
+    "IS",
+    "NULL",
+    "DISTINCT",
+    "ALL",
+    "AS",
+    "ASC",
+    "DESC",
+    "WITH",
+    "CONNECT",
+    "START",
+    "PRIOR",
+    "SIBLINGS",
+    "ROWNUM",
+    "ROWID",
+    "NEXTVAL",
+    "CURRVAL",
+    "SYSDATE",
+    "SYSTIMESTAMP",
+    "DUAL",
+    "COMMIT",
+    "ROLLBACK",
+    "CREATE",
+    "DROP",
+    "ALTER",
+    "TRUNCATE",
+    "TABLE",
+    "VIEW",
+    "INDEX",
+    "SEQUENCE",
+    "DESCRIBE",
+    "EXPLAIN",
+    "GRANT",
+    "ORDER",
+    "SIBLINGS",
+    "BEGIN",
+    "DECLARE",
+    "LIMIT",
+    "OFFSET",
+    "FETCH",
 ];
 
 /// Built-in functions: `(NAME, signature shown in the detail pane)`.
@@ -870,7 +1050,10 @@ pub const ORACLE_FUNCTIONS: &[(&str, &str)] = &[
     ("INSTR", "INSTR(str, substr [, pos [, nth]])"),
     ("LAST_DAY", "LAST_DAY(date)"),
     ("LENGTH", "LENGTH(char)"),
-    ("LISTAGG", "LISTAGG(expr [, delim]) WITHIN GROUP (ORDER BY …)"),
+    (
+        "LISTAGG",
+        "LISTAGG(expr [, delim]) WITHIN GROUP (ORDER BY …)",
+    ),
     ("LOWER", "LOWER(char)"),
     ("MAX", "MAX([DISTINCT | ALL] expr)"),
     ("MIN", "MIN([DISTINCT | ALL] expr)"),
@@ -902,12 +1085,48 @@ pub fn function_insert(name: &str) -> String {
 /// vault/audit/label-security, GSM, APEX/FLOWS, and maintenance accounts.
 /// Shared with `metadata.rs`, which excludes them at the SQL level.
 pub const SYSTEM_SCHEMAS: &[&str] = &[
-    "SYS", "SYSTEM", "XDB", "MDSYS", "MDDATA", "CTXSYS", "ORDSYS", "ORDDATA", "ORDPLUGINS",
-    "OLAPSYS", "SI_INFORMTN_SCHEMA", "WMSYS", "DBSNMP", "OUTLN", "EXFSYS", "DIP", "TSMSYS",
-    "DMSYS", "ODM", "ODM_MTR", "ANONYMOUS", "APPQOSSYS", "AUDSYS", "DVSYS", "DVF", "DV_MONITOR",
-    "LBACSYS", "GSMADMIN_INTERNAL", "GSMCATUSER", "GSMROOTUSER", "GSMUSER",
-    "REMOTE_SCHEDULER_AGENT", "SYSBACKUP", "SYSDG", "SYSKM", "SYSRAC", "ORACLE_OCM",
-    "SPATIAL_WFS_ADMIN_USR", "SPATIAL_CSW_ADMIN_USR", "XS$NULL", "OJVMSYS", "SYSMAN",
+    "SYS",
+    "SYSTEM",
+    "XDB",
+    "MDSYS",
+    "MDDATA",
+    "CTXSYS",
+    "ORDSYS",
+    "ORDDATA",
+    "ORDPLUGINS",
+    "OLAPSYS",
+    "SI_INFORMTN_SCHEMA",
+    "WMSYS",
+    "DBSNMP",
+    "OUTLN",
+    "EXFSYS",
+    "DIP",
+    "TSMSYS",
+    "DMSYS",
+    "ODM",
+    "ODM_MTR",
+    "ANONYMOUS",
+    "APPQOSSYS",
+    "AUDSYS",
+    "DVSYS",
+    "DVF",
+    "DV_MONITOR",
+    "LBACSYS",
+    "GSMADMIN_INTERNAL",
+    "GSMCATUSER",
+    "GSMROOTUSER",
+    "GSMUSER",
+    "REMOTE_SCHEDULER_AGENT",
+    "SYSBACKUP",
+    "SYSDG",
+    "SYSKM",
+    "SYSRAC",
+    "ORACLE_OCM",
+    "SPATIAL_WFS_ADMIN_USR",
+    "SPATIAL_CSW_ADMIN_USR",
+    "XS$NULL",
+    "OJVMSYS",
+    "SYSMAN",
 ];
 
 /// Versioned/prefixed system families (`APEX_240200`, `FLOWS_300100`, …).
@@ -1071,10 +1290,7 @@ mod tests {
         assert_eq!(at("SELECT 1; "), StatementStart);
         assert_eq!(at("SELECT 1; SEL"), StatementStart);
         // Owner qualifier after FROM completes tables, not columns.
-        assert_eq!(
-            at("SELECT * FROM scott."),
-            OwnerTables("scott".to_string())
-        );
+        assert_eq!(at("SELECT * FROM scott."), OwnerTables("scott".to_string()));
         // Fresh ON conditions route through detect_join_on in the provider;
         // classify itself sees predicate scope (columns for manual typing).
         assert_eq!(at("SELECT * FROM emp e JOIN dept d ON "), Predicate);
@@ -1136,9 +1352,15 @@ mod tests {
     fn resolve_qualifier_prefers_alias_then_bare() {
         let m = build_alias_map("SELECT * FROM scott.emp e");
         let r = resolve_qualifier("e", &m).unwrap();
-        assert_eq!((r.owner.as_deref(), r.name.as_str()), (Some("scott"), "emp"));
+        assert_eq!(
+            (r.owner.as_deref(), r.name.as_str()),
+            (Some("scott"), "emp")
+        );
         let r = resolve_qualifier("scott.emp", &m).unwrap();
-        assert_eq!((r.owner.as_deref(), r.name.as_str()), (Some("scott"), "emp"));
+        assert_eq!(
+            (r.owner.as_deref(), r.name.as_str()),
+            (Some("scott"), "emp")
+        );
         let r = resolve_qualifier("dept", &m).unwrap();
         assert_eq!(r.name, "dept");
     }
@@ -1197,10 +1419,7 @@ mod tests {
             owner: Some(owner.into()),
             usage: 0,
         };
-        let cands = vec![
-            cand("DVSYS.DBA_X", "DVSYS"),
-            cand("SCOTT.DEPT", "SCOTT"),
-        ];
+        let cands = vec![cand("DVSYS.DBA_X", "DVSYS"), cand("SCOTT.DEPT", "SCOTT")];
         let out = rank_candidates("d", cands, "SCOTT", 10);
         assert_eq!(out[0].label, "SCOTT.DEPT");
     }
@@ -1233,10 +1452,7 @@ mod tests {
             usage: 0,
         };
         // `emp` must prefer the table named EMP… over *TEMP* substring noise.
-        let cands = vec![
-            cand("SYS.MVIEW$_ADV_TEMP"),
-            cand("SYSTEM.EMPLOYEES"),
-        ];
+        let cands = vec![cand("SYS.MVIEW$_ADV_TEMP"), cand("SYSTEM.EMPLOYEES")];
         let out = rank_candidates("emp", cands, "", 10);
         assert_eq!(out[0].label, "SYSTEM.EMPLOYEES");
     }
@@ -1267,21 +1483,26 @@ mod tests {
     #[test]
     fn detect_join_on_finds_fresh_condition() {
         let aliases = build_alias_map("SELECT * FROM emp e JOIN dept d ON ");
-        let (alias, tref) = detect_join_on("SELECT * FROM emp e JOIN dept d ON ", &aliases).unwrap();
+        let (alias, tref) =
+            detect_join_on("SELECT * FROM emp e JOIN dept d ON ", &aliases).unwrap();
         assert_eq!(alias, "d");
         assert_eq!(tref.name, "dept");
         // AS alias + owner-qualified.
-        let aliases =
-            build_alias_map("SELECT * FROM scott.emp JOIN scott.dept AS dd ON ");
-        let (alias, tref) =
-            detect_join_on("SELECT * FROM scott.emp JOIN scott.dept AS dd ON ", &aliases).unwrap();
+        let aliases = build_alias_map("SELECT * FROM scott.emp JOIN scott.dept AS dd ON ");
+        let (alias, tref) = detect_join_on(
+            "SELECT * FROM scott.emp JOIN scott.dept AS dd ON ",
+            &aliases,
+        )
+        .unwrap();
         assert_eq!(alias, "dd");
         assert_eq!(tref.owner.as_deref(), Some("scott"));
         // No ON yet → None.
         assert!(detect_join_on("SELECT * FROM emp e JOIN dept d", &aliases).is_none());
         // Condition already started → None (v1: first condition only).
         assert!(detect_join_on("SELECT * FROM emp e JOIN dept d ON e.x = 1", &aliases).is_none());
-        assert!(detect_join_on("SELECT * FROM emp e JOIN dept d ON e.x = 1 AND ", &aliases).is_none());
+        assert!(
+            detect_join_on("SELECT * FROM emp e JOIN dept d ON e.x = 1 AND ", &aliases).is_none()
+        );
         // Quoted JOIN prose doesn't fool it.
         assert!(detect_join_on("SELECT 'join dept on ' FROM emp e", &aliases).is_none());
     }
@@ -1298,7 +1519,10 @@ mod tests {
             to_table: "DEPT".into(),
             to_cols: vec!["DEPTNO".into()],
         };
-        let right = TableRef { owner: None, name: "dept".into() };
+        let right = TableRef {
+            owner: None,
+            name: "dept".into(),
+        };
         let out = join_condition_candidates("d", &right, &aliases, &[fk]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].label, "e.DEPTNO = d.DEPTNO");
@@ -1329,7 +1553,10 @@ mod tests {
         assert_eq!(out[0].label, "e.A = d.A AND e.B = d.B");
         // Unrelated tables → no candidates (caller shows no popup).
         let aliases2 = build_alias_map("SELECT * FROM emp e JOIN bonus b ON ");
-        let right2 = TableRef { owner: None, name: "bonus".into() };
+        let right2 = TableRef {
+            owner: None,
+            name: "bonus".into(),
+        };
         let fk = ForeignKey {
             name: "EMP_DEPT_FK".into(),
             from_owner: None,
@@ -1343,11 +1570,72 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_columns_flags_shared_names() {
+        let col = |n: &str| ColumnMeta {
+            name: n.to_string(),
+            data_type: String::new(),
+            comments: String::new(),
+        };
+        let scope = vec![
+            ScopeTable {
+                owner: Some("SCOTT".to_string()),
+                table: "EMP".to_string(),
+                cols: vec![col("DEPTNO"), col("EMPNO")],
+            },
+            ScopeTable {
+                owner: Some("SCOTT".to_string()),
+                table: "DEPT".to_string(),
+                cols: vec![col("DEPTNO")],
+            },
+        ];
+        let amb = ambiguous_columns(&scope);
+        assert!(amb.contains("DEPTNO"));
+        assert!(!amb.contains("EMPNO"));
+        assert!(ambiguous_columns(&[]).is_empty());
+    }
+
+    #[test]
+    fn scope_label_prefers_alias_then_table() {
+        let m = build_alias_map("SELECT * FROM scott.emp e JOIN dept d ON e.deptno = d.deptno");
+        assert_eq!(
+            scope_label(&Some("scott".to_string()), "emp", &m).as_deref(),
+            Some("e")
+        );
+        assert_eq!(
+            scope_label(&Some("SCOTT".to_string()), "DEPT", &m).as_deref(),
+            Some("d")
+        );
+        assert_eq!(
+            scope_label(&None, "bonus", &m),
+            None,
+            "unknown tables fall back to the table name itself"
+        );
+        // Known owner never claims an unknown table.
+        assert_eq!(scope_label(&Some("SCOTT".to_string()), "bonus", &m), None);
+    }
+
+    #[test]
+    fn short_comment_collapses_whitespace_and_caps() {
+        assert_eq!(short_comment("  employee\n id  "), "employee id");
+        assert_eq!(short_comment(""), "");
+        let long = "x".repeat(100);
+        let out = short_comment(&long);
+        assert_eq!(out.chars().count(), 80);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
     fn insert_text_appends_space_for_keywords_only() {
         assert_eq!(insert_text_for(CandidateKind::Keyword, "SELECT"), "SELECT ");
-        assert_eq!(insert_text_for(CandidateKind::Keyword, "ORDER BY"), "ORDER BY ");
+        assert_eq!(
+            insert_text_for(CandidateKind::Keyword, "ORDER BY"),
+            "ORDER BY "
+        );
         assert_eq!(insert_text_for(CandidateKind::Table, "EMP"), "EMP");
-        assert_eq!(insert_text_for(CandidateKind::Function, "TO_DATE()"), "TO_DATE()");
+        assert_eq!(
+            insert_text_for(CandidateKind::Function, "TO_DATE()"),
+            "TO_DATE()"
+        );
         assert_eq!(
             insert_text_for(CandidateKind::ColumnInScope, "EMPNO"),
             "EMPNO"
@@ -1364,7 +1652,10 @@ mod tests {
         assert_eq!(byte_to_lsp_pos(text, off + 1), (1, 5));
         assert_eq!(byte_to_lsp_pos(text, off + 2), (1, 6));
         assert_eq!(byte_to_lsp_pos(text, 0), (0, 0));
-        assert_eq!(byte_to_lsp_pos(text, 999), byte_to_lsp_pos(text, text.len()));
+        assert_eq!(
+            byte_to_lsp_pos(text, 999),
+            byte_to_lsp_pos(text, text.len())
+        );
     }
 
     #[test]

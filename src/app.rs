@@ -13,6 +13,29 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::complete::{
+    allows_empty_prefix, ambiguous_columns, build_alias_map, byte_to_lsp_pos, classify_context,
+    detect_join_on, function_insert, insert_text_for, is_system_schema, is_trivia_position,
+    join_condition_candidates, rank_candidates, resolve_qualifier, scope_label, short_comment,
+    word_prefix, Candidate, CandidateKind, CompleteContext, ForeignKey, ScopeTable, EXPR_KEYWORDS,
+    ORACLE_FUNCTIONS, ORACLE_KEYWORDS, PRED_FOLLOW, PRED_KEYWORDS, SELECT_FOLLOW, STMT_KEYWORDS,
+};
+use crate::config::{CompleteMode, Preferences, SavedConfig, SavedTab, TabsManifest, THEME_LIST};
+use crate::db::{
+    is_describe_statement, BindParam, DbClient, FetchPage, OracledbSession, FETCH_CAP, FETCH_CHUNK,
+};
+use crate::export::{csv_header_line, csv_line, sheet_name, XlsxBuilder};
+use crate::filetab::{self, FileStamp};
+use crate::metadata::{
+    fetch_columns_blocking, fetch_fks_blocking, fetch_sequences_blocking, fetch_tables_blocking,
+    MetadataCache, SharedCache,
+};
+use crate::model::{csv_row, tab_name_from_sql, ColumnInfo, ConnectionConfig, Environment};
+use crate::session::SessionPool;
+use crate::sql::{
+    apply_substitutions, exec_summary, find_bind_vars, find_substitution_vars, format_sql, is_dml,
+    statement_at, statement_kind, txn_end, StatementKind, SubVar,
+};
 use gpui_kit::base::SelectableText;
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -31,28 +54,6 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use gpui_kit_assets::IconName as KitIcon;
-use crate::complete::{
-    Candidate, CandidateKind, CompleteContext, EXPR_KEYWORDS, ForeignKey, ORACLE_FUNCTIONS,
-    PRED_FOLLOW, PRED_KEYWORDS, SELECT_FOLLOW, STMT_KEYWORDS, allows_empty_prefix,
-    build_alias_map, byte_to_lsp_pos, classify_context, detect_join_on, function_insert,
-    insert_text_for, is_trivia_position, is_system_schema, join_condition_candidates,
-    rank_candidates, resolve_qualifier, word_prefix, ORACLE_KEYWORDS,
-};
-use crate::config::{CompleteMode, Preferences, SavedConfig, SavedTab, TabsManifest, THEME_LIST};
-use crate::db::{
-    BindParam, FETCH_CAP, FETCH_CHUNK, DbClient, FetchPage, OracledbSession, is_describe_statement,
-};
-use crate::export::{XlsxBuilder, csv_header_line, csv_line, sheet_name};
-use crate::metadata::{
-    MetadataCache, SharedCache, fetch_columns_blocking, fetch_fks_blocking,
-    fetch_sequences_blocking, fetch_tables_blocking,
-};
-use crate::model::{ColumnInfo, ConnectionConfig, Environment, csv_row, tab_name_from_sql};
-use crate::session::SessionPool;
-use crate::sql::{
-    StatementKind, SubVar, apply_substitutions, exec_summary, find_bind_vars,
-    find_substitution_vars, format_sql, is_dml, statement_at, statement_kind, txn_end,
-};
 
 const DEFAULT_SQL: &str = "SELECT user, sysdate FROM dual;";
 /// Quiet period before an editor change is flushed to its draft file.
@@ -74,6 +75,11 @@ gpui_kit::actions!(
         Quit,
         NextTab,
         PrevTab,
+        CloseTab,
+        NewTab,
+        OpenSql,
+        SaveSql,
+        SaveSqlAs,
         TriggerComplete
     ]
 );
@@ -117,9 +123,8 @@ impl CompletionProvider for OracleCompleter {
         // Shape-gating (prefix length, dot, trivia) happens in completions(),
         // which owns the full buffer text.
         let last = new_text.chars().last();
-        let wordy = last.is_some_and(|c| {
-            c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '#'
-        });
+        let wordy =
+            last.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '#');
         // Single space also fires: `FROM |` should offer tables immediately.
         // (Multi-char pastes never trigger; newlines never trigger.)
         if last != Some('.') && !wordy && new_text != " " {
@@ -148,8 +153,7 @@ struct ResultData {
 
 /// Convert one fetched page to ref-counted cells.
 fn to_shared(rows: Vec<Vec<Option<String>>>) -> Vec<Vec<Option<SharedString>>> {
-    rows
-        .into_iter()
+    rows.into_iter()
         .map(|row| row.into_iter().map(|c| c.map(SharedString::from)).collect())
         .collect()
 }
@@ -212,9 +216,9 @@ impl ResultsDelegate {
         }
         self.with_data(
             |d| {
-                d.rows.get(row_ix).and_then(|row| {
-                    row.get(col_ix - 1).map(|c| c.clone().unwrap_or_default())
-                })
+                d.rows
+                    .get(row_ix)
+                    .and_then(|row| row.get(col_ix - 1).map(|c| c.clone().unwrap_or_default()))
             },
             None,
         )
@@ -240,7 +244,11 @@ impl TableDelegate for ResultsDelegate {
         self.with_data(
             |d| {
                 let n = d.columns.len();
-                if n == 0 { 0 } else { n + 1 }
+                if n == 0 {
+                    0
+                } else {
+                    n + 1
+                }
             },
             0,
         )
@@ -255,10 +263,7 @@ impl TableDelegate for ResultsDelegate {
         if col_ix == 0 {
             return Column::new("col-rownum", "#").width(px(52.)).text_right();
         }
-        let name = self.with_data(
-            |d| d.columns.get(col_ix - 1).map(|c| c.name.clone()),
-            None,
-        );
+        let name = self.with_data(|d| d.columns.get(col_ix - 1).map(|c| c.name.clone()), None);
         let name = name.expect("column with no result");
         // Key by position, not name: duplicate column names (common in
         // SELECT * joins) would otherwise collide element identities,
@@ -355,9 +360,8 @@ impl TableDelegate for ResultsDelegate {
                                 let mut data = fetch.data.lock().expect("data lock");
                                 let room = fetch.cap.saturating_sub(data.rows.len());
                                 let take = page.rows.len().min(room);
-                                data.rows.extend(
-                                    to_shared(page.rows).into_iter().take(take),
-                                );
+                                data.rows
+                                    .extend(to_shared(page.rows).into_iter().take(take));
                                 data.capped = data.rows.len() >= fetch.cap;
                                 data.exhausted = page.exhausted || data.capped;
                                 data.loading = false;
@@ -376,17 +380,13 @@ impl TableDelegate for ResultsDelegate {
 
             // Surface the outcome in the owning tab, if it still exists and
             // still shows this fetch.
-            fetch.view
+            fetch
+                .view
                 .update(cx, |view, cx| {
                     let Some(tab) = view.tab_by_id(&fetch.tab_id) else {
                         return;
                     };
-                    if !tab
-                        .table
-                        .read(cx)
-                        .delegate()
-                        .is_current(&fetch)
-                    {
+                    if !tab.table.read(cx).delegate().is_current(&fetch) {
                         return;
                     }
                     if applied {
@@ -447,23 +447,25 @@ fn conn_menu_item(
     conn_id: String,
     op: ConnMenuOp,
 ) -> PopupMenuItem {
-    PopupMenuItem::new(label).icon(icon).on_click(move |_, window, cx| {
-        view.update(cx, |this, cx| match op {
-            ConnMenuOp::Connect => this.connect_connection(&conn_id, cx),
-            ConnMenuOp::Disconnect => this.disconnect_connection(&conn_id, cx),
-            ConnMenuOp::Edit => {
-                if let Some(ix) = this.connection_index(&conn_id) {
-                    this.start_edit(ix, window, cx);
+    PopupMenuItem::new(label)
+        .icon(icon)
+        .on_click(move |_, window, cx| {
+            view.update(cx, |this, cx| match op {
+                ConnMenuOp::Connect => this.connect_connection(&conn_id, cx),
+                ConnMenuOp::Disconnect => this.disconnect_connection(&conn_id, cx),
+                ConnMenuOp::Edit => {
+                    if let Some(ix) = this.connection_index(&conn_id) {
+                        this.start_edit(ix, window, cx);
+                    }
                 }
-            }
-            ConnMenuOp::Delete => {
-                if let Some(ix) = this.connection_index(&conn_id) {
-                    this.delete_connection(ix, cx);
+                ConnMenuOp::Delete => {
+                    if let Some(ix) = this.connection_index(&conn_id) {
+                        this.delete_connection(ix, cx);
+                    }
                 }
-            }
+            })
+            .ok();
         })
-        .ok();
-    })
 }
 
 /// What the output pane shows for a tab: a failure, or the confirmation of
@@ -501,6 +503,9 @@ struct QueryTab {
     id: String,
     name: SharedString,
     connection_id: Option<String>,
+    path: Option<std::path::PathBuf>,
+    file_stamp: Option<FileStamp>,
+    dirty: bool,
     editor: Entity<EditorState>,
     table: Entity<TableState<ResultsDelegate>>,
     /// Mirrors the delegate's fetch for lock-free (no entity read) checks.
@@ -684,11 +689,7 @@ fn export_drain_blocking(
     }
     // Mark grid buffer state: buffered rows are now "consumed" for export
     // purposes but stay visible; further pages append below.
-    let exhausted_already = fetch
-        .data
-        .lock()
-        .map(|d| d.exhausted)
-        .unwrap_or(true);
+    let exhausted_already = fetch.data.lock().map(|d| d.exhausted).unwrap_or(true);
     if !exhausted_already {
         loop {
             if cancel.load(Ordering::Relaxed) {
@@ -915,6 +916,7 @@ pub struct SqlHighlandView {
     connections: Vec<ConnectionConfig>,
     tabs: Vec<QueryTab>,
     active: usize,
+    tab_scroll: ScrollHandle,
     untitled_counter: usize,
     sidebar_collapsed: bool,
     /// Index being edited in the connection dialog (`None` = adding).
@@ -956,6 +958,74 @@ pub struct SqlHighlandView {
 }
 
 impl SqlHighlandView {
+    pub fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dirty = self.tabs.iter().any(|tab| tab.dirty && tab.path.is_some());
+        if !dirty {
+            cx.quit();
+            return;
+        }
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let save_view = view.clone();
+            alert
+                .title("Unsaved changes")
+                .description("Save changes to external SQL files before quitting?")
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_center()
+                        .child(
+                            Button::new("quit-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("quit-discard")
+                                .label("Discard")
+                                .on_click(|_, _, cx| cx.quit()),
+                        )
+                        .child(
+                            Button::new("quit-save")
+                                .primary()
+                                .label("Save and Quit")
+                                .on_click(move |_, window, cx| {
+                                    save_view
+                                        .update(cx, |this, cx| {
+                                            let mut failed = None;
+                                            for tab in &mut this.tabs {
+                                                if !tab.dirty {
+                                                    continue;
+                                                }
+                                                let Some(path) = tab.path.clone() else {
+                                                    continue;
+                                                };
+                                                let text = tab.editor.read(cx).value().to_string();
+                                                match filetab::write(&path, &text) {
+                                                    Ok(stamp) => {
+                                                        tab.file_stamp = Some(stamp);
+                                                        tab.dirty = false;
+                                                    }
+                                                    Err(err) => {
+                                                        failed = Some(err.to_string());
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if let Some(err) = failed {
+                                                this.status = format!("Save failed: {err}").into();
+                                                cx.notify();
+                                            } else {
+                                                window.close_dialog(cx);
+                                                cx.quit();
+                                            }
+                                        })
+                                        .ok();
+                                }),
+                        ),
+                )
+        });
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let connections = SavedConfig::default_path()
             .ok()
@@ -966,12 +1036,9 @@ impl SqlHighlandView {
 
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("My database"));
         let host = cx.new(|cx| InputState::new(window, cx).default_value(blank.host.clone()));
-        let port = cx.new(|cx| {
-            InputState::new(window, cx).default_value(blank.port.to_string())
-        });
-        let service = cx.new(|cx| {
-            InputState::new(window, cx).default_value(blank.service_name.clone())
-        });
+        let port = cx.new(|cx| InputState::new(window, cx).default_value(blank.port.to_string()));
+        let service =
+            cx.new(|cx| InputState::new(window, cx).default_value(blank.service_name.clone()));
         let user = cx.new(|cx| InputState::new(window, cx).default_value(blank.user.clone()));
         let password = cx.new(|cx| InputState::new(window, cx).placeholder("password"));
 
@@ -991,9 +1058,18 @@ impl SqlHighlandView {
         // and the grid alike; nothing in the kit binds ctrl-tab.
         cx.bind_keys([KeyBinding::new("ctrl-tab", NextTab, None)]);
         cx.bind_keys([KeyBinding::new("ctrl-shift-tab", PrevTab, None)]);
+        cx.bind_keys([KeyBinding::new("cmd-w", CloseTab, None)]);
+        cx.bind_keys([KeyBinding::new("cmd-t", NewTab, None)]);
+        cx.bind_keys([KeyBinding::new("cmd-o", OpenSql, None)]);
+        cx.bind_keys([KeyBinding::new("cmd-s", SaveSql, None)]);
+        cx.bind_keys([KeyBinding::new("cmd-shift-s", SaveSqlAs, None)]);
         // Manual completion trigger (Zed-style); auto-popup is governed by
         // the completion preference in `is_completion_trigger`.
-        cx.bind_keys([KeyBinding::new("ctrl-space", TriggerComplete, Some("Input"))]);
+        cx.bind_keys([KeyBinding::new(
+            "ctrl-space",
+            TriggerComplete,
+            Some("Input"),
+        )]);
 
         let prefs = Preferences::load();
         let mut this = Self {
@@ -1002,6 +1078,7 @@ impl SqlHighlandView {
             connections,
             tabs: Vec::new(),
             active: 0,
+            tab_scroll: ScrollHandle::new(),
             untitled_counter: 0,
             sidebar_collapsed: false,
             editing: None,
@@ -1087,43 +1164,40 @@ impl SqlHighlandView {
                     Some(Rc::new(completer) as Rc<dyn CompletionProvider>);
             });
         }
-        let table = cx.new(|cx| {
-            TableState::new(ResultsDelegate::empty(), window, cx).cell_selectable(true)
-        });
+        let table = cx
+            .new(|cx| TableState::new(ResultsDelegate::empty(), window, cx).cell_selectable(true));
         let tab_id = id.clone();
         let table_tab_id = id.clone();
         let subs = vec![
-            cx.subscribe_in(
-                &editor,
-                window,
-                move |this, _, ev: &InputEvent, _, cx| {
-                    if matches!(ev, InputEvent::Change) {
-                        this.schedule_draft_save(&tab_id, cx);
+            cx.subscribe_in(&editor, window, move |this, _, ev: &InputEvent, _, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    if let Some(tab) = this.tab_by_id(&tab_id) {
+                        tab.dirty = true;
                     }
-                },
-            ),
-            cx.subscribe_in(
-                &table,
-                window,
-                move |this, _, ev: &TableEvent, _, _| {
-                    let Some(tab) = this.tab_by_id(&table_tab_id) else {
-                        return;
-                    };
-                    match ev {
-                        TableEvent::SelectCell(..) => tab.copy_sel = Some(CopySel::Cell),
-                        TableEvent::SelectRow(..) => tab.copy_sel = Some(CopySel::Row),
-                        TableEvent::ClearSelection | TableEvent::SelectColumn(..) => {
-                            tab.copy_sel = None;
-                        }
-                        _ => {}
+                    this.schedule_draft_save(&tab_id, cx);
+                }
+            }),
+            cx.subscribe_in(&table, window, move |this, _, ev: &TableEvent, _, _| {
+                let Some(tab) = this.tab_by_id(&table_tab_id) else {
+                    return;
+                };
+                match ev {
+                    TableEvent::SelectCell(..) => tab.copy_sel = Some(CopySel::Cell),
+                    TableEvent::SelectRow(..) => tab.copy_sel = Some(CopySel::Row),
+                    TableEvent::ClearSelection | TableEvent::SelectColumn(..) => {
+                        tab.copy_sel = None;
                     }
-                },
-            ),
+                    _ => {}
+                }
+            }),
         ];
         self.tabs.push(QueryTab {
             id,
             name: name.into(),
             connection_id,
+            path: None,
+            file_stamp: None,
+            dirty: false,
             editor,
             table,
             fetch: None,
@@ -1155,7 +1229,17 @@ impl SqlHighlandView {
             // Always start unbound after a restart so the user explicitly
             // picks a connection per tab; editor text still restores.
             let connection_id = None;
-            let text = TabsManifest::read_draft(&saved.id);
+            let external = saved.path.as_deref().and_then(|path| {
+                filetab::normalize(path).ok().and_then(|path| {
+                    filetab::read(&path)
+                        .ok()
+                        .map(|(text, stamp)| (path, text, stamp))
+                })
+            });
+            let text = external
+                .as_ref()
+                .map(|(_, text, _)| text.clone())
+                .unwrap_or_else(|| TabsManifest::read_draft(&saved.id));
             self.untitled_counter += 1;
             let name = if saved.name.is_empty() {
                 format!("Untitled {}", self.untitled_counter)
@@ -1163,6 +1247,13 @@ impl SqlHighlandView {
                 saved.name.clone()
             };
             self.make_tab(saved.id, name, connection_id, text, window, cx);
+            if let Some((path, _, stamp)) = external {
+                if let Some(tab) = self.tabs.last_mut() {
+                    tab.path = Some(path);
+                    tab.file_stamp = Some(stamp);
+                    tab.dirty = false;
+                }
+            }
         }
         // Adopt orphaned drafts: `.sql` files with no manifest entry are
         // leftovers of a lost manifest — restore them as tabs rather than
@@ -1210,17 +1301,18 @@ impl SqlHighlandView {
         let _ = TabsManifest::write_draft(&id, &text);
         self.persist_tabs();
         self.active = self.tabs.len() - 1;
+        self.tab_scroll.scroll_to_item(self.active);
         cx.notify();
         id
     }
 
-    fn close_tab(&mut self, tab_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn close_tab_now(&mut self, tab_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ix) = self.tab_index(tab_id) {
             let removed = self.tabs.remove(ix);
             TabsManifest::delete_draft(&removed.id);
             if self.tabs.is_empty() {
-                // Always keep one tab open; no dirty prompts needed — every
-                // keystroke is already auto-saved.
+                // Always keep one tab open. Untitled tabs remain internally
+                // auto-saved; external tabs are guarded before this path.
                 self.untitled_counter += 1;
                 let id = uuid::Uuid::new_v4().to_string();
                 let name = format!("Untitled {}", self.untitled_counter);
@@ -1228,8 +1320,84 @@ impl SqlHighlandView {
             }
             self.active = self.active.min(self.tabs.len().saturating_sub(1));
             self.persist_tabs();
+            self.tab_scroll.scroll_to_item(self.active);
+            // The closed editor may still own keyboard focus. Move focus to
+            // the replacement active tab so repeated shortcuts keep working.
+            let editor = self.tabs[self.active].editor.clone();
+            editor.update(cx, |editor, cx| editor.focus(window, cx));
             cx.notify();
         }
+    }
+
+    fn request_close_tab(&mut self, tab_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        if !tab.dirty || tab.path.is_none() {
+            self.close_tab_now(tab_id, window, cx);
+            return;
+        }
+
+        let view = cx.entity().downgrade();
+        let tab_id_save = tab_id.to_string();
+        let tab_id_discard = tab_id.to_string();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let discard_view = view.clone();
+            let save_view = view.clone();
+            let discard_id = tab_id_discard.clone();
+            let save_id = tab_id_save.clone();
+            alert
+                .title("Unsaved changes")
+                .description("Save changes before closing this SQL file?")
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_center()
+                        .child(
+                            Button::new("close-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(Button::new("close-discard").label("Discard").on_click({
+                            move |_, window, cx| {
+                                window.close_dialog(cx);
+                                discard_view
+                                    .update(cx, |this, cx| {
+                                        this.close_tab_now(&discard_id, window, cx);
+                                    })
+                                    .ok();
+                            }
+                        }))
+                        .child(Button::new("close-save").primary().label("Save").on_click({
+                            move |_, window, cx| {
+                                save_view
+                                    .update(cx, |this, cx| {
+                                        let Some(ix) = this.tab_index(&save_id) else {
+                                            return;
+                                        };
+                                        let Some(path) = this.tabs[ix].path.clone() else {
+                                            return;
+                                        };
+                                        let text =
+                                            this.tabs[ix].editor.read(cx).value().to_string();
+                                        match filetab::write(&path, &text) {
+                                            Ok(stamp) => {
+                                                this.tabs[ix].file_stamp = Some(stamp);
+                                                this.tabs[ix].dirty = false;
+                                                window.close_dialog(cx);
+                                                this.close_tab_now(&save_id, window, cx);
+                                            }
+                                            Err(err) => {
+                                                this.status = format!("Save failed: {err}").into();
+                                                cx.notify();
+                                            }
+                                        }
+                                    })
+                                    .ok();
+                            }
+                        })),
+                )
+        });
     }
 
     fn select_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1237,9 +1405,83 @@ impl SqlHighlandView {
             return;
         }
         self.active = ix;
+        self.tab_scroll.scroll_to_item(ix);
         let editor = self.tabs[ix].editor.clone();
         editor.update(cx, |editor, cx| editor.focus(window, cx));
+        self.check_external_change(ix, window, cx);
         cx.notify();
+    }
+
+    fn check_external_change(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.tabs[ix].path.clone() else {
+            return;
+        };
+        let Ok(current) = filetab::stamp(&path) else {
+            self.status = format!("File is unavailable: {}", path.display()).into();
+            return;
+        };
+        if self.tabs[ix].file_stamp.as_ref() == Some(&current) {
+            return;
+        }
+        if self.tabs[ix].dirty {
+            self.status = format!("External changes detected: {}", path.display()).into();
+            return;
+        }
+
+        let tab_id = self.tabs[ix].id.clone();
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let keep_view = view.clone();
+            let reload_view = view.clone();
+            let keep_id = tab_id.clone();
+            let reload_id = tab_id.clone();
+            let reload_path = path.clone();
+            alert
+                .title("File changed on disk")
+                .description("Reload the file or keep the current buffer?")
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_center()
+                        .child(Button::new("file-keep").label("Keep").on_click({
+                            let current = current.clone();
+                            move |_, window, cx| {
+                                window.close_dialog(cx);
+                                keep_view
+                                    .update(cx, |this, cx| {
+                                        if let Some(tab) = this.tab_by_id(&keep_id) {
+                                            tab.file_stamp = Some(current.clone());
+                                        }
+                                        cx.notify();
+                                    })
+                                    .ok();
+                            }
+                        }))
+                        .child(
+                            Button::new("file-reload")
+                                .primary()
+                                .label("Reload")
+                                .on_click(move |_, window, cx| {
+                                    let Ok((text, stamp)) = filetab::read(&reload_path) else {
+                                        return;
+                                    };
+                                    reload_view
+                                        .update(cx, |this, cx| {
+                                            if let Some(tab) = this.tab_by_id(&reload_id) {
+                                                tab.editor.update(cx, |editor, cx| {
+                                                    editor.set_value(text, window, cx);
+                                                });
+                                                tab.file_stamp = Some(stamp);
+                                                tab.dirty = false;
+                                            }
+                                            window.close_dialog(cx);
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                }),
+                        ),
+                )
+        });
     }
 
     /// Cycle tabs with wrapping (`ctrl-tab` / `ctrl-shift-tab`). Focus
@@ -1261,10 +1503,156 @@ impl SqlHighlandView {
                     id: t.id.clone(),
                     name: t.name.to_string(),
                     connection_id: t.connection_id.clone(),
+                    path: t.path.clone(),
                 })
                 .collect(),
         };
         let _ = manifest.save();
+    }
+
+    fn save_active_tab_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tab_id = self.active_tab().id.clone();
+        let suggested = format!("{}.sql", file_stem(&self.active_tab().name));
+        let dir = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let view = cx.entity().downgrade();
+        cx.spawn_in(window, async move |_, cx| {
+            let rx = match cx.update(|_, cx| cx.prompt_for_new_path(&dir, Some(&suggested))) {
+                Ok(rx) => rx,
+                Err(_) => return,
+            };
+            let Ok(Ok(Some(path))) = rx.await else {
+                return;
+            };
+            let path = if filetab::is_sql(&path) {
+                path
+            } else {
+                path.with_extension("sql")
+            };
+            view.update(cx, |this, cx| {
+                let Some(ix) = this.tab_index(&tab_id) else {
+                    return;
+                };
+                let text = this.tabs[ix].editor.read(cx).value().to_string();
+                match filetab::normalize(&path)
+                    .and_then(|path| filetab::write(&path, &text).map(|stamp| (path, stamp)))
+                {
+                    Ok((path, stamp)) => {
+                        this.tabs[ix].path = Some(path.clone());
+                        this.tabs[ix].file_stamp = Some(stamp);
+                        this.tabs[ix].dirty = false;
+                        this.tabs[ix].name = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Untitled")
+                            .to_string()
+                            .into();
+                        this.persist_tabs();
+                        cx.notify();
+                    }
+                    Err(err) => {
+                        this.status = format!("Save failed: {err}").into();
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn save_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab().path.is_none() {
+            self.save_active_tab_as(window, cx);
+            return;
+        }
+        let tab_id = self.active_tab().id.clone();
+        let path = self.active_tab().path.clone().expect("path checked above");
+        let text = self.active_tab().editor.read(cx).value().to_string();
+        match filetab::write(&path, &text) {
+            Ok(stamp) => {
+                if let Some(tab) = self.tab_by_id(&tab_id) {
+                    tab.file_stamp = Some(stamp);
+                    tab.dirty = false;
+                }
+                self.persist_tabs();
+                cx.notify();
+            }
+            Err(err) => {
+                self.status = format!("Save failed: {err}").into();
+                cx.notify();
+            }
+        }
+    }
+
+    fn open_sql_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.entity().downgrade();
+        let window_handle = window.window_handle();
+        cx.spawn_in(window, async move |_, cx| {
+            let rx = match cx.update(|_, cx| {
+                cx.prompt_for_paths(PathPromptOptions {
+                    files: true,
+                    directories: false,
+                    multiple: false,
+                    prompt: Some("Open SQL file".into()),
+                })
+            }) {
+                Ok(rx) => rx,
+                Err(_) => return,
+            };
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            if !filetab::is_sql(&path) {
+                let _ = window_handle.update(cx, |_, _, cx| {
+                    view.update(cx, |this, cx| {
+                        this.status = "Only .sql files can be opened".into();
+                        cx.notify();
+                    })
+                    .ok();
+                });
+                return;
+            }
+            let Ok(path) = filetab::normalize(&path) else {
+                return;
+            };
+            let Ok((text, stamp)) = filetab::read(&path) else {
+                return;
+            };
+            let _ = window_handle.update(cx, |_, window, cx| {
+                view.update(cx, |this, cx| {
+                    if let Some(ix) = this
+                        .tabs
+                        .iter()
+                        .position(|tab| tab.path.as_ref() == Some(&path))
+                    {
+                        this.select_tab(ix, window, cx);
+                        return;
+                    }
+                    let id = uuid::Uuid::new_v4().to_string();
+                    let name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Untitled")
+                        .to_string();
+                    this.make_tab(id, name, None, text, window, cx);
+                    if let Some(tab) = this.tabs.last_mut() {
+                        tab.path = Some(path);
+                        tab.file_stamp = Some(stamp);
+                        tab.dirty = false;
+                    }
+                    this.active = this.tabs.len() - 1;
+                    this.persist_tabs();
+                    cx.notify();
+                })
+                .ok();
+            });
+        })
+        .detach();
     }
 
     /// Debounced draft flush: replaces any pending save for the tab.
@@ -1279,11 +1667,19 @@ impl SqlHighlandView {
         let bg = cx.background_executor().clone();
         let save_id = self.tabs[ix].id.clone();
         let write_id = save_id.clone();
+        let path = self.tabs[ix].path.clone();
         let task = cx.spawn(async move |view, cx| {
             bg.timer(DRAFT_DEBOUNCE).await;
             let outcome = bg
                 .spawn(async move {
-                    TabsManifest::write_draft(&write_id, &text).map_err(|e| e.to_string())
+                    match path {
+                        Some(path) => filetab::write(&path, &text)
+                            .map(|stamp| Some(stamp))
+                            .map_err(|e| e.to_string()),
+                        None => TabsManifest::write_draft(&write_id, &text)
+                            .map(|_| None)
+                            .map_err(|e| e.to_string()),
+                    }
                 })
                 .await;
             view.update(cx, |this, cx| {
@@ -1291,7 +1687,11 @@ impl SqlHighlandView {
                     return; // Tab closed while waiting; draft already removed.
                 };
                 match outcome {
-                    Ok(()) => {
+                    Ok(stamp) => {
+                        tab.dirty = false;
+                        if let Some(stamp) = stamp {
+                            tab.file_stamp = Some(stamp);
+                        }
                         tab.name = name.into();
                         this.persist_tabs();
                     }
@@ -1335,18 +1735,19 @@ impl SqlHighlandView {
     }
 
     fn fill_form(&self, cfg: &ConnectionConfig, window: &mut Window, cx: &mut Context<Self>) {
-        self.name.update(cx, |s, cx| s.set_value(cfg.name.clone(), window, cx));
-        self.host.update(cx, |s, cx| s.set_value(cfg.host.clone(), window, cx));
-        self.port.update(cx, |s, cx| {
-            s.set_value(cfg.port.to_string(), window, cx)
-        });
+        self.name
+            .update(cx, |s, cx| s.set_value(cfg.name.clone(), window, cx));
+        self.host
+            .update(cx, |s, cx| s.set_value(cfg.host.clone(), window, cx));
+        self.port
+            .update(cx, |s, cx| s.set_value(cfg.port.to_string(), window, cx));
         self.service.update(cx, |s, cx| {
             s.set_value(cfg.service_name.clone(), window, cx)
         });
-        self.user.update(cx, |s, cx| s.set_value(cfg.user.clone(), window, cx));
-        self.password.update(cx, |s, cx| {
-            s.set_value(cfg.password.clone(), window, cx)
-        });
+        self.user
+            .update(cx, |s, cx| s.set_value(cfg.user.clone(), window, cx));
+        self.password
+            .update(cx, |s, cx| s.set_value(cfg.password.clone(), window, cx));
     }
 
     fn persist(&self) {
@@ -1734,7 +2135,11 @@ impl SqlHighlandView {
                         .child(
                             h_flex()
                                 .gap_2()
-                                .child(div().flex_1().child(dialog_field("Port", &port, false, muted)))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .child(dialog_field("Port", &port, false, muted)),
+                                )
                                 .child(
                                     div()
                                         .flex_1()
@@ -1746,68 +2151,54 @@ impl SqlHighlandView {
                         .child(
                             v_flex()
                                 .gap_1()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(muted)
-                                        .child("Environment"),
-                                )
-                                .child(
-                                    h_flex().gap_1().children(
-                                        Environment::ALL.iter().enumerate().map(|(ix, env)| {
-                                            let selected =
-                                                current_env == *env;
-                                            let row_view = save_view.clone();
-                                            let pending_click = pending.clone();
-                                            let (label, text_color, bg) = match env_color(
-                                                *env, cx,
-                                            ) {
-                                                Some(color) => (
-                                                    env.label().unwrap_or("").to_string(),
-                                                    color,
-                                                    if selected {
-                                                        color.opacity(0.25)
-                                                    } else {
-                                                        color.opacity(0.0)
-                                                    },
-                                                ),
-                                                None => (
-                                                    "None".to_string(),
-                                                    muted,
-                                                    if selected {
-                                                        muted.opacity(0.25)
-                                                    } else {
-                                                        muted.opacity(0.0)
-                                                    },
-                                                ),
-                                            };
-                                            div()
-                                                .id(("conn-env", ix))
-                                                .px_2()
-                                                .py_1()
-                                                .rounded_md()
-                                                .cursor_pointer()
-                                                .bg(bg)
-                                                .text_xs()
-                                                .text_color(text_color)
-                                                .hover(move |this| {
-                                                    this.bg(text_color.opacity(0.25))
-                                                })
-                                                .on_click(
-                                                    move |_, _, cx: &mut App| {
-                                                        *pending_click.borrow_mut() = *env;
-                                                        row_view
-                                                            .update(cx, |this, cx| {
-                                                                this.pending_env = *env;
-                                                                cx.notify();
-                                                            })
-                                                            .ok();
-                                                    },
-                                                )
-                                                .child(label)
-                                        }),
-                                    ),
-                                ),
+                                .child(div().text_xs().text_color(muted).child("Environment"))
+                                .child(h_flex().gap_1().children(
+                                    Environment::ALL.iter().enumerate().map(|(ix, env)| {
+                                        let selected = current_env == *env;
+                                        let row_view = save_view.clone();
+                                        let pending_click = pending.clone();
+                                        let (label, text_color, bg) = match env_color(*env, cx) {
+                                            Some(color) => (
+                                                env.label().unwrap_or("").to_string(),
+                                                color,
+                                                if selected {
+                                                    color.opacity(0.25)
+                                                } else {
+                                                    color.opacity(0.0)
+                                                },
+                                            ),
+                                            None => (
+                                                "None".to_string(),
+                                                muted,
+                                                if selected {
+                                                    muted.opacity(0.25)
+                                                } else {
+                                                    muted.opacity(0.0)
+                                                },
+                                            ),
+                                        };
+                                        div()
+                                            .id(("conn-env", ix))
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_md()
+                                            .cursor_pointer()
+                                            .bg(bg)
+                                            .text_xs()
+                                            .text_color(text_color)
+                                            .hover(move |this| this.bg(text_color.opacity(0.25)))
+                                            .on_click(move |_, _, cx: &mut App| {
+                                                *pending_click.borrow_mut() = *env;
+                                                row_view
+                                                    .update(cx, |this, cx| {
+                                                        this.pending_env = *env;
+                                                        cx.notify();
+                                                    })
+                                                    .ok();
+                                            })
+                                            .child(label)
+                                    }),
+                                )),
                         ),
                 )
                 .footer(
@@ -1887,12 +2278,7 @@ impl SqlHighlandView {
     /// Eagerly connect a saved connection (sidebar menu). Tabs auto-connect
     /// lazily on Run, so this is strictly optional.
     fn connect_connection(&mut self, conn_id: &str, cx: &mut Context<Self>) {
-        let Some(cfg) = self
-            .connections
-            .iter()
-            .find(|c| c.id == conn_id)
-            .cloned()
-        else {
+        let Some(cfg) = self.connections.iter().find(|c| c.id == conn_id).cloned() else {
             return;
         };
         self.status = format!("Connecting to {}…", cfg.connect_string()).into();
@@ -2014,11 +2400,7 @@ impl SqlHighlandView {
         // then fail. Unbound (or dangling) tabs get the picker, and the run
         // continues automatically once a connection is chosen.
         let conn_id = match self.tabs[ix].connection_id.clone() {
-            Some(id)
-                if self.connections.iter().any(|c| c.id == id) =>
-            {
-                id
-            }
+            Some(id) if self.connections.iter().any(|c| c.id == id) => id,
             _ => {
                 self.pending_pick = Some(PendingPick {
                     tab_id: tab_id.to_string(),
@@ -2035,11 +2417,8 @@ impl SqlHighlandView {
         let bind_names = find_bind_vars(&sql);
         // `&&`-defined values (and any re-reference of them via `&`) reuse
         // without prompting, like SQL*Plus.
-        let defined: std::collections::HashMap<String, String> = self
-            .defines
-            .get(&conn_id)
-            .cloned()
-            .unwrap_or_default();
+        let defined: std::collections::HashMap<String, String> =
+            self.defines.get(&conn_id).cloned().unwrap_or_default();
         let subs_needed: Vec<SubVar> = sub_vars
             .into_iter()
             .filter(|v| !defined.contains_key(&v.name))
@@ -2085,9 +2464,8 @@ impl SqlHighlandView {
             .collect();
         let rows: Rc<Vec<PickRow>> = Rc::new(rows);
         // Search field, rebuilt per open so no stale filter survives.
-        let search = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Type to filter connections…")
-        });
+        let search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Type to filter connections…"));
         let view = cx.entity().downgrade();
         let tab_id = pending.tab_id.clone();
         let sql = pending.sql.clone();
@@ -2205,12 +2583,7 @@ impl SqlHighlandView {
                         .child(line)
                         .on_click(move |_, window, cx: &mut App| {
                             pick_connection_and_run(
-                                &pick_view,
-                                &pick_tab,
-                                &pick_sql,
-                                &conn_id,
-                                window,
-                                cx,
+                                &pick_view, &pick_tab, &pick_sql, &conn_id, window, cx,
                             );
                         }),
                 );
@@ -2230,23 +2603,29 @@ impl SqlHighlandView {
                 .child(div().flex_1())
                 // Footer buttons sit after the search field in Tab order.
                 // The dialog X is hidden (Esc cancels).
-                .child(Button::new("pick-cancel").label("Cancel").tab_index(100).on_click(
-                    move |_, window, cx: &mut App| {
-                        cancel_view
-                            .update(cx, |this, cx| {
-                                this.pending_pick = None;
-                                cx.notify();
-                            })
-                            .ok();
-                        window.close_dialog(cx);
-                        focus_tab_editor(&cancel_view, &cancel_tab, window, cx);
-                    },
-                ));
+                .child(
+                    Button::new("pick-cancel")
+                        .label("Cancel")
+                        .tab_index(100)
+                        .on_click(move |_, window, cx: &mut App| {
+                            cancel_view
+                                .update(cx, |this, cx| {
+                                    this.pending_pick = None;
+                                    cx.notify();
+                                })
+                                .ok();
+                            window.close_dialog(cx);
+                            focus_tab_editor(&cancel_view, &cancel_tab, window, cx);
+                        }),
+                );
             if rows.is_empty() {
                 let add_view = view.clone();
                 footer = footer.child(
-                    Button::new("pick-add").primary().label("Add connection…").tab_index(101).on_click(
-                        move |_, window, cx: &mut App| {
+                    Button::new("pick-add")
+                        .primary()
+                        .label("Add connection…")
+                        .tab_index(101)
+                        .on_click(move |_, window, cx: &mut App| {
                             window.close_dialog(cx);
                             add_view
                                 .update(cx, |this, cx| {
@@ -2254,8 +2633,7 @@ impl SqlHighlandView {
                                     this.start_add(window, cx);
                                 })
                                 .ok();
-                        },
-                    ),
+                        }),
                 );
             }
             dialog
@@ -2267,11 +2645,7 @@ impl SqlHighlandView {
                 // dialog open (no matches); the close is manual so a
                 // variables dialog opened below lands on a clean stack.
                 .on_ok(move |_, window, cx: &mut App| {
-                    let needle = ok_search
-                        .read(cx)
-                        .value()
-                        .to_string()
-                        .to_lowercase();
+                    let needle = ok_search.read(cx).value().to_string().to_lowercase();
                     let pick = ok_rows.iter().find(|r| {
                         needle.trim().is_empty()
                             || r.name.to_lowercase().contains(&needle)
@@ -2334,9 +2708,8 @@ impl SqlHighlandView {
             });
         }
         for b in &pending.binds {
-            let input = cx.new(|cx| {
-                InputState::new(window, cx).placeholder(format!("Value for :{b}"))
-            });
+            let input =
+                cx.new(|cx| InputState::new(window, cx).placeholder(format!("Value for :{b}")));
             fields.push(BindField {
                 key: format!(":{b}"),
                 name: b.clone(),
@@ -2391,12 +2764,15 @@ impl SqlHighlandView {
             for (fx, f) in fields.iter().enumerate() {
                 let section = if f.is_sub { "& substitution" } else { ": bind" };
                 body = body.child(
-                    v_flex().gap_1().child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(format!("{} · {}", f.key, section)),
-                    ).child(Input::new(&f.input).w_full()),
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(format!("{} · {}", f.key, section)),
+                        )
+                        .child(Input::new(&f.input).w_full()),
                 );
                 let _ = fx;
             }
@@ -2463,16 +2839,14 @@ impl SqlHighlandView {
                                 focus_tab_editor(&cancel_view_btn, &cancel_tab_btn, window, cx);
                             },
                         ))
-                        .child(
-                            Button::new("bind-run").primary().label("Run").on_click(
-                                move |_, window, cx: &mut App| {
-                                    if submit_bind_fields(&run_view, &run_fields, &run_err, cx) {
-                                        window.close_dialog(cx);
-                                        focus_tab_editor(&run_view, &run_tab, window, cx);
-                                    }
-                                },
-                            ),
-                        ),
+                        .child(Button::new("bind-run").primary().label("Run").on_click(
+                            move |_, window, cx: &mut App| {
+                                if submit_bind_fields(&run_view, &run_fields, &run_err, cx) {
+                                    window.close_dialog(cx);
+                                    focus_tab_editor(&run_view, &run_tab, window, cx);
+                                }
+                            },
+                        )),
                 )
         });
         // Focus after opening (open_dialog focuses the dialog layer; the
@@ -2500,8 +2874,7 @@ impl SqlHighlandView {
         let conn_id = match self.tabs[ix].connection_id.clone() {
             Some(id) => id,
             None => {
-                self.tabs[ix].output =
-                    Some(Output::error("Select a connection for this tab"));
+                self.tabs[ix].output = Some(Output::error("Select a connection for this tab"));
                 cx.notify();
                 return;
             }
@@ -2555,12 +2928,7 @@ impl SqlHighlandView {
                 return;
             }
         };
-        let Some(cfg) = self
-            .connections
-            .iter()
-            .find(|c| c.id == conn_id)
-            .cloned()
-        else {
+        let Some(cfg) = self.connections.iter().find(|c| c.id == conn_id).cloned() else {
             self.tabs[ix].output = Some(Output::error("Connection not found — pick another"));
             cx.notify();
             return;
@@ -2609,24 +2977,22 @@ impl SqlHighlandView {
             let view = cx.entity().downgrade();
             let tab_id_tick = tab_id.to_string();
             let bg_tick = cx.background_executor().clone();
-            cx.spawn(async move |_, cx| {
-                loop {
-                    bg_tick.timer(Duration::from_millis(500)).await;
-                    let cont = view
-                        .update(cx, |this, cx| {
-                            let Some(t) = this.tab_by_id(&tab_id_tick) else {
-                                return false;
-                            };
-                            if !t.busy || t.run_token != run_token {
-                                return false;
-                            }
-                            cx.notify();
-                            true
-                        })
-                        .unwrap_or(false);
-                    if !cont {
-                        break;
-                    }
+            cx.spawn(async move |_, cx| loop {
+                bg_tick.timer(Duration::from_millis(500)).await;
+                let cont = view
+                    .update(cx, |this, cx| {
+                        let Some(t) = this.tab_by_id(&tab_id_tick) else {
+                            return false;
+                        };
+                        if !t.busy || t.run_token != run_token {
+                            return false;
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !cont {
+                    break;
                 }
             })
             .detach();
@@ -2648,25 +3014,30 @@ impl SqlHighlandView {
                             session.connect(&cfg).map_err(|e| e.to_string())?;
                         }
                         match kind {
-                        StatementKind::Query => {
-                            let inner = std::time::Instant::now();
-                            session
-                                .start_query(&sql, FETCH_CHUNK, &binds)
-                                .map(|(columns, page, id)| {
-                                    Outcome::Rows(columns, page, id, inner.elapsed().as_millis())
+                            StatementKind::Query => {
+                                let inner = std::time::Instant::now();
+                                session
+                                    .start_query(&sql, FETCH_CHUNK, &binds)
+                                    .map(|(columns, page, id)| {
+                                        Outcome::Rows(
+                                            columns,
+                                            page,
+                                            id,
+                                            inner.elapsed().as_millis(),
+                                        )
+                                    })
+                                    .map_err(|e| e.to_string())
+                            }
+                            StatementKind::Execute => session
+                                .exec(&sql, &binds)
+                                .map(|(affected, ms)| {
+                                    // Read while holding the bg lock: locking the
+                                    // session on the UI thread would block repaints
+                                    // behind in-flight sibling queries.
+                                    let qid = session.query_id();
+                                    Outcome::Done(affected, ms, qid)
                                 })
-                                .map_err(|e| e.to_string())
-                        }
-                        StatementKind::Execute => session
-                            .exec(&sql, &binds)
-                            .map(|(affected, ms)| {
-                                // Read while holding the bg lock: locking the
-                                // session on the UI thread would block repaints
-                                // behind in-flight sibling queries.
-                                let qid = session.query_id();
-                                Outcome::Done(affected, ms, qid)
-                            })
-                            .map_err(|e| e.to_string()),
+                                .map_err(|e| e.to_string()),
                         }
                     })();
                     (result, started.elapsed().as_millis())
@@ -2770,8 +3141,7 @@ impl SqlHighlandView {
                         this.tabs[ix].output = Some(Output::error(msg));
                         // Stamp the failure over the previous run's summary —
                         // otherwise the status line keeps reporting stale success.
-                        this.tabs[ix].result_meta =
-                            format!("Failed · {elapsed_ms} ms").into();
+                        this.tabs[ix].result_meta = format!("Failed · {elapsed_ms} ms").into();
                     }
                 }
                 cx.notify();
@@ -2869,9 +3239,7 @@ impl SqlHighlandView {
                 _ => return, // Cancelled in the dialog or picker unavailable.
             };
             view.update(cx, |this, cx| {
-                this.begin_export_drain(
-                    &tab_id, fmt, path, columns, query_id, session, sql, cx,
-                );
+                this.begin_export_drain(&tab_id, fmt, path, columns, query_id, session, sql, cx);
             })
             .ok();
         })
@@ -2925,24 +3293,22 @@ impl SqlHighlandView {
             let view = cx.entity().downgrade();
             let tab_id_tick = tab_id.to_string();
             let bg_tick = cx.background_executor().clone();
-            cx.spawn(async move |_, cx| {
-                loop {
-                    bg_tick.timer(Duration::from_millis(500)).await;
-                    let cont = view
-                        .update(cx, |this, cx| {
-                            let Some(t) = this.tab_by_id(&tab_id_tick) else {
-                                return false;
-                            };
-                            if !t.exporting {
-                                return false;
-                            }
-                            cx.notify();
-                            true
-                        })
-                        .unwrap_or(false);
-                    if !cont {
-                        break;
-                    }
+            cx.spawn(async move |_, cx| loop {
+                bg_tick.timer(Duration::from_millis(500)).await;
+                let cont = view
+                    .update(cx, |this, cx| {
+                        let Some(t) = this.tab_by_id(&tab_id_tick) else {
+                            return false;
+                        };
+                        if !t.exporting {
+                            return false;
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !cont {
+                    break;
                 }
             })
             .detach();
@@ -2956,8 +3322,7 @@ impl SqlHighlandView {
             let outcome = bg
                 .spawn(async move {
                     export_drain_blocking(
-                        &session, &fetch, query_id, &columns, fmt, &path, &sheet, &sql,
-                        &cancel,
+                        &session, &fetch, query_id, &columns, fmt, &path, &sheet, &sql, &cancel,
                     )
                 })
                 .await;
@@ -3004,8 +3369,7 @@ impl SqlHighlandView {
             }
             ExportOutcome::Cancelled(rows) => {
                 self.tabs[ix].export_rows = rows as usize;
-                self.tabs[ix].result_meta =
-                    format!("Export cancelled after {rows} rows").into();
+                self.tabs[ix].result_meta = format!("Export cancelled after {rows} rows").into();
                 cx.notify();
             }
             ExportOutcome::Failed(msg) => {
@@ -3131,8 +3495,8 @@ impl SqlHighlandView {
         // an empty prefix is allowed right after operand-expecting keywords
         // (`FROM |` lists tables immediately — the space-trigger path).
         if !force && prefix.len() < 2 {
-            let dot_forced = word_start > 0
-                && text[..word_start.min(text.len())].trim_end().ends_with('.');
+            let dot_forced =
+                word_start > 0 && text[..word_start.min(text.len())].trim_end().ends_with('.');
             if !dot_forced && !(prefix.is_empty() && allows_empty_prefix(text, offset)) {
                 return empty;
             }
@@ -3174,9 +3538,9 @@ impl SqlHighlandView {
             // hand-written condition) instead of an empty popup.
         }
         let is_seq = |n: &str| {
-            cache.as_ref().is_some_and(|c| {
-                c.lock().map(|c| c.is_sequence(n)).unwrap_or(false)
-            })
+            cache
+                .as_ref()
+                .is_some_and(|c| c.lock().map(|c| c.is_sequence(n)).unwrap_or(false))
         };
         let ctx = classify_context(text, offset, &is_seq);
         let show_system = self.show_system;
@@ -3184,7 +3548,9 @@ impl SqlHighlandView {
         let usage_of = |conn: &Option<String>, label: &str| {
             conn.as_ref()
                 .and_then(|id| {
-                    self.usage.get(&(id.clone(), label.to_ascii_uppercase())).copied()
+                    self.usage
+                        .get(&(id.clone(), label.to_ascii_uppercase()))
+                        .copied()
                 })
                 .unwrap_or(0)
         };
@@ -3199,41 +3565,75 @@ impl SqlHighlandView {
         // or hold system rows from an unfiltered fetch): hide system owners
         // except the connected user's own schema.
         let hide_system = |owner: &str| {
-            !show_system
-                && !owner.eq_ignore_ascii_case(&own_schema)
-                && is_system_schema(owner)
+            !show_system && !owner.eq_ignore_ascii_case(&own_schema) && is_system_schema(owner)
         };
-        // Shared builders: columns of in-scope tables, keyword lists,
-        // function skeletons. Each context composes only what SQL allows.
-        let push_scope_columns = |cands: &mut Vec<Candidate>| {
-            let Some(cache) = &cache else {
-                return;
-            };
+        // In-scope tables as ScopeTables: single resolution shared by
+        // column completion (with ambiguity info) and qualifier detail.
+        // Deterministic alias order.
+        let mut scope_order: Vec<String> = aliases.keys().cloned().collect();
+        scope_order.sort();
+        let scope_tables: Vec<ScopeTable> = if let Some(cache) = &cache {
             let cache = cache.lock().expect("meta lock");
-            let mut seen_tables = std::collections::HashSet::new();
-            for tref in aliases.values() {
+            let mut seen = std::collections::HashSet::new();
+            let mut out = Vec::new();
+            for alias in &scope_order {
+                let Some(tref) = aliases.get(alias) else {
+                    continue;
+                };
                 let key = (
                     tref.owner.clone().unwrap_or_default().to_ascii_uppercase(),
                     tref.name.to_ascii_uppercase(),
                 );
-                if !seen_tables.insert(key.clone()) {
+                if !seen.insert(key) {
                     continue;
                 }
                 let cols = cache.columns_for(tref.owner.as_deref(), &tref.name);
-                for col in cols {
+                out.push(ScopeTable {
+                    owner: tref.owner.clone(),
+                    table: tref.name.clone(),
+                    cols,
+                });
+            }
+            out
+        } else {
+            Vec::new()
+        };
+        // Shared builders: columns of in-scope tables, keyword lists,
+        // function skeletons. Each context composes only what SQL allows.
+        let column_detail = |col: &crate::metadata::ColumnMeta, scope_name: &str| -> String {
+            let mut d = if col.data_type.is_empty() {
+                "COLUMN".to_string()
+            } else {
+                col.data_type.clone()
+            };
+            d.push_str(" · ");
+            d.push_str(scope_name);
+            let c = short_comment(&col.comments);
+            if !c.is_empty() {
+                d.push_str(" — ");
+                d.push_str(&c);
+            }
+            d
+        };
+        let push_scope_columns = |cands: &mut Vec<Candidate>| {
+            let ambiguous = ambiguous_columns(&scope_tables);
+            for t in &scope_tables {
+                for col in &t.cols {
+                    // Collision across scope tables: qualify so the insert
+                    // is unambiguous SQL (`e.DEPTNO`, never bare `DEPTNO`).
+                    let (label, owner_out) = if ambiguous.contains(&col.name.to_ascii_uppercase()) {
+                        match scope_label(&t.owner, &t.table, &aliases) {
+                            Some(scoped) => (format!("{scoped}.{}", col.name), t.owner.clone()),
+                            None => (col.name.clone(), t.owner.clone()),
+                        }
+                    } else {
+                        (col.name.clone(), t.owner.clone())
+                    };
                     cands.push(Candidate {
-                        label: col.name.clone(),
-                        detail: format!(
-                            "{} · {}",
-                            if col.data_type.is_empty() {
-                                "COLUMN".to_string()
-                            } else {
-                                col.data_type.clone()
-                            },
-                            tref.name
-                        ),
+                        label,
+                        detail: column_detail(col, &t.table),
                         kind: CandidateKind::ColumnInScope,
-                        owner: tref.owner.clone(),
+                        owner: owner_out,
                         usage: usage_of(&conn_id, &col.name),
                     });
                 }
@@ -3303,18 +3703,7 @@ impl SqlHighlandView {
                         for col in cols {
                             cands.push(Candidate {
                                 label: col.name.clone(),
-                                detail: format!(
-                                    "{}{}",
-                                    if col.data_type.is_empty() {
-                                        "COLUMN".to_string()
-                                    } else {
-                                        col.data_type.clone()
-                                    },
-                                    tref.owner
-                                        .as_ref()
-                                        .map(|o| format!(" · {o}.{}", tref.name))
-                                        .unwrap_or_default()
-                                ),
+                                detail: column_detail(&col, &tref.name),
                                 kind: CandidateKind::ColumnInScope,
                                 owner: tref.owner.clone(),
                                 usage: usage_of(&conn_id, &col.name),
@@ -3399,7 +3788,11 @@ impl SqlHighlandView {
         if ranked.is_empty() {
             return empty;
         }
-        (Self::to_items(ranked, text, word_start, offset), word_start, prefix)
+        (
+            Self::to_items(ranked, text, word_start, offset),
+            word_start,
+            prefix,
+        )
     }
 
     /// Map ranked candidates to popup items with explicit edit ranges (see
@@ -3457,9 +3850,7 @@ impl SqlHighlandView {
         let cache = self
             .meta
             .entry(conn_id.to_string())
-            .or_insert_with(|| {
-                Arc::new(Mutex::new(MetadataCache::default()))
-            })
+            .or_insert_with(|| Arc::new(Mutex::new(MetadataCache::default())))
             .clone();
         let stale = cache
             .lock()
@@ -3468,12 +3859,7 @@ impl SqlHighlandView {
         if !stale {
             return;
         }
-        let Some(cfg) = self
-            .connections
-            .iter()
-            .find(|c| c.id == conn_id)
-            .cloned()
-        else {
+        let Some(cfg) = self.connections.iter().find(|c| c.id == conn_id).cloned() else {
             return;
         };
         if let Ok(mut c) = cache.lock() {
@@ -3616,11 +4002,7 @@ impl SqlHighlandView {
                     .and_then(|(r, c)| delegate.cell_text(r, c))
                     .map(|s| s.to_string())
             };
-            let row = || {
-                table
-                    .selected_row()
-                    .and_then(|r| delegate.row_csv(r))
-            };
+            let row = || table.selected_row().and_then(|r| delegate.row_csv(r));
             match tab.copy_sel {
                 Some(CopySel::Cell) => cell(),
                 Some(CopySel::Row) => row(),
@@ -3650,16 +4032,38 @@ impl SqlHighlandView {
             .hover(|this| this.bg(cx.theme().accent.opacity(0.5)))
             .context_menu(move |menu, _, _| {
                 let connect_label = if is_live { "Disconnect" } else { "Connect" };
-                let connect_icon = if is_live { KitIcon::Unplug } else { KitIcon::Plug };
+                let connect_icon = if is_live {
+                    KitIcon::Unplug
+                } else {
+                    KitIcon::Plug
+                };
                 let connect_op = if is_live {
                     ConnMenuOp::Disconnect
                 } else {
                     ConnMenuOp::Connect
                 };
-                menu.item(conn_menu_item(connect_label, connect_icon, view.clone(), conn_id.clone(), connect_op))
-                    .item(conn_menu_item("Edit…", KitIcon::SquarePen, view.clone(), conn_id.clone(), ConnMenuOp::Edit))
-                    .separator()
-                    .item(conn_menu_item("Delete", KitIcon::X, view.clone(), conn_id.clone(), ConnMenuOp::Delete))
+                menu.item(conn_menu_item(
+                    connect_label,
+                    connect_icon,
+                    view.clone(),
+                    conn_id.clone(),
+                    connect_op,
+                ))
+                .item(conn_menu_item(
+                    "Edit…",
+                    KitIcon::SquarePen,
+                    view.clone(),
+                    conn_id.clone(),
+                    ConnMenuOp::Edit,
+                ))
+                .separator()
+                .item(conn_menu_item(
+                    "Delete",
+                    KitIcon::X,
+                    view.clone(),
+                    conn_id.clone(),
+                    ConnMenuOp::Delete,
+                ))
             })
             .child(
                 h_flex()
@@ -3701,13 +4105,11 @@ impl SqlHighlandView {
                     )
                     // Status bar: the live indicator — success green when
                     // connected, faint border tone when idle.
-                    .child(div().w(px(3.)).rounded_full().bg(
-                        if is_live {
-                            cx.theme().success
-                        } else {
-                            cx.theme().border
-                        },
-                    )),
+                    .child(div().w(px(3.)).rounded_full().bg(if is_live {
+                        cx.theme().success
+                    } else {
+                        cx.theme().border
+                    })),
             )
     }
 
@@ -3755,32 +4157,52 @@ impl SqlHighlandView {
                         .w_full()
                         .min_h_0()
                         .overflow_y_scrollbar()
-                        .child(
-                            v_flex()
-                                .w_full()
-                                .items_center()
-                                .gap_1()
-                                .children(self.connections.iter().enumerate().map(
-                                    |(ix, cfg)| {
-                                        let is_live = self.live.contains(&cfg.id);
-                                        let view = cx.entity().downgrade();
-                                        let conn_id = cfg.id.clone();
-                                        div()
-                                            .id(("conn-rail-wrap", ix))
-                                            .context_menu(move |menu, _, _| {
-                                                let connect_label = if is_live { "Disconnect" } else { "Connect" };
-                                                let connect_icon = if is_live { KitIcon::Unplug } else { KitIcon::Plug };
-                                                let connect_op = if is_live {
-                                                    ConnMenuOp::Disconnect
-                                                } else {
-                                                    ConnMenuOp::Connect
-                                                };
-                                                menu.item(conn_menu_item(connect_label, connect_icon, view.clone(), conn_id.clone(), connect_op))
-                                                    .item(conn_menu_item("Edit…", KitIcon::SquarePen, view.clone(), conn_id.clone(), ConnMenuOp::Edit))
-                                                    .separator()
-                                                    .item(conn_menu_item("Delete", KitIcon::X, view.clone(), conn_id.clone(), ConnMenuOp::Delete))
-                                            })
-                                            .child(
+                        .child(v_flex().w_full().items_center().gap_1().children(
+                            self.connections.iter().enumerate().map(|(ix, cfg)| {
+                                let is_live = self.live.contains(&cfg.id);
+                                let view = cx.entity().downgrade();
+                                let conn_id = cfg.id.clone();
+                                div()
+                                    .id(("conn-rail-wrap", ix))
+                                    .context_menu(move |menu, _, _| {
+                                        let connect_label =
+                                            if is_live { "Disconnect" } else { "Connect" };
+                                        let connect_icon = if is_live {
+                                            KitIcon::Unplug
+                                        } else {
+                                            KitIcon::Plug
+                                        };
+                                        let connect_op = if is_live {
+                                            ConnMenuOp::Disconnect
+                                        } else {
+                                            ConnMenuOp::Connect
+                                        };
+                                        menu.item(conn_menu_item(
+                                            connect_label,
+                                            connect_icon,
+                                            view.clone(),
+                                            conn_id.clone(),
+                                            connect_op,
+                                        ))
+                                        .item(conn_menu_item(
+                                            "Edit…",
+                                            KitIcon::SquarePen,
+                                            view.clone(),
+                                            conn_id.clone(),
+                                            ConnMenuOp::Edit,
+                                        ))
+                                        .separator()
+                                        .item(
+                                            conn_menu_item(
+                                                "Delete",
+                                                KitIcon::X,
+                                                view.clone(),
+                                                conn_id.clone(),
+                                                ConnMenuOp::Delete,
+                                            ),
+                                        )
+                                    })
+                                    .child(
                                         Button::new(("conn-rail", ix))
                                             .icon(KitIcon::Database)
                                             .ghost()
@@ -3800,11 +4222,10 @@ impl SqlHighlandView {
                                             .when(is_live, |b| {
                                                 b.bg(cx.theme().success.opacity(0.15))
                                             })
-                                            .on_click(cx.listener(Self::toggle_sidebar))
+                                            .on_click(cx.listener(Self::toggle_sidebar)),
                                     )
-                                    },
-                                )),
-                        ),
+                            }),
+                        )),
                 )
                 .child(
                     div()
@@ -3819,11 +4240,9 @@ impl SqlHighlandView {
                                 .ghost()
                                 .small()
                                 .tooltip("Settings (⌘,)")
-                                .on_click(cx.listener(
-                                    |this, _: &ClickEvent, window, cx| {
-                                        this.open_settings(window, cx);
-                                    },
-                                )),
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.open_settings(window, cx);
+                                })),
                         ),
                 )
                 .into_any_element();
@@ -3930,23 +4349,26 @@ impl SqlHighlandView {
         TabBar::new("query-tabs")
             .w_full()
             .selected_index(self.active)
+            .track_scroll(&self.tab_scroll)
             .on_click(cx.listener(|this, ix: &usize, window, cx| {
                 this.select_tab(*ix, window, cx);
             }))
             .children(self.tabs.iter().enumerate().map(|(ix, tab)| {
                 let tab_id = tab.id.clone();
-                Tab::new()
-                    .label(tab.name.clone())
-                    .selected(self.active == ix)
-                    .suffix(
-                        Button::new(("tab-close", ix))
-                            .icon(KitIcon::X)
-                            .ghost()
-                            .small()
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                this.close_tab(&tab_id, window, cx);
-                            })),
-                    )
+                let label = if tab.dirty {
+                    format!("{} *", tab.name)
+                } else {
+                    tab.name.to_string()
+                };
+                Tab::new().label(label).selected(self.active == ix).suffix(
+                    Button::new(("tab-close", ix))
+                        .icon(KitIcon::X)
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.request_close_tab(&tab_id, window, cx);
+                        })),
+                )
             }))
             .suffix(
                 Button::new("tab-add")
@@ -4009,8 +4431,8 @@ impl SqlHighlandView {
                             let tab_id = tab_id.clone();
                             let conn_id = conn.id.clone();
                             let name = conn.name.clone();
-                            menu = menu.item(
-                                PopupMenuItem::new(format!("{prefix}{name}")).on_click(
+                            menu =
+                                menu.item(PopupMenuItem::new(format!("{prefix}{name}")).on_click(
                                     move |_, _, cx| {
                                         view.update(cx, |this, cx| {
                                             if let Some(t) = this.tab_by_id(&tab_id) {
@@ -4021,8 +4443,7 @@ impl SqlHighlandView {
                                         })
                                         .ok();
                                     },
-                                ),
-                            );
+                                ));
                         }
                         menu
                     }),
@@ -4182,40 +4603,31 @@ impl SqlHighlandView {
                 .min_w_0()
                 .overflow_hidden()
                 .child(
-                    h_flex()
-                        .w_full()
-                        .justify_end()
-                        .px_2()
-                        .pt_2()
-                        .pb_1()
-                        .child(
-                            Button::new("export")
-                                .outline()
-                                .small()
-                                .w(px(ACTION_BUTTON_W))
-                                .icon(KitIcon::Download)
-                                .label("Export")
+                    h_flex().w_full().justify_end().px_2().pt_2().pb_1().child(
+                        Button::new("export")
+                            .outline()
+                            .small()
+                            .w(px(ACTION_BUTTON_W))
+                            .icon(KitIcon::Download)
+                            .label("Export")
                             .tooltip("Export all result rows to CSV or Excel")
                             .dropdown_menu(move |menu, _, _| {
-                                let mut menu =
-                                    menu.max_h(px(320.)).scrollable(true);
-                                    for fmt in [ExportFormat::Csv, ExportFormat::Xlsx] {
-                                        let view = exp_view.clone();
-                                        let tab_id = exp_tab.clone();
-                                        menu = menu.item(
-                                            PopupMenuItem::new(fmt.label()).on_click(
-                                                move |_, window, cx| {
-                                                    view.update(cx, |this, cx| {
-                                                        this.start_export(&tab_id, fmt, window, cx);
-                                                    })
-                                                    .ok();
-                                                },
-                                            ),
-                                        );
-                                    }
-                                    menu
-                                }),
-                        ),
+                                let mut menu = menu.max_h(px(320.)).scrollable(true);
+                                for fmt in [ExportFormat::Csv, ExportFormat::Xlsx] {
+                                    let view = exp_view.clone();
+                                    let tab_id = exp_tab.clone();
+                                    menu = menu.item(PopupMenuItem::new(fmt.label()).on_click(
+                                        move |_, window, cx| {
+                                            view.update(cx, |this, cx| {
+                                                this.start_export(&tab_id, fmt, window, cx);
+                                            })
+                                            .ok();
+                                        },
+                                    ));
+                                }
+                                menu
+                            }),
+                    ),
                 )
                 .child(
                     div()
@@ -4224,22 +4636,22 @@ impl SqlHighlandView {
                         .overflow_hidden()
                         .p_2()
                         .context_menu(move |menu, _, _| {
-                    let mut menu = menu;
-                    for fmt in [ExportFormat::Csv, ExportFormat::Xlsx] {
-                        let view = view.clone();
-                        let tab_id = tab_id.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(fmt.label()).on_click(move |_, window, cx| {
-                                view.update(cx, |this, cx| {
-                                    this.start_export(&tab_id, fmt, window, cx);
-                                })
-                                .ok();
-                            }),
-                        );
-                    }
-                    menu
-                })
-                .child(render_tab_table(&tab.table)),
+                            let mut menu = menu;
+                            for fmt in [ExportFormat::Csv, ExportFormat::Xlsx] {
+                                let view = view.clone();
+                                let tab_id = tab_id.clone();
+                                menu = menu.item(PopupMenuItem::new(fmt.label()).on_click(
+                                    move |_, window, cx| {
+                                        view.update(cx, |this, cx| {
+                                            this.start_export(&tab_id, fmt, window, cx);
+                                        })
+                                        .ok();
+                                    },
+                                ));
+                            }
+                            menu
+                        })
+                        .child(render_tab_table(&tab.table)),
                 )
                 .into_any_element()
         }
@@ -4263,7 +4675,12 @@ impl SqlHighlandView {
                 cx.theme().muted,
             )
         } else {
-            (cx.theme().success, "Statement executed", KitIcon::Check, cx.theme().muted)
+            (
+                cx.theme().success,
+                "Statement executed",
+                KitIcon::Check,
+                cx.theme().muted,
+            )
         };
         v_flex()
             .flex_1()
@@ -4286,7 +4703,9 @@ impl SqlHighlandView {
                             .label("Copy")
                             .tooltip("Copy the full message")
                             .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(copy_text.to_string()));
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    copy_text.to_string(),
+                                ));
                             })),
                     )
                     .child(
@@ -4347,7 +4766,11 @@ impl SqlHighlandView {
                 let live = self.live.contains(cid);
                 let name = self.connection_name(&Some(cid.clone()));
                 (
-                    if live { cx.theme().success } else { cx.theme().muted_foreground },
+                    if live {
+                        cx.theme().success
+                    } else {
+                        cx.theme().muted_foreground
+                    },
                     if live {
                         format!("Connected to {name}")
                     } else {
@@ -4367,7 +4790,11 @@ impl SqlHighlandView {
             .text_xs()
             .child(div().text_color(cx.theme().muted_foreground).child(left))
             .child(div().flex_1())
-            .child(div().text_color(cx.theme().muted_foreground).child(self.status.clone()))
+            .child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(self.status.clone()),
+            )
             .child(div().size(px(8.)).rounded_full().bg(dot))
             .child(div().text_color(cx.theme().muted_foreground).child(right))
     }
@@ -4413,6 +4840,25 @@ impl SqlHighlandView {
             }))
             .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
                 this.cycle_tab(-1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                let tab_id = this.active_tab().id.clone();
+                this.request_close_tab(&tab_id, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewTab, window, cx| {
+                let tab_id = this.add_tab(None, String::new(), window, cx);
+                if let Some(ix) = this.tab_index(&tab_id) {
+                    this.select_tab(ix, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &OpenSql, window, cx| {
+                this.open_sql_file(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SaveSql, window, cx| {
+                this.save_active_tab(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SaveSqlAs, window, cx| {
+                this.save_active_tab_as(window, cx);
             }))
             .child(self.render_tab_bar(cx))
             .child(content)

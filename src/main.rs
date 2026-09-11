@@ -33,9 +33,19 @@ fn main() {
         cx.bind_keys([KeyBinding::new("cmd-,", app::OpenSettings, None)]);
         cx.bind_keys([KeyBinding::new("cmd-q", app::Quit, None)]);
         cx.on_action(|_: &app::Quit, cx: &mut App| {
-            // Drafts and connections persist continuously, so there is
-            // nothing unsaved to confirm — quit immediately.
-            cx.quit();
+            if let Some(handle) = cx.windows().into_iter().next() {
+                let _ = handle.update(cx, |_, window, cx| {
+                    if let Some(view) = app::app_view(cx) {
+                        view.update(cx, |this, cx| {
+                            this.request_quit(window, cx);
+                        });
+                    } else {
+                        cx.quit();
+                    }
+                });
+            } else {
+                cx.quit();
+            }
         });
         // Native application menu. Without this macOS installs no menu bar
         // entry at all, which is why ⌘Q previously did nothing: there was
@@ -43,6 +53,10 @@ fn main() {
         cx.set_menus(vec![Menu {
             name: "SQLHighland".into(),
             items: vec![
+                MenuItem::action("Open SQL File…", app::OpenSql),
+                MenuItem::action("Save", app::SaveSql),
+                MenuItem::action("Save As…", app::SaveSqlAs),
+                MenuItem::Separator,
                 MenuItem::action("Preferences…", app::OpenSettings),
                 MenuItem::Separator,
                 MenuItem::action("Quit", app::Quit),
@@ -62,7 +76,11 @@ fn main() {
                 window.set_window_title("SQLHighland");
                 // Apply saved theme now that a window exists (System mode
                 // needs the OS appearance).
-                guitheme::apply_preferences(&sqlhighland::config::Preferences::load(), Some(window), cx);
+                guitheme::apply_preferences(
+                    &sqlhighland::config::Preferences::load(),
+                    Some(window),
+                    cx,
+                );
                 let view = cx.new(|cx| app::SqlHighlandView::new(window, cx));
                 // Stash for window-level handlers (global Cmd+,), which have
                 // a window but no view handle.

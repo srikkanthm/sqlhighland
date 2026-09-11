@@ -78,7 +78,9 @@ v1 scope, phased follow-ups, and verification.
 1. **Join suggestions:** `ALL_CONSTRAINTS`/`ALL_CONS_COLUMNS` → `ON emp.deptno = dept.deptno` after `JOIN … ON`. — SHIPPED 2026-09-12 (first-condition-only; multi-condition tails deferred).
 2. **Function snippets:** 32 built-ins complete as `NAME()` with signatures in the detail pane. — SHIPPED 2026-09-12 (tab-stops impossible: no snippet engine, no post-accept hook, `resolve_completions` never invoked — upstream gap #2; cursor lands after `)`).
 3. **Auto-qualify on collision / auto-alias suggestion.**
+   — SHIPPED 2026-09-12 (qualify-on-collision; alias suggestion deferred).
 4. **Column comments** (`ALL_COL_COMMENTS`) in popup detail.
+   — SHIPPED 2026-09-12 (joined fetch, one-line detail).
 5. **Hover provider** (table → columns; column → type/nullable/comment) — reuses cache.
 6. **Definition provider** (Cmd-click → DESCRIBE output).
 7. **Package members** (`DBMS_*`) via `ALL_OBJECTS`.

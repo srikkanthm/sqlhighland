@@ -44,8 +44,8 @@ impl SavedConfig {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut cfg: Self = toml::from_str(&text).context("parsing saved connections")?;
         // Backfill stable ids for entries written before ids existed.
         for conn in &mut cfg.connections {
@@ -60,14 +60,16 @@ impl SavedConfig {
     }
 }
 
-/// One open query tab: identity + connection binding. Editor text lives in a
-/// sibling draft file (`<id>.sql`), written on a debounce by the UI.
+/// One open query tab: identity, connection binding, and optional external
+/// SQL path. Tabs without a path keep editor text in a sibling draft file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedTab {
     pub id: String,
     pub name: String,
     #[serde(default)]
     pub connection_id: Option<String>,
+    #[serde(default)]
+    pub path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -94,8 +96,8 @@ impl TabsManifest {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let text =
-            std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
         toml::from_str(&text).context("parsing tabs manifest")
     }
 
@@ -353,7 +355,8 @@ mod tests {
 
     #[test]
     fn missing_file_gives_empty_config() {
-        let path = std::env::temp_dir().join(format!("sqlhighland-missing-{}.toml", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("sqlhighland-missing-{}.toml", std::process::id()));
         let loaded = SavedConfig::load(&path).unwrap();
         assert!(loaded.connections.is_empty());
     }
@@ -416,11 +419,13 @@ mod tests {
                     id: "tab-1".to_string(),
                     name: "Users".to_string(),
                     connection_id: Some("conn-1".to_string()),
+                    path: Some(PathBuf::from("/tmp/users.sql")),
                 },
                 SavedTab {
                     id: "tab-2".to_string(),
                     name: "Untitled 2".to_string(),
                     connection_id: None,
+                    path: None,
                 },
             ],
         };
@@ -430,6 +435,10 @@ mod tests {
         let loaded = TabsManifest::load().unwrap();
         assert_eq!(loaded.tabs.len(), 2);
         assert_eq!(loaded.tabs[0].connection_id.as_deref(), Some("conn-1"));
+        assert_eq!(
+            loaded.tabs[0].path.as_deref(),
+            Some(std::path::Path::new("/tmp/users.sql"))
+        );
         assert_eq!(TabsManifest::read_draft("tab-1"), "SELECT 1;");
         assert_eq!(TabsManifest::read_draft("missing"), "");
 
@@ -457,11 +466,7 @@ mod tests {
         let backup: Vec<_> = std::fs::read_dir(path.parent().unwrap())
             .unwrap()
             .flatten()
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("tabs.corrupt-")
-            })
+            .filter(|e| e.file_name().to_string_lossy().starts_with("tabs.corrupt-"))
             .collect();
         assert_eq!(backup.len(), 1, "evidence preserved");
 
