@@ -50,19 +50,26 @@ fn main() {
         // Native application menu. Without this macOS installs no menu bar
         // entry at all, which is why ⌘Q previously did nothing: there was
         // no Quit item to invoke. Key equivalents render from the keymap.
-        cx.set_menus(vec![Menu {
-            name: "SQLHighland".into(),
-            items: vec![
-                MenuItem::action("Open SQL File…", app::OpenSql),
-                MenuItem::action("Save", app::SaveSql),
-                MenuItem::action("Save As…", app::SaveSqlAs),
-                MenuItem::Separator,
-                MenuItem::action("Preferences…", app::OpenSettings),
-                MenuItem::Separator,
-                MenuItem::action("Quit", app::Quit),
-            ],
-            disabled: false,
-        }]);
+        cx.set_menus(vec![
+            Menu {
+                name: "SQLHighland".into(),
+                items: vec![
+                    MenuItem::action("Preferences…", app::OpenSettings),
+                    MenuItem::Separator,
+                    MenuItem::action("Quit", app::Quit),
+                ],
+                disabled: false,
+            },
+            Menu {
+                name: "File".into(),
+                items: vec![
+                    MenuItem::action("Open SQL File…", app::OpenSql),
+                    MenuItem::action("Save", app::SaveSql),
+                    MenuItem::action("Save As…", app::SaveSqlAs),
+                ],
+                disabled: false,
+            },
+        ]);
 
         let window_options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1100.), px(780.)), cx)),

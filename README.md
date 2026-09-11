@@ -76,6 +76,15 @@ thin driver, no Instant Client), `gpui-pre 0.3.4`, `gpui-kit 0.6.1`.
   `xcodebuild -downloadComponent` step above.
 - `failed to select a version for 'cc'` → the SQL grammar pin needs the
   older line: `cargo update -p cc --precise 1.2.67`.
+- `stripping debug info with 'rust-objcopy' failed … Library not loaded:
+  @rpath/libLLVM.dylib` → the `llvm-tools` rustup component is half
+  installed (stale `rust-objcopy`, missing library). The build itself
+  succeeds — only the strip step is skipped, leaving a larger binary.
+  Repair with:
+  ```sh
+  rustup component add llvm-tools
+  touch src/main.rs && cargo build --features gui --release
+  ```
 
 ## Roadmap
 

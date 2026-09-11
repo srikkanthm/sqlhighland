@@ -1645,7 +1645,8 @@ impl SqlHighlandView {
                         tab.file_stamp = Some(stamp);
                         tab.dirty = false;
                     }
-                    this.active = this.tabs.len() - 1;
+                    let ix = this.tabs.len() - 1;
+                    this.select_tab(ix, window, cx);
                     this.persist_tabs();
                     cx.notify();
                 })
@@ -4437,8 +4438,9 @@ impl SqlHighlandView {
                                         view.update(cx, |this, cx| {
                                             if let Some(t) = this.tab_by_id(&tab_id) {
                                                 t.connection_id = Some(conn_id.clone());
+                                                this.persist_tabs();
+                                                this.connect_connection(&conn_id, cx);
                                             }
-                                            this.persist_tabs();
                                             cx.notify();
                                         })
                                         .ok();
@@ -4859,6 +4861,9 @@ impl SqlHighlandView {
             }))
             .on_action(cx.listener(|this, _: &SaveSqlAs, window, cx| {
                 this.save_active_tab_as(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Quit, window, cx| {
+                this.request_quit(window, cx);
             }))
             .child(self.render_tab_bar(cx))
             .child(content)
