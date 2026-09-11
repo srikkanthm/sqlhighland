@@ -35,3 +35,13 @@ gui = ["dep:gpui", "dep:gpui-kit", "dep:gpui-kit-assets"]
 name = "sqlhighland"
 path = "src/main.rs"
 required-features = ["gui"]
+
+[dev-dependencies]
+# Headless UI tests (dialogs, focus, scrolling). Merges features with the
+# optional gui dep; only built for test targets.
+gpui-kit = { version = "=0.6.1", features = ["test-support", "tree-sitter-sql"] }
+
+[[test]]
+name = "ui_picker"
+path = "tests/ui_picker.rs"
+required-features = ["gui"]

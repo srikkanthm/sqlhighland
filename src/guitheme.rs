@@ -9,7 +9,7 @@
 
 use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
 use gpui_kit::*;
-use sqlhighland::config::{Preferences, SYSTEM_THEME};
+use crate::config::{Preferences, SYSTEM_THEME};
 
 const NORD_THEMES: &str = include_str!("../assets/themes/nord.json");
 const CATPPUCCIN_THEMES: &str = include_str!("../assets/themes/catppuccin.json");

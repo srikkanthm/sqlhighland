@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui_kit::base::SelectableText;
+use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{
     Editor, EditorState, Input, InputContentType, InputEvent, InputState,
@@ -30,14 +31,14 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use gpui_kit_assets::IconName as KitIcon;
-use sqlhighland::config::{Preferences, SavedConfig, SavedTab, TabsManifest, THEME_LIST};
-use sqlhighland::db::{
+use crate::config::{Preferences, SavedConfig, SavedTab, TabsManifest, THEME_LIST};
+use crate::db::{
     BindParam, FETCH_CAP, FETCH_CHUNK, DbClient, FetchPage, OracledbSession, is_describe_statement,
 };
-use sqlhighland::export::{XlsxBuilder, csv_header_line, csv_line, sheet_name};
-use sqlhighland::model::{ColumnInfo, ConnectionConfig, Environment, csv_row, tab_name_from_sql};
-use sqlhighland::session::SessionPool;
-use sqlhighland::sql::{
+use crate::export::{XlsxBuilder, csv_header_line, csv_line, sheet_name};
+use crate::model::{ColumnInfo, ConnectionConfig, Environment, csv_row, tab_name_from_sql};
+use crate::session::SessionPool;
+use crate::sql::{
     StatementKind, SubVar, apply_substitutions, exec_summary, find_bind_vars,
     find_substitution_vars, format_sql, is_dml, statement_at, statement_kind, txn_end,
 };
@@ -792,7 +793,7 @@ fn submit_bind_fields(
 }
 
 /// Bind the tab to the picked connection and run the deferred statement
-/// (variables dialog next, if needed). Shared by picker click and number-key
+/// (variables dialog next, if needed). Shared by picker click and Enter
 /// handlers so both paths behave identically.
 fn pick_connection_and_run(
     view: &WeakEntity<SqlHighlandView>,
@@ -1794,8 +1795,9 @@ impl SqlHighlandView {
 
     /// Connection picker for unbound runs: choosing binds the tab and the
     /// deferred statement runs immediately (variables dialog next, if needed).
-    /// Builder-safe like the other dialogs: everything is cloned in, the
-    /// builder never touches the view entity.
+    /// Search-first: type to filter, Enter runs on the first match, click
+    /// picks any row. Builder-safe like the other dialogs: everything is
+    /// cloned in, the builder never touches the view entity.
     fn open_conn_pick_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pending) = self.pending_pick.clone() else {
             return;
@@ -1805,46 +1807,69 @@ impl SqlHighlandView {
             name: String,
             detail: String,
             env: Environment,
-            focus: FocusHandle,
         }
         let rows: Vec<PickRow> = self
             .connections
             .iter()
-            .enumerate()
-            .map(|(rix, c)| PickRow {
+            .map(|c| PickRow {
                 id: c.id.clone(),
                 name: c.name.clone(),
                 detail: format!("{}@{}/{}", c.user, c.host, c.service_name),
                 env: c.environment,
-                // Explicitly tracked handles do NOT inherit the element's
-                // tab settings (those only apply to auto-created handles),
-                // and fresh handles default to tab_stop: false — without
-                // these flags the rows are focusable by API but invisible
-                // to Tab navigation.
-                focus: cx.focus_handle().tab_stop(true).tab_index(rix as isize),
             })
             .collect();
         let rows: Rc<Vec<PickRow>> = Rc::new(rows);
+        // Search field, rebuilt per open so no stale filter survives.
+        let search = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Type to filter connections…")
+        });
         let view = cx.entity().downgrade();
         let tab_id = pending.tab_id.clone();
         let sql = pending.sql.clone();
-        // Keyboard flow: the first row takes focus on open; Tab moves between
-        // rows, Enter picks. Handles are owned here so open can focus first.
-        // The builder re-runs every render, so focusing happens one-shot on
-        // the first build (a pre-mount focus call alone may not stick).
-        let first_focus = rows.first().map(|r| r.focus.clone());
+        // Explicit scroll handle (NOT the overflow_y_scrollbar() wrapper):
+        // the wrapper's caller-id keying misbehaves for dialog content that
+        // rebuilds every render, while an owned handle tracks stably.
+        let scroll_handle = Rc::new(ScrollHandle::new());
+        // Last filter seen: typing rewinds to the top, since a stale offset
+        // could hide the whole shortened list. Compared in the builder (the
+        // input's own change notification already repaints every keystroke).
+        let last_filter: Rc<std::cell::RefCell<String>> =
+            Rc::new(std::cell::RefCell::new(String::new()));
+        // Keyboard flow: search takes focus on open; Enter confirms the first
+        // match. The builder re-runs every render, so focusing happens
+        // one-shot on the first build (a pre-mount focus call alone may not
+        // stick).
+        let search_focus = search.read(cx).focus_handle(cx);
         let focused_once: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+        let search_in = search.clone();
         window.open_dialog(cx, move |dialog, window, cx| {
             let rows = rows.clone();
+            let search = search_in.clone();
             if !focused_once.get() {
                 focused_once.set(true);
-                if let Some(first) = rows.first() {
-                    window.focus(&first.focus, cx);
-                }
+                window.focus(&search.read(cx).focus_handle(cx), cx);
             }
             let muted = cx.theme().muted_foreground;
-            let accent = cx.theme().accent;
-            let mut body = v_flex().gap_1().w_full();
+            let filter = search.read(cx).value().to_string();
+            if *last_filter.borrow() != filter {
+                *last_filter.borrow_mut() = filter.clone();
+                scroll_handle.set_offset(gpui_kit::point(px(0.), px(0.)));
+            }
+            let needle = filter.to_lowercase();
+            let shown: Vec<&PickRow> = if needle.trim().is_empty() {
+                rows.iter().collect()
+            } else {
+                rows.iter()
+                    .filter(|r| {
+                        r.name.to_lowercase().contains(&needle)
+                            || r.detail.to_lowercase().contains(&needle)
+                    })
+                    .collect()
+            };
+            let mut body = v_flex()
+                .gap_1()
+                .w_full()
+                .child(Input::new(&search).w_full());
             if rows.is_empty() {
                 body = body.child(
                     div()
@@ -1852,15 +1877,38 @@ impl SqlHighlandView {
                         .text_color(muted)
                         .child("No connections yet — add one to run this statement."),
                 );
+            } else if shown.is_empty() {
+                body = body.child(
+                    div()
+                        .text_sm()
+                        .text_color(muted)
+                        .child(format!("No matches for “{filter}”.",)),
+                );
             } else {
                 body = body.child(
                     div()
                         .text_xs()
                         .text_color(muted)
-                        .child("Tab to choose, Enter to run on that connection."),
+                        .child("Type to filter, Enter runs on the first match."),
                 );
             }
-            for (rix, r) in rows.iter().enumerate() {
+            // Cap + scroll: long connection lists overflow the dialog.
+            // Explicit handle + overflow_y_scroll (NOT the Scrollable
+            // wrapper, whose caller-id keying misbehaves for content that
+            // rebuilds every render). Rows hang directly off the scroll
+            // area (not a nested column) so tracked item indices address
+            // rows — the rewind-on-type below targets item 0, the first row.
+            let scroll_handle = scroll_handle.clone();
+            let mut scroll_body = div()
+                .id("conn-pick-scroll")
+                .w_full()
+                .max_h(px(400.))
+                .overflow_y_scroll()
+                .track_scroll(&scroll_handle)
+                .flex()
+                .flex_col()
+                .gap_1();
+            for (rix, r) in shown.iter().enumerate() {
                 let pick_view = view.clone();
                 let pick_tab = tab_id.clone();
                 let pick_sql = sql.clone();
@@ -1873,10 +1921,7 @@ impl SqlHighlandView {
                     .py_1()
                     .rounded_md()
                     .cursor_pointer()
-                    .hover(|this| this.bg(muted.opacity(0.15)))
-                    .track_focus(&r.focus)
-                    .tab_index(rix as isize)
-                    .focus(|this| this.bg(accent.opacity(0.35)));
+                    .hover(|this| this.bg(muted.opacity(0.15)));
                 line = line.child(
                     v_flex()
                         .flex_1()
@@ -1886,9 +1931,11 @@ impl SqlHighlandView {
                 if let Some(tag) = env_tag(r.env, cx) {
                     line = line.child(tag);
                 }
-                body = body.child(
+                scroll_body = scroll_body.child(
                     div()
                         .id(("conn-pick", rix))
+                        .test_support()
+                        .flex_shrink_0()
                         .w_full()
                         .child(line)
                         .on_click(move |_, window, cx: &mut App| {
@@ -1903,8 +1950,10 @@ impl SqlHighlandView {
                         }),
                 );
             }
+            body = body.child(scroll_body);
             let ok_view = view.clone();
             let ok_rows = rows.clone();
+            let ok_search = search_in.clone();
             let ok_tab = tab_id.clone();
             let ok_sql = sql.clone();
             let cancel_view = view.clone();
@@ -1914,10 +1963,8 @@ impl SqlHighlandView {
             let mut footer = h_flex()
                 .gap_2()
                 .child(div().flex_1())
-                // Tab order: connection rows (0..n) come first; footer
-                // buttons sit far above so Tab cycles rows before reaching
-                // them. The dialog X is hidden for the same reason (Esc
-                // cancels).
+                // Footer buttons sit after the search field in Tab order.
+                // The dialog X is hidden (Esc cancels).
                 .child(Button::new("pick-cancel").label("Cancel").tab_index(100).on_click(
                     move |_, window, cx: &mut App| {
                         cancel_view
@@ -1951,15 +1998,20 @@ impl SqlHighlandView {
                 .w(px(400.))
                 .close_button(false)
                 .child(body)
-                // Enter picks the focused row (Tab moves between rows), or
-                // the first row when focus is on the dialog itself. False:
-                // the dialog is already closed manually above.
+                // Enter runs on the first filtered match. False keeps the
+                // dialog open (no matches); the close is manual so a
+                // variables dialog opened below lands on a clean stack.
                 .on_ok(move |_, window, cx: &mut App| {
-                    let focused = window.focused(cx);
-                    let pick = ok_rows
-                        .iter()
-                        .find(|r| Some(&r.focus) == focused.as_ref())
-                        .or(ok_rows.first());
+                    let needle = ok_search
+                        .read(cx)
+                        .value()
+                        .to_string()
+                        .to_lowercase();
+                    let pick = ok_rows.iter().find(|r| {
+                        needle.trim().is_empty()
+                            || r.name.to_lowercase().contains(&needle)
+                            || r.detail.to_lowercase().contains(&needle)
+                    });
                     match pick {
                         Some(row) => {
                             window.close_dialog(cx);
@@ -1991,11 +2043,9 @@ impl SqlHighlandView {
                 })
                 .footer(footer)
         });
-        // First row takes focus on open (open_dialog focuses the dialog
-        // layer; the row must win so Tab/Enter work immediately).
-        if let Some(handle) = first_focus {
-            window.focus(&handle, cx);
-        }
+        // Search takes focus on open (open_dialog focuses the dialog layer;
+        // the field must win so typing + Enter work immediately).
+        window.focus(&search_focus, cx);
     }
 
     /// Variables dialog: one blank field per `&name` / `:name` (always blank,
@@ -2857,7 +2907,7 @@ impl SqlHighlandView {
                             .flex_1()
                             .min_w_0()
                             .justify_center()
-                            // Truncate (not clip): long names/details collapse
+                            // Truncate (not clip): long names collapse
                             // to an ellipsis when the pane shrinks instead of
                             // overflowing or pushing the layout.
                             .child(
@@ -2875,13 +2925,6 @@ impl SqlHighlandView {
                                     .when_some(env_tag(cfg.environment, cx), |this, tag| {
                                         this.child(tag)
                                     }),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .truncate()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!("{}@{}/{}", cfg.user, cfg.host, cfg.service_name)),
                             ),
                     )
                     // Status bar: the live indicator — success green when
@@ -2907,15 +2950,22 @@ impl SqlHighlandView {
                 .border_r_1()
                 .border_color(cx.theme().border)
                 .items_center()
-                .p_1()
                 .gap_1()
                 .child(
-                    Button::new("expand")
-                        .icon(KitIcon::PanelLeftOpen)
-                        .ghost()
-                        .small()
-                        .tooltip("Expand connections")
-                        .on_click(cx.listener(Self::toggle_sidebar)),
+                    div()
+                        .w_full()
+                        .h(px(36.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            Button::new("expand")
+                                .icon(KitIcon::PanelLeftOpen)
+                                .ghost()
+                                .small()
+                                .tooltip("Expand connections")
+                                .on_click(cx.listener(Self::toggle_sidebar)),
+                        ),
                 )
                 .child(
                     Button::new("rail-add")
@@ -2985,14 +3035,24 @@ impl SqlHighlandView {
                         ),
                 )
                 .child(
-                    Button::new("rail-settings")
-                        .icon(KitIcon::Settings)
-                        .ghost()
-                        .small()
-                        .tooltip("Settings (⌘,)")
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.open_settings(window, cx);
-                        })),
+                    div()
+                        .w_full()
+                        .h(px(28.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            Button::new("rail-settings")
+                                .icon(KitIcon::Settings)
+                                .ghost()
+                                .small()
+                                .tooltip("Settings (⌘,)")
+                                .on_click(cx.listener(
+                                    |this, _: &ClickEvent, window, cx| {
+                                        this.open_settings(window, cx);
+                                    },
+                                )),
+                        ),
                 )
                 .into_any_element();
         }
@@ -3001,9 +3061,9 @@ impl SqlHighlandView {
             .size_full()
             .child(
                 h_flex()
+                    .h(px(36.))
                     .gap_1()
                     .px_2()
-                    .py_1()
                     .items_center()
                     .border_b_1()
                     .border_color(cx.theme().border)
@@ -3072,9 +3132,11 @@ impl SqlHighlandView {
             .child(
                 div()
                     .w_full()
+                    .h(px(28.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .px_1()
-                    .pb_1()
-                    .pt_1()
                     .border_t_1()
                     .border_color(cx.theme().border)
                     .child(
@@ -3160,7 +3222,9 @@ impl SqlHighlandView {
                     .label(label)
                     .tooltip("Connection for this tab — click to change")
                     .dropdown_menu(move |menu, _, _| {
-                        let mut menu = menu;
+                        // Cap + scroll: long connection lists overflow the
+                        // viewport otherwise.
+                        let mut menu = menu.max_h(px(320.)).scrollable(true);
                         if connections.is_empty() {
                             return menu.item(PopupMenuItem::new(
                                 "No connections — add one in the sidebar",
@@ -3356,9 +3420,10 @@ impl SqlHighlandView {
                                 .w(px(ACTION_BUTTON_W))
                                 .icon(KitIcon::Download)
                                 .label("Export")
-                                .tooltip("Export all result rows to CSV or Excel")
-                                .dropdown_menu(move |menu, _, _| {
-                                    let mut menu = menu;
+                            .tooltip("Export all result rows to CSV or Excel")
+                            .dropdown_menu(move |menu, _, _| {
+                                let mut menu =
+                                    menu.max_h(px(320.)).scrollable(true);
                                     for fmt in [ExportFormat::Csv, ExportFormat::Xlsx] {
                                         let view = exp_view.clone();
                                         let tab_id = exp_tab.clone();

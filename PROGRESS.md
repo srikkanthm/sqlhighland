@@ -213,3 +213,17 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - Verified: clean `clippy`, 50 lib + 8 live tests, 2505-row/3-page live
   drain composition check (CSV + XLSX byte-exact), release smoke. Manual
   pass (save dialog, progress, cancel, open .xlsx in Excel) outstanding.
+
+## Picker scroll + UI tests (2026-09-11)
+
+- Root cause of dead picker scrolling: `overflow_y_scrollbar()` keys state
+  by caller location and re-ids the inner div, so it misbehaves for dialog
+  content rebuilt every render. Replaced with an owned `ScrollHandle` +
+  `track_scroll` + `overflow_y_scroll` (the kit's own proven pattern).
+- Tracked focus handles need explicit `.tab_stop(true).tab_index(i)` —
+  fresh handles default to non-stops and the element's settings only apply
+  to auto-created handles. This was the Tab-cycle fix.
+- `tests/ui_picker.rs` (gui-gated, `test-support` dev-dep): stages 60
+  connections via `SQLHIGHLAND_CONFIG_DIR`, drives the REAL view headless —
+  unbound run opens picker, far rows scroll into view, Tab moves focus,
+  Enter picks and closes. Plus a bare scrollable regression test.

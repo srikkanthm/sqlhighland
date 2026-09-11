@@ -1,5 +1,4 @@
-mod app;
-mod guitheme;
+use sqlhighland::{app, guitheme};
 
 use gpui_kit::component::*;
 use gpui_kit::*;
