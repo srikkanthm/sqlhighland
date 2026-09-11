@@ -18,10 +18,18 @@ pub const DICT_MAX_ROWS: usize = 100_000;
 /// Stale-after duration; the view refreshes past this on next trigger.
 pub const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableKind {
+    Table,
+    View,
+    Sequence,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableId {
     pub owner: String,
     pub name: String,
+    pub kind: TableKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,8 +136,8 @@ pub fn system_filter_sql(owner_col: &str, include_system: bool, own_schema: &str
     }
 }
 
-/// Fetch tables+views as `(owner, name)` pairs. `own_schema` (connected
-/// user) is always exempt from the system filter.
+/// Fetch tables+views as `(owner, name, kind)` triples. `own_schema`
+/// (connected user) is always exempt from the system filter.
 pub fn fetch_tables_blocking(
     db: &mut impl DbClient,
     include_system: bool,
@@ -138,7 +146,7 @@ pub fn fetch_tables_blocking(
     let filter = system_filter_sql("owner", include_system, own_schema);
     let r = db.run_query(
         &format!(
-            "SELECT owner, table_name FROM all_tables{filter} UNION ALL SELECT owner, view_name FROM all_views{filter}"
+            "SELECT owner, table_name, 'TABLE' FROM all_tables{filter} UNION ALL SELECT owner, view_name, 'VIEW' FROM all_views{filter}"
         ),
         DICT_MAX_ROWS,
         &[],
@@ -146,10 +154,18 @@ pub fn fetch_tables_blocking(
     Ok(r.rows
         .iter()
         .filter_map(|row| match row.as_slice() {
-            [Some(o), Some(t)] => Some(TableId {
-                owner: o.clone(),
-                name: t.clone(),
-            }),
+            [Some(o), Some(t), Some(k)] => {
+                let kind = if k.eq_ignore_ascii_case("VIEW") {
+                    TableKind::View
+                } else {
+                    TableKind::Table
+                };
+                Some(TableId {
+                    owner: o.clone(),
+                    name: t.clone(),
+                    kind,
+                })
+            }
             _ => None,
         })
         .collect())
@@ -266,6 +282,7 @@ pub fn fetch_sequences_blocking(
             [Some(o), Some(t)] => Some(TableId {
                 owner: o.clone(),
                 name: t.clone(),
+                kind: TableKind::Sequence,
             }),
             _ => None,
         })
@@ -342,11 +359,12 @@ mod tests {
     fn fake() -> FakeDb {
         FakeDb {
             tables: qr(
-                &["OWNER", "TABLE_NAME"],
+                &["OWNER", "TABLE_NAME", "KIND"],
                 &[
-                    vec![Some("SCOTT"), Some("EMP")],
-                    vec![Some("SCOTT"), Some("DEPT")],
-                    vec![None, Some("GHOST")],
+                    vec![Some("SCOTT"), Some("EMP"), Some("TABLE")],
+                    vec![Some("SCOTT"), Some("DEPT"), Some("TABLE")],
+                    vec![Some("SCOTT"), Some("EMPVW"), Some("VIEW")],
+                    vec![None, Some("GHOST"), Some("TABLE")],
                 ],
             ),
             columns: qr(
@@ -426,8 +444,11 @@ mod tests {
     fn tables_skip_null_owner() {
         let mut db = fake();
         let t = fetch_tables_blocking(&mut db, true, "").unwrap();
-        assert_eq!(t.len(), 2);
+        assert_eq!(t.len(), 3);
         assert_eq!(t[0].name, "EMP");
+        assert_eq!(t[0].kind, TableKind::Table);
+        assert_eq!(t[2].name, "EMPVW");
+        assert_eq!(t[2].kind, TableKind::View);
     }
 
     #[test]
@@ -446,6 +467,7 @@ mod tests {
         let mut db = fake();
         let s = fetch_sequences_blocking(&mut db, true, "").unwrap();
         assert_eq!(s[0].name, "EMP_SEQ");
+        assert_eq!(s[0].kind, TableKind::Sequence);
     }
 
     #[test]

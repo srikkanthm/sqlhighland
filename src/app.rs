@@ -32,6 +32,7 @@ use crate::metadata::{
     MetadataCache, SharedCache,
 };
 use crate::model::{csv_row, tab_name_from_sql, ColumnInfo, ConnectionConfig, Environment};
+use crate::schema::{OracleProvider, SchemaProvider as _};
 use crate::session::SessionPool;
 use crate::sql::{
     apply_substitutions, exec_summary, find_bind_vars, find_substitution_vars, format_sql, is_dml,
@@ -44,6 +45,7 @@ use gpui_kit::component::input::{
     CompletionProvider, DefinitionProvider, Editor, EditorState, HoverProvider, Input,
     InputContentType, InputEvent, InputState,
 };
+use gpui_kit::component::list::ListItem;
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -51,6 +53,7 @@ use gpui_kit::component::setting::{
     RenderOptions, SettingGroup, SettingItem, SettingPage, Settings,
 };
 use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::tree::{tree, TreeEvent, TreeItem, TreeState};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -650,6 +653,7 @@ impl Output {
 struct QueryTab {
     id: String,
     name: SharedString,
+    kind: TabKind,
     connection_id: Option<String>,
     path: Option<std::path::PathBuf>,
     file_stamp: Option<FileStamp>,
@@ -690,6 +694,21 @@ struct QueryTab {
     export_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     save_task: Option<Task<()>>,
     _subs: Vec<Subscription>,
+}
+
+/// Tab flavor: a full SQL editor, or an object viewer (DESCRIBE grid,
+/// no editor) opened from the schema browser. Viewers are ephemeral and
+/// reuse the run/results pipeline. The editor entity is kept but
+/// unrendered for viewers — every viewer branch is a marked `TabKind`
+/// check, so a future `Option<editor>` refactor is compiler-guided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TabKind {
+    Query,
+    Viewer {
+        owner: String,
+        name: String,
+        kind: crate::metadata::TableKind,
+    },
 }
 
 /// Export file format chosen in the menu.
@@ -1100,6 +1119,19 @@ pub struct SqlHighlandView {
     complete_auto: bool,
     /// Include SYS/SYSTEM/etc. objects in suggestions. Mirrors preferences.
     show_system: bool,
+    /// Schema-browser trees, per connection id. Trees appear under their
+    /// connection row, independent of the active tab — expand warms the
+    /// dictionary via `ensure_meta`, and its completion hook rebuilds.
+    browser_open: std::collections::HashSet<String>,
+    /// Expanded tree node ids per connection (`s:{schema}`,
+    /// `g:{schema}/{group}`, `o:{schema}/{T|V|S}/{object}`); the source of
+    /// truth reapplied on every rebuild (filter/cache refresh), fed by
+    /// `TreeEvent`s. Per-connection so identical schemas don't mirror.
+    browser_expanded: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    browser_trees: std::collections::HashMap<String, Entity<TreeState>>,
+    /// Client-side tree filter, one input per open connection (entity
+    /// persists while open; Change rebuilds that connection's tree).
+    browser_filters: std::collections::HashMap<String, Entity<InputState>>,
     /// Window-lifetime subscriptions (OS appearance observer for System
     /// theme mode). Kept alive by ownership, like per-tab `_subs`.
     _subs: Vec<Subscription>,
@@ -1245,6 +1277,10 @@ impl SqlHighlandView {
             usage: std::collections::HashMap::new(),
             complete_auto: prefs.completion == CompleteMode::Auto,
             show_system: prefs.show_system_schemas,
+            browser_open: std::collections::HashSet::new(),
+            browser_expanded: std::collections::HashMap::new(),
+            browser_trees: std::collections::HashMap::new(),
+            browser_filters: std::collections::HashMap::new(),
             _subs: Vec::new(),
         };
         // Follow the OS appearance while the theme mode is System. The
@@ -1292,6 +1328,7 @@ impl SqlHighlandView {
         name: String,
         connection_id: Option<String>,
         text: String,
+        kind: TabKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1331,17 +1368,22 @@ impl SqlHighlandView {
                 let (Some(owner), Some(table)) = (segs.next(), segs.next()) else {
                     return false;
                 };
-                let sql = format!("DESCRIBE {owner}.{table}");
                 let tab_id = jump_tab_id.clone();
                 view.update(cx, |this, cx| {
-                    // Own-schema tables describe bare (`DESCRIBE EMPLOYEES`
-                    // resolves to the connected schema first).
+                    // Engine-owned statement (Oracle: DESCRIBE, bare for own
+                    // schema). The provider — not the UI — knows the dialect.
                     let sql = match this.tab_by_id(&tab_id).and_then(|t| t.connection_id.clone()) {
                         Some(cid) => {
                             let own = this.own_schema_of(&Some(cid));
-                            format!("DESCRIBE {}", display_name(Some(owner), table, &own))
+                            // Cmd-click jumps resolve tables only.
+                            OracleProvider.describe_sql(
+                                owner,
+                                table,
+                                &own,
+                                crate::metadata::TableKind::Table,
+                            )
                         }
-                        None => sql,
+                        None => format!("DESCRIBE {owner}.{table}"),
                     };
                     this.start_run(&tab_id, sql, window, cx);
                 })
@@ -1387,6 +1429,7 @@ impl SqlHighlandView {
         self.tabs.push(QueryTab {
             id,
             name: name.into(),
+            kind,
             connection_id,
             path: None,
             file_stamp: None,
@@ -1439,7 +1482,7 @@ impl SqlHighlandView {
             } else {
                 saved.name.clone()
             };
-            self.make_tab(saved.id, name, connection_id, text, window, cx);
+            self.make_tab(saved.id, name, connection_id, text, TabKind::Query, window, cx);
             if let Some((path, _, stamp)) = external {
                 if let Some(tab) = self.tabs.last_mut() {
                     tab.path = Some(path);
@@ -1461,7 +1504,7 @@ impl SqlHighlandView {
         for (id, text) in orphans {
             self.untitled_counter += 1;
             let name = tab_name_from_sql(&text, &format!("Untitled {}", self.untitled_counter));
-            self.make_tab(id, name, None, text, window, cx);
+            self.make_tab(id, name, None, text, TabKind::Query, window, cx);
         }
         if self.tabs.is_empty() {
             // First launch (or empty manifest): one starter tab, unbound so
@@ -1489,7 +1532,7 @@ impl SqlHighlandView {
         self.untitled_counter += 1;
         let id = uuid::Uuid::new_v4().to_string();
         let name = tab_name_from_sql(&text, &format!("Untitled {}", self.untitled_counter));
-        self.make_tab(id.clone(), name, connection_id, text.clone(), window, cx);
+        self.make_tab(id.clone(), name, connection_id, text.clone(), TabKind::Query, window, cx);
         // Persist immediately so a crash before the first keystroke loses nothing.
         let _ = TabsManifest::write_draft(&id, &text);
         self.persist_tabs();
@@ -1497,6 +1540,65 @@ impl SqlHighlandView {
         self.tab_scroll.scroll_to_item(self.active);
         cx.notify();
         id
+    }
+
+    /// Open (or focus) an object-viewer tab for a schema-browser object
+    /// and run its DESCRIBE. Viewer tabs are ephemeral editor-less grids.
+    fn open_viewer(
+        &mut self,
+        conn_id: &str,
+        owner: String,
+        name: String,
+        kind: crate::metadata::TableKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ix) = self.tabs.iter().position(|t| {
+            t.connection_id.as_deref() == Some(conn_id)
+                && matches!(&t.kind, TabKind::Viewer{ owner: o, name: n, kind: k }
+                    if o == &owner && n == &name && k == &kind)
+        }) {
+            self.select_tab(ix, window, cx);
+            return;
+        }
+        let own = self.own_schema_of(&Some(conn_id.to_string()));
+        let title = OracleProvider.object_title(&owner, &name, &own);
+        let id = uuid::Uuid::new_v4().to_string();
+        self.make_tab(
+            id.clone(),
+            title,
+            Some(conn_id.to_string()),
+            String::new(),
+            TabKind::Viewer {
+                owner: owner.clone(),
+                name: name.clone(),
+                kind,
+            },
+            window,
+            cx,
+        );
+        self.active = self.tabs.len() - 1;
+        self.tab_scroll.scroll_to_item(self.active);
+        let sql = OracleProvider.describe_sql(&owner, &name, &own, kind);
+        self.start_run(&id, sql, window, cx);
+        cx.notify();
+    }
+
+    /// Re-run the DESCRIBE behind a viewer tab (its Refresh button).
+    /// No-op for query tabs and unknown tab ids.
+    fn refresh_viewer(&mut self, tab_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (conn_id, owner, name, kind) = match self.tabs.iter().find(|t| t.id == tab_id) {
+            Some(t) => match (&t.connection_id, &t.kind) {
+                (Some(cid), TabKind::Viewer { owner, name, kind }) => {
+                    (cid.clone(), owner.clone(), name.clone(), *kind)
+                }
+                _ => return,
+            },
+            None => return,
+        };
+        let own = self.own_schema_of(&Some(conn_id));
+        let sql = OracleProvider.describe_sql(&owner, &name, &own, kind);
+        self.start_run(tab_id, sql, window, cx);
     }
 
     fn close_tab_now(&mut self, tab_id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1509,15 +1611,18 @@ impl SqlHighlandView {
                 self.untitled_counter += 1;
                 let id = uuid::Uuid::new_v4().to_string();
                 let name = format!("Untitled {}", self.untitled_counter);
-                self.make_tab(id, name, None, String::new(), window, cx);
+                self.make_tab(id, name, None, String::new(), TabKind::Query, window, cx);
             }
             self.active = self.active.min(self.tabs.len().saturating_sub(1));
             self.persist_tabs();
             self.tab_scroll.scroll_to_item(self.active);
             // The closed editor may still own keyboard focus. Move focus to
             // the replacement active tab so repeated shortcuts keep working.
-            let editor = self.tabs[self.active].editor.clone();
-            editor.update(cx, |editor, cx| editor.focus(window, cx));
+            // Viewers have no visible editor: leave focus alone.
+            if matches!(self.tabs[self.active].kind, TabKind::Query) {
+                let editor = self.tabs[self.active].editor.clone();
+                editor.update(cx, |editor, cx| editor.focus(window, cx));
+            }
             cx.notify();
         }
     }
@@ -1599,9 +1704,12 @@ impl SqlHighlandView {
         }
         self.active = ix;
         self.tab_scroll.scroll_to_item(ix);
-        let editor = self.tabs[ix].editor.clone();
-        editor.update(cx, |editor, cx| editor.focus(window, cx));
-        self.check_external_change(ix, window, cx);
+        // Viewers have no visible editor: don't steal focus.
+        if matches!(self.tabs[ix].kind, TabKind::Query) {
+            let editor = self.tabs[ix].editor.clone();
+            editor.update(cx, |editor, cx| editor.focus(window, cx));
+            self.check_external_change(ix, window, cx);
+        }
         cx.notify();
     }
 
@@ -1692,6 +1800,8 @@ impl SqlHighlandView {
             tabs: self
                 .tabs
                 .iter()
+                // Viewer tabs are ephemeral: never persisted.
+                .filter(|t| matches!(t.kind, TabKind::Query))
                 .map(|t| SavedTab {
                     id: t.id.clone(),
                     name: t.name.to_string(),
@@ -1704,6 +1814,10 @@ impl SqlHighlandView {
     }
 
     fn save_active_tab_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Viewers have no editor text to save.
+        if !matches!(self.active_tab().kind, TabKind::Query) {
+            return;
+        }
         let tab_id = self.active_tab().id.clone();
         let suggested = format!("{}.sql", file_stem(&self.active_tab().name));
         let dir = std::env::var("HOME")
@@ -1756,6 +1870,10 @@ impl SqlHighlandView {
     }
 
     fn save_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Viewers have no editor text to save.
+        if !matches!(self.active_tab().kind, TabKind::Query) {
+            return;
+        }
         if self.active_tab().path.is_none() {
             self.save_active_tab_as(window, cx);
             return;
@@ -1832,7 +1950,7 @@ impl SqlHighlandView {
                         .and_then(|s| s.to_str())
                         .unwrap_or("Untitled")
                         .to_string();
-                    this.make_tab(id, name, None, text, window, cx);
+                    this.make_tab(id, name, None, text, TabKind::Query, window, cx);
                     if let Some(tab) = this.tabs.last_mut() {
                         tab.path = Some(path);
                         tab.file_stamp = Some(stamp);
@@ -1909,11 +2027,11 @@ impl SqlHighlandView {
 
     fn form_config(&self, cx: &App) -> ConnectionConfig {
         // Preserve the edited entry's id so live sessions keep matching.
-        let id = self
-            .editing
-            .and_then(|ix| self.connections.get(ix))
-            .map(|c| c.id.clone())
-            .unwrap_or_default();
+        let edited = self.editing.and_then(|ix| self.connections.get(ix));
+        let id = edited.map(|c| c.id.clone()).unwrap_or_default();
+        // No engine picker in the dialog yet: every connection is Oracle.
+        // Preserve the stored engine when editing (forward-compat).
+        let engine = edited.map(|c| c.engine).unwrap_or_default();
         ConnectionConfig {
             id,
             name: self.name.read(cx).value().to_string(),
@@ -1923,6 +2041,7 @@ impl SqlHighlandView {
             user: self.user.read(cx).value().to_string(),
             password: self.password.read(cx).value().to_string(),
             environment: self.pending_env,
+            engine,
         }
     }
 
@@ -4142,6 +4261,8 @@ impl SqlHighlandView {
                     // Degrade silently: keywords + whatever is cached work.
                     this.status = "".into();
                 }
+                // Fresh dictionaries rebuild an open schema-browser tree.
+                this.refresh_browser(&conn_bg, cx);
                 cx.notify();
             })
             .ok();
@@ -4214,6 +4335,310 @@ impl SqlHighlandView {
         }
     }
 
+    // -- Schema browser ---------------------------------------------------
+
+    /// Tree node ids (per-connection trees, so no connection prefix):
+    /// `s:{schema}` folder, `g:{schema}/{Tables|Views|Sequences}` folder,
+    /// `o:{schema}/{T|V|S}/{object}` (click → viewer tab),
+    /// `c:{schema}/{object}/{column}` leaf.
+    fn browser_tree_items(&self, conn_id: &str, filter: &str) -> Vec<TreeItem> {
+        let loading_item = |label: &str| {
+            vec![
+                TreeItem::new(format!("b:note:{label}"), label).disabled(true),
+            ]
+        };
+        let Some(cache) = self.meta.get(conn_id) else {
+            return loading_item("Loading schema…");
+        };
+        let Ok(cache) = cache.lock() else {
+            return loading_item("Loading schema…");
+        };
+        if cache.loading
+            && cache.tables.is_empty()
+            && cache.columns.is_empty()
+            && cache.sequences.is_empty()
+        {
+            return loading_item("Loading schema…");
+        }
+        let own = self
+            .connections
+            .iter()
+            .find(|c| c.id == conn_id)
+            .map(|c| c.user.clone())
+            .unwrap_or_default();
+        let tree = OracleProvider.tree(&cache, self.show_system, &own, true);
+        let tree = crate::schema::filter_tree(&tree, filter);
+        if tree.schemas.is_empty() {
+            let label = if filter.trim().is_empty() {
+                "No objects found"
+            } else {
+                "No matches"
+            };
+            return loading_item(label);
+        }
+        let expanded = self.browser_expanded.get(conn_id).cloned().unwrap_or_default();
+        let exp = |id: &str| expanded.contains(id);
+        // Own schema only (per browser mode): with a single schema the
+        // schema folder is noise — its groups become the roots.
+        if tree.schemas.len() == 1 {
+            return Self::browser_group_items(&tree.schemas[0], &exp);
+        }
+        let mut roots = Vec::with_capacity(tree.schemas.len());
+        for g in &tree.schemas {
+            let sid = format!("s:{}", g.name);
+            let groups = Self::browser_group_items(g, &exp);
+            roots.push(
+                TreeItem::new(sid.clone(), g.name.clone())
+                    .children(groups)
+                    .expanded(exp(&sid)),
+            );
+        }
+        roots
+    }
+
+    /// Tables/Views/Sequences group items for one schema (shared by the
+    /// single-schema root path and the per-schema folder path).
+    fn browser_group_items(
+        g: &crate::schema::SchemaGroup,
+        exp: &impl Fn(&str) -> bool,
+    ) -> Vec<TreeItem> {
+        {
+            let mut groups = Vec::with_capacity(3);
+            for (group, objs) in [("Tables", &g.tables), ("Views", &g.views)] {
+                if objs.is_empty() {
+                    continue;
+                }
+                // Groups stay collapsed until opened: a fresh expand shows
+                // only the three group rows, not hundreds of objects.
+                let gid = format!("g:{}/{group}", g.name);
+                let kind = group.as_bytes()[0] as char;
+                let mut items = Vec::with_capacity(objs.len());
+                for o in objs {
+                    let oid = format!("o:{}:{kind}:{}", g.name, o.name);
+                    let cols: Vec<TreeItem> = o
+                        .columns
+                        .iter()
+                        .map(|c| {
+                            TreeItem::new(
+                                format!("c:{}:{}:{}", g.name, o.name, c.name),
+                                format!("{} — {}", c.name, c.data_type),
+                            )
+                        })
+                        .collect();
+                    items.push(
+                        TreeItem::new(oid.clone(), o.name.clone())
+                            .children(cols)
+                            .expanded(exp(&oid)),
+                    );
+                }
+                groups.push(
+                    TreeItem::new(gid.clone(), format!("{group} ({})", objs.len()))
+                        .children(items)
+                        .expanded(exp(&gid)),
+                );
+            }
+            if !g.sequences.is_empty() {
+                let gid = format!("g:{}/Sequences", g.name);
+                let items: Vec<TreeItem> = g
+                    .sequences
+                    .iter()
+                    .map(|s| {
+                        TreeItem::new(format!("o:{}:S:{s}", g.name), s.clone())
+                    })
+                    .collect();
+                groups.push(
+                    TreeItem::new(gid.clone(), format!("Sequences ({})", g.sequences.len()))
+                        .children(items)
+                        .expanded(exp(&gid)),
+                );
+            }
+            groups
+        }
+    }
+
+    /// Rebuild one open browser tree from cache (filter + expansion kept).
+    /// No-op for closed or untracked connections.
+    fn refresh_browser(&mut self, conn_id: &str, cx: &mut Context<Self>) {
+        if !self.browser_open.contains(conn_id) {
+            return;
+        }
+        let Some(tree) = self.browser_trees.get(conn_id).cloned() else {
+            return;
+        };
+        let filter = self
+            .browser_filters
+            .get(conn_id)
+            .map(|f| f.read(cx).value().to_string())
+            .unwrap_or_default();
+        let items = self.browser_tree_items(conn_id, &filter);
+        tree.update(cx, |t, cx| t.set_items(items, cx));
+    }
+
+    /// Expand/collapse the schema tree under a connection. Expanding a
+    /// dead connection auto-connects first; `ensure_meta` warms the
+    /// dictionary and its completion hook rebuilds the tree on arrival.
+    fn toggle_browser(&mut self, conn_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.browser_open.contains(conn_id) {
+            self.browser_open.remove(conn_id);
+            self.browser_trees.remove(conn_id);
+            self.browser_expanded.remove(conn_id);
+            self.browser_filters.remove(conn_id);
+            cx.notify();
+            return;
+        }
+        self.browser_open.insert(conn_id.to_string());
+        if !self.live.contains(conn_id) {
+            self.connect_connection(conn_id, cx);
+        }
+        self.ensure_meta(conn_id, cx);
+        // Per-connection filter: keystrokes rebuild only this tree.
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter schema…"));
+        let filter_in = filter.clone();
+        let filter_conn = conn_id.to_string();
+        let filter_sub = cx.subscribe_in(
+            &filter_in,
+            window,
+            move |this: &mut Self, _, ev: &InputEvent, _, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    this.refresh_browser(&filter_conn, cx);
+                }
+            },
+        );
+        self._subs.push(filter_sub);
+        self.browser_filters.insert(conn_id.to_string(), filter);
+        let filter = self
+            .browser_filters
+            .get(conn_id)
+            .map(|f| f.read(cx).value().to_string())
+            .unwrap_or_default();
+        let items = self.browser_tree_items(conn_id, &filter);
+        let state = cx.new(|cx| TreeState::new(cx).items(items));
+        let sub_conn = conn_id.to_string();
+        let sub = cx.subscribe(&state, move |this: &mut Self, _, event: &TreeEvent, _| {
+            let set = this.browser_expanded.entry(sub_conn.clone()).or_default();
+            match event {
+                TreeEvent::Expanded(id) => {
+                    set.insert(id.to_string());
+                }
+                TreeEvent::Collapsed(id) => {
+                    set.remove(id.as_ref());
+                }
+            }
+        });
+        self._subs.push(sub);
+        self.browser_trees.insert(conn_id.to_string(), state);
+        cx.notify();
+    }
+
+    /// Render one open connection's schema tree. Object rows click through
+    /// to viewer tabs; folders toggle via the kit's own row handling.
+    fn render_browser_tree(&self, conn_id: &str, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(state) = self.browser_trees.get(conn_id).cloned() else {
+            return div().into_any_element();
+        };
+        let view = cx.entity().downgrade();
+        let conn = conn_id.to_string();
+        tree(
+            &state,
+            move |_ix, entry, _selected, _window, _cx| {
+                let id = entry.item().id.clone();
+                let depth = entry.depth();
+                let folder = entry.is_folder();
+                let expanded = entry.is_expanded();
+                let label = entry.item().label.clone();
+                let ids = id.to_string();
+                // Folders get disclosure chevrons (the kit draws none
+                // itself); objects a file mark; columns align bare.
+                let glyph: Option<KitIcon> = if folder {
+                    Some(if expanded {
+                        KitIcon::ChevronDown
+                    } else {
+                        KitIcon::ChevronRight
+                    })
+                } else if ids.starts_with("o:") {
+                    Some(KitIcon::FileText)
+                } else {
+                    None
+                };
+                let mut row = h_flex()
+                    .gap_1()
+                    .items_center()
+                    .pl(px(4.0 + depth as f32 * 12.0));
+                row = match glyph {
+                    Some(g) => row.child(
+                        div()
+                            .w(px(16.))
+                            .flex_shrink_0()
+                            .flex()
+                            .justify_center()
+                            .child(g),
+                    ),
+                    None => row.child(div().w(px(16.)).flex_shrink_0()),
+                };
+                // Object rows (not columns, not folders) open viewer tabs.
+                // Node ids are `o:{schema}:{T|V|S}:{object}` — split on `:`.
+                // (A `/`-split here once attached zero handlers: every
+                // object parsed to nothing and clicks died silently.)
+                let mut target: Option<(String, String, crate::metadata::TableKind)> = None;
+                if let Some(rest) = ids.strip_prefix("o:") {
+                    let mut parts = rest.split(':');
+                    if let (Some(schema), Some(kind), Some(first)) =
+                        (parts.next(), parts.next(), parts.next())
+                    {
+                        let tk = match kind {
+                            "T" => Some(crate::metadata::TableKind::Table),
+                            "V" => Some(crate::metadata::TableKind::View),
+                            "S" => Some(crate::metadata::TableKind::Sequence),
+                            _ => None,
+                        };
+                        // Rejoin the rest defensively so a weird name
+                        // containing `:` never misresolves.
+                        let mut name = first.to_string();
+                        for p in parts {
+                            name.push(':');
+                            name.push_str(p);
+                        }
+                        if let Some(tk) = tk {
+                            target = Some((schema.to_string(), name, tk));
+                        }
+                    }
+                    if target.is_none() {
+                        // ids starting with `o:` always parse (split on
+                        // `:`); anything else is a bug in the id scheme.
+                        debug_assert!(false, "unparsed object row {ids}");
+                    }
+                }
+                // Click synthesis (`on_click`) never fires inside the kit's
+                // virtualized rows (its mousedown rebuild drops the pending
+                // click), but press and release both land — so release opens
+                // the viewer. Folders keep the kit's own toggle behavior.
+                let up_target = target.clone();
+                let up_view = view.clone();
+                let up_conn = conn.clone();
+                row = row
+                    .child(div().text_xs().truncate().child(label.to_string()))
+                    .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                        if let Some((schema, name, tk)) = &up_target {
+                            up_view
+                                .update(cx, |this, cx| {
+                                    this.open_viewer(
+                                        &up_conn,
+                                        schema.clone(),
+                                        name.clone(),
+                                        *tk,
+                                        window,
+                                        cx,
+                                    );
+                                })
+                                .ok();
+                        }
+                    });
+                ListItem::new(ids.clone()).child(row)
+            },
+        )
+        .into_any_element()
+    }
+
     // -- Render ---------------------------------------------------------------
 
     fn render_connection_row(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4221,14 +4646,20 @@ impl SqlHighlandView {
         let is_live = self.live.contains(&cfg.id);
         let view = cx.entity().downgrade();
         let conn_id = cfg.id.clone();
-        div()
-            .id(("conn-row", ix))
+        let browser_open = self.browser_open.contains(&cfg.id);
+        let toggle_id = conn_id.clone();
+        let tree_conn = conn_id.clone();
+        v_flex()
             .w_full()
-            .rounded_md()
-            // Live rows get a success-tinted background so the active
-            // connection reads at a glance, not just via the status bar.
-            .when(is_live, |this| this.bg(cx.theme().success.opacity(0.12)))
-            .hover(|this| this.bg(cx.theme().accent.opacity(0.5)))
+            .child(
+                div()
+                    .id(("conn-row", ix))
+                    .w_full()
+                    .rounded_md()
+                    // Live rows get a success-tinted background so the active
+                    // connection reads at a glance, not just via the status bar.
+                    .when(is_live, |this| this.bg(cx.theme().success.opacity(0.12)))
+                    .hover(|this| this.bg(cx.theme().accent.opacity(0.5)))
             .context_menu(move |menu, _, _| {
                 let connect_label = if is_live { "Disconnect" } else { "Connect" };
                 let connect_icon = if is_live {
@@ -4270,6 +4701,21 @@ impl SqlHighlandView {
                     .items_stretch()
                     .px_2()
                     .py_1()
+                    // Schema-browser disclosure: per-connection tree below.
+                    .child(
+                        Button::new(("conn-expand", ix))
+                            .icon(if browser_open {
+                                KitIcon::ChevronDown
+                            } else {
+                                KitIcon::ChevronRight
+                            })
+                            .ghost()
+                            .with_size(px(24.))
+                            .tooltip("Browse schema")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.toggle_browser(&toggle_id, window, cx);
+                            })),
+                    )
                     .child(
                         Button::new(("conn-icon", ix))
                             .icon(KitIcon::Database)
@@ -4310,6 +4756,32 @@ impl SqlHighlandView {
                         cx.theme().border
                     })),
             )
+            // Schema-browser tree under its connection. Fixed height: the
+            // virtualized tree needs a bounded viewport (size_full inside
+            // an auto-height parent collapses to zero and shows nothing).
+            .when(browser_open, |this| {
+                let filter_row = self
+                    .browser_filters
+                    .get(&tree_conn)
+                    .map(|f| div().w_full().pb_1().child(Input::new(f).w_full()));
+                this.child(
+                    v_flex()
+                        .w_full()
+                        .h(px(320.))
+                        .pl(px(8.))
+                        .pr(px(2.))
+                        .pb_1()
+                        .children(filter_row)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_hidden()
+                                .child(self.render_browser_tree(&tree_conn, cx)),
+                        ),
+                )
+            })
+    )
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4806,7 +5278,10 @@ impl SqlHighlandView {
         // min_w_0 + overflow_hidden: without them flex items refuse to shrink
         // below the table's full content width, the table sees an unbounded
         // viewport, renders every column (no virtualization), and its
-        // horizontal scrollbar never engages.
+        // horizontal scrollbar never engages. min_h_0 likewise for height:
+        // viewer tabs have no resizable panel forcing a pixel height, so
+        // without it the virtualized body collapses to zero rows while the
+        // fixed-height header/export/column rows still paint.
         if tab.output.is_some() {
             self.render_output_pane(tab, cx).into_any_element()
         } else {
@@ -4817,6 +5292,7 @@ impl SqlHighlandView {
             v_flex()
                 .flex_1()
                 .min_w_0()
+                .min_h_0()
                 .overflow_hidden()
                 .child(
                     h_flex().w_full().justify_end().px_2().pt_2().pb_1().child(
@@ -4901,6 +5377,7 @@ impl SqlHighlandView {
         v_flex()
             .flex_1()
             .min_w_0()
+            .min_h_0()
             .overflow_hidden()
             .p_2()
             .gap_2()
@@ -5015,33 +5492,131 @@ impl SqlHighlandView {
             .child(div().text_color(cx.theme().muted_foreground).child(right))
     }
 
+    /// Slim header for object-viewer tabs (schema browser): object title +
+    /// kind tag + connection, Refresh, and Cancel while busy. No editor,
+    /// no run actions — viewers only ever show one DESCRIBE.
+    fn render_viewer_header(&self, tab: &QueryTab, cx: &mut Context<Self>) -> impl IntoElement {
+        let kind_tag = match &tab.kind {
+            TabKind::Viewer { kind, .. } => match kind {
+                crate::metadata::TableKind::Table => "TABLE",
+                crate::metadata::TableKind::View => "VIEW",
+                crate::metadata::TableKind::Sequence => "SEQUENCE",
+            },
+            TabKind::Query => "",
+        };
+        let refresh_id = tab.id.clone();
+        h_flex()
+            .h(px(36.))
+            .gap_2()
+            .px_2()
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(KitIcon::Database)
+            .child(
+                div()
+                    .text_sm()
+                    .font_semibold()
+                    .child(tab.name.clone()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(kind_tag),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(self.connection_name(&tab.connection_id)),
+            )
+            .child(
+                Button::new("viewer-refresh")
+                    .secondary()
+                    .small()
+                    .label("Refresh")
+                    .tooltip("Re-run DESCRIBE")
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.refresh_viewer(&refresh_id, window, cx);
+                    })),
+            )
+            .when(tab.busy, |this| {
+                let cancel_id = tab.id.clone();
+                this.child(
+                    Button::new("viewer-cancel")
+                        .danger()
+                        .small()
+                        .icon(KitIcon::X)
+                        .label("Cancel")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.cancel_run(&cancel_id, cx);
+                        })),
+                )
+            })
+    }
+
     fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
         let tab = self.active_tab();
-        // Fresh tab (never ran, no output): editor takes the full height —
-        // no empty bottom pane. Once anything runs, the resizable
-        // editor/results split appears and stays.
-        let fresh = !tab.has_result && tab.output.is_none();
-        let content: AnyElement = if fresh {
-            div()
-                .flex_1()
-                .min_h_0()
-                .child(self.render_editor(cx))
-                .into_any_element()
-        } else {
-            let body: AnyElement = match tab.output.is_some() {
-                true => self.render_output_pane(tab, cx).into_any_element(),
-                false => self.render_results(tab, cx).into_any_element(),
+        // Object-viewer tabs (schema browser): grid only, no editor.
+        // Layout mirrors the query split (resizable panel + body) on
+        // purpose: the grid is virtualized and needs the resizable's
+        // definite pixel sizing — a pure flex chain collapses its body
+        // to zero rows while fixed-height siblings still paint.
+        let content: AnyElement = if matches!(tab.kind, TabKind::Viewer { .. }) {
+            let body: AnyElement = if tab.output.is_some() {
+                self.render_output_pane(tab, cx).into_any_element()
+            } else if tab.has_result {
+                self.render_results(tab, cx).into_any_element()
+            } else {
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Loading description…")
+                    .into_any_element()
             };
-            v_resizable("query-split")
+            v_resizable("viewer-split")
                 .child(
                     resizable_panel()
-                        .size(px(300.))
-                        .size_range(px(160.)..px(900.))
+                        .size(px(36.))
+                        .size_range(px(36.)..px(200.))
                         .flex_none()
-                        .child(self.render_editor(cx)),
+                        .child(self.render_viewer_header(tab, cx)),
                 )
                 .child(body)
                 .into_any_element()
+        } else {
+            // Fresh tab (never ran, no output): editor takes the full
+            // height — no empty bottom pane. Once anything runs, the
+            // resizable editor/results split appears and stays.
+            let fresh = !tab.has_result && tab.output.is_none();
+            if fresh {
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.render_editor(cx))
+                    .into_any_element()
+            } else {
+                let body: AnyElement = match tab.output.is_some() {
+                    true => self.render_output_pane(tab, cx).into_any_element(),
+                    false => self.render_results(tab, cx).into_any_element(),
+                };
+                v_resizable("query-split")
+                    .child(
+                        resizable_panel()
+                            .size(px(300.))
+                            .size_range(px(160.)..px(900.))
+                            .flex_none()
+                            .child(self.render_editor(cx)),
+                    )
+                    .child(body)
+                    .into_any_element()
+            }
         };
 
         v_flex()

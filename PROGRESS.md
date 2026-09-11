@@ -277,8 +277,23 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   Clippy clean, 88 lib + 10 live green, release smoke ALIVE (`cmd_w` UI
   flake pre-existing). Headless harness can't Cmd-click (no
   modifier-click), so this one needs a live click to confirm.
+- Schema browser v1 (2026-09-12): per-connection trees under sidebar
+  rows (own schema only: Tables/Views/Sequences → objects → columns),
+  per-tree filter, auto-connect on expand, release-on-object opens an
+  ephemeral viewer tab (DESCRIBE grid for tables/views, catalog row for
+  sequences). `schema.rs` model + `SchemaProvider` trait +
+  `OracleProvider` over the existing cache (zero new queries);
+  `TableId.kind` split (fetch already unioned both);
+  `ConnectionConfig.engine` (serde-default Oracle); `TabKind::Query |
+  Viewer` (editor kept unrendered, reversible). Debugging notes:
+  virtualized tree needed a bounded 320px viewport (size_full in
+  auto-height collapses invisible); kit mousedown rebuilds swallow
+  `on_click`, so rows trigger on mouse-up; viewer grid needed the same
+  resizable-panel sizing as query tabs (flex-only collapses body rows).
+  Temp logging stripped. Clippy clean, 94 lib + 10 live green, release
+  smoke ALIVE (`cmd_w` UI flake pre-existing).
 - Own-schema names go bare (2026-09-12): connected as SYSTEM, `FROM `
-  suggests `EMPLOYEES` (not `SYSTEM.EMPLOYEES`) and inserts it bare —
+   suggests `EMPLOYEES` (not `SYSTEM.EMPLOYEES`) and inserts it bare —
   Oracle resolves unqualified names to the connected schema first, so the
   prefix was noise. New `display_name` helper applied to AfterFrom labels,
   hover card titles/column lines, and the Cmd-click DESCRIBE statement;

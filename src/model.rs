@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::schema::DbEngine;
+
 /// Deployment environment tag for a connection. Purely visual (no behavior
 /// attached): callers map variants to theme colors at render time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -45,6 +47,11 @@ pub struct ConnectionConfig {
     /// Environment tag. Missing on pre-tag entries; defaults to untagged.
     #[serde(default)]
     pub environment: Environment,
+    /// Database engine. Missing on older entries; defaults to Oracle.
+    /// The day a second engine plugs into `SchemaProvider`, this (plus the
+    /// session pool) is what it keys off — nothing else changes shape.
+    #[serde(default)]
+    pub engine: DbEngine,
 }
 
 impl ConnectionConfig {
@@ -74,6 +81,7 @@ impl Default for ConnectionConfig {
             user: "system".to_string(),
             password: String::new(),
             environment: Environment::default(),
+            engine: DbEngine::default(),
         }
     }
 }

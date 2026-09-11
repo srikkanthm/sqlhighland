@@ -91,7 +91,9 @@ v1 scope, phased follow-ups, and verification.
    an `oracle-describe:/OWNER/TABLE` `show_document` hook — editor text
    untouched, unbound tabs get the picker first, unknown schemes fall
    through to the kit default).7. **Package members** (`DBMS_*`) via `ALL_OBJECTS`.
+   — TABLED 2026-09-12 (user call: revisit later).
 8. Keyword-casing follows user/formatter setting.
+   — TABLED 2026-09-12 (user call: revisit later).
 
 ## 8. Verify
 

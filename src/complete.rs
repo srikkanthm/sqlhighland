@@ -1465,6 +1465,7 @@ fn prefix_score(label: &str, pre: &str) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::TableKind;
 
     #[test]
     fn prefix_extracts_word_and_offset() {
@@ -1904,6 +1905,7 @@ mod tests {
             tables: vec![crate::metadata::TableId {
                 owner: "SCOTT".into(),
                 name: "EMP".into(),
+                kind: TableKind::Table,
             }],
             ..Default::default()
         };
@@ -1960,6 +1962,7 @@ mod tests {
         cache.tables = vec![crate::metadata::TableId {
             owner: "SYSTEM".into(),
             name: "EMPLOYEES".into(),
+            kind: TableKind::Table,
         }];
         cache.columns.insert(
             ("SYSTEM".into(), "EMPLOYEES".into()),
@@ -1978,6 +1981,7 @@ mod tests {
         cache.tables.push(crate::metadata::TableId {
             owner: "SCOTT".into(),
             name: "EMP".into(),
+            kind: TableKind::Table,
         });
         cache.columns.insert(
             ("SCOTT".into(), "EMP".into()),
@@ -2007,10 +2011,12 @@ mod tests {
             crate::metadata::TableId {
                 owner: "SYSTEM".into(),
                 name: "EMPLOYEES".into(),
+                kind: TableKind::Table,
             },
             crate::metadata::TableId {
                 owner: "SCOTT".into(),
                 name: "EMP".into(),
+                kind: TableKind::Table,
             },
         ];
         cache.columns.insert(
