@@ -251,6 +251,20 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - Join suggestions: `JOIN dept d ON |` offers FK-derived
   `e.DEPTNO = d.DEPTNO` (aliases as written, both directions, composites
   via `AND`); first-condition-only, no FK → no popup.
+- Strict context gating (2026-09-12): each position offers only what SQL
+  allows (start → starters; select list → columns/functions, never tables;
+  `FROM` → tables only; predicates → columns; `owner.` after `FROM` →
+  that owner's tables). Statement-scoped keyword scan with list/paren/
+  qualifier awareness; no new dependencies (tree-sitter-sequel evaluated
+  and rejected for detection — ERROR soup on partial input).
+- Scope transitions (2026-09-12): clause-following keywords re-added per
+  scope (`FROM` after select lists, `ORDER`/`GROUP` after predicates —
+  prefix filtering keeps them invisible until typed); empty-prefix popup
+  right after operand-expecting keywords (`FROM |` lists tables); JoinOn
+  without FK falls back to Predicate columns.
+- Function snippets (2026-09-12): 32 built-ins complete as `NAME()` with
+  signatures in detail; true tab-stops impossible (no kit snippet engine,
+  no post-accept hook) — upstream gap #2, cursor lands after `)`.
 - Fixes along the way: typing-crash (entity double-lease), whole-buffer
   replace on second accept, tab-loss hardening (atomic writes, corrupt
   backup, orphan adoption), stuck "Loading suggestions…" (unbound tabs no

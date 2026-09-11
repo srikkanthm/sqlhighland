@@ -16,13 +16,23 @@ pub struct TableRef {
     pub name: String,
 }
 
-/// Completion context at the cursor.
+/// Completion context at the cursor. Strict by design: each position
+/// offers only what SQL allows there — ranking never mixes kinds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompleteContext {
-    /// `SELECT em|` — rank everything, columns-in-scope first.
-    BareWord,
-    /// After `FROM`/`JOIN`/`INTO`/`UPDATE` — tables first.
+    /// Empty statement head — statement starters only.
+    StatementStart,
+    /// After `SELECT`/`DISTINCT`/`,`/`(`/operators in select scope —
+    /// in-scope columns, functions, expression keywords. Never tables.
+    SelectList,
+    /// After `FROM`/`JOIN`/`INTO`/`UPDATE`/`TABLE`/`USING` with no table
+    /// yet — tables only.
     AfterFrom,
+    /// After `WHERE`/`GROUP`/`ORDER`/`HAVING`/`BY`/`AND`/`OR`/`SET`/`WHEN`/
+    /// `ON` (started condition) — in-scope columns, functions. Never tables.
+    Predicate,
+    /// `owner.` after `FROM`/`JOIN` — tables of that owner (bare names).
+    OwnerTables(String),
     /// After `alias.` or `table.` — columns of that object only.
     /// `qualifier` is the raw text before the dot (`e`, `emp`, `scott.emp`).
     ColumnOf(String),
@@ -34,6 +44,9 @@ pub enum CompleteContext {
         right_alias: String,
         right: TableRef,
     },
+    /// Ambiguous (after a complete identifier/literal, post-paren, misc
+    /// keywords) — keywords + functions only. Never tables/columns.
+    BareWord,
 }
 
 /// Candidate kinds for iconing/ranking.
@@ -44,6 +57,7 @@ pub enum CandidateKind {
     Table,
     Column,
     Sequence,
+    Function,
     Keyword,
 }
 
@@ -182,43 +196,167 @@ pub fn qualifier_before(text: &str, word_start: usize) -> Option<String> {
     }
 }
 
-/// Last significant word before `pos` (uppercased). Trailing non-word
-/// characters (spaces, dots, parens) are skipped first.
-fn last_keyword(text: &str, pos: usize) -> String {
-    let head = &text[..pos.min(text.len())];
-    let t = head.trim_end_matches(|c: char| !is_word_char(c));
-    let start = t
-        .char_indices()
-        .rev()
-        .take_while(|(_, c)| is_word_char(*c))
-        .last()
-        .map(|(i, _)| i)
-        .unwrap_or(t.len());
-    t[start..].to_ascii_uppercase()
-}
-
-/// Classify the completion context at `offset` (cursor).
-/// `sequence_names` (uppercase) enables `seq.|` → `SequenceMember`.
+/// Classify the completion context at `offset` (cursor), scoped to the
+/// current statement. `sequence_names` (uppercase) enables `seq.|` →
+/// `SequenceMember`.
 pub fn classify_context(
     text: &str,
     offset: usize,
     sequence_names: &dyn Fn(&str) -> bool,
 ) -> CompleteContext {
+    use crate::sql::split_statements;
+    let offset = offset.min(text.len());
     let (_, word_start) = word_prefix(text, offset);
+    // Scope to the containing statement (multi-statement buffers); past the
+    // end or in a gap, the head is empty → StatementStart.
+    let stmts = split_statements(text);
+    let base = stmts
+        .iter()
+        .find(|s| s.start <= offset && offset < s.end)
+        .or_else(|| {
+            stmts
+                .iter()
+                .rev()
+                .find(|s| s.start <= offset && offset <= s.end)
+        })
+        .map(|s| s.start)
+        .unwrap_or(offset);
+    let ws = word_start.max(base).min(text.len());
+    let toks = tokenize(&text[base..ws]);
+    // Qualifier first: `x.|` completes members of x — tables when the
+    // qualifier follows FROM/JOIN, sequence members for sequences,
+    // columns otherwise.
     if let Some(q) = qualifier_before(text, word_start) {
-        // `seq.NEXTVAL`: qualifier is a known sequence → member list.
+        if scan_clause(&toks) == Clause::From {
+            return CompleteContext::OwnerTables(q);
+        }
         let last_seg = q.rsplit('.').next().unwrap_or(&q);
         if sequence_names(&last_seg.to_ascii_uppercase()) {
             return CompleteContext::SequenceMember(q);
         }
         return CompleteContext::ColumnOf(q);
     }
-    match last_keyword(text, word_start).as_str() {
-        "FROM" | "JOIN" | "INTO" | "UPDATE" => CompleteContext::AfterFrom,
-        _ => CompleteContext::BareWord,
+    match scan_clause(&toks) {
+        Clause::Start => CompleteContext::StatementStart,
+        Clause::Select => CompleteContext::SelectList,
+        Clause::From => CompleteContext::AfterFrom,
+        Clause::Predicate => CompleteContext::Predicate,
+        Clause::Bare => CompleteContext::BareWord,
     }
 }
 
+/// Clause scope from a token scan (see `scan_clause`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Clause {
+    Start,
+    Select,
+    From,
+    Predicate,
+    Bare,
+}
+
+/// Map an uppercased word to its clause. `None` = identifier/literal.
+fn clause_keyword(word_upper: &str) -> Option<Clause> {
+    match word_upper {
+        "SELECT" | "DISTINCT" => Some(Clause::Select),
+        "FROM" | "JOIN" | "INTO" | "UPDATE" | "TABLE" | "USING" => Some(Clause::From),
+        "WHERE" | "GROUP" | "ORDER" | "HAVING" | "BY" | "AND" | "OR" | "SET" | "WHEN"
+        | "ON" => Some(Clause::Predicate),
+        _ => None,
+    }
+}
+
+/// Walk tokens back from the cursor word: commas start a fresh list item
+/// (skip the completed word before them), DISTINCT/ALL/AS are transparent,
+/// `(` opens expression scope, `)` and misc keywords bail to Bare, and a
+/// `.` skips its qualifier. A bare identifier between the cursor and a
+/// SELECT/FROM keyword means alias/complete-identifier position → Bare
+/// (never tables/columns); other clauses ignore it.
+fn scan_clause(toks: &[String]) -> Clause {
+    if toks.is_empty() {
+        return Clause::Start;
+    }
+    let mut saw_ident = false;
+    let mut skip_word = false;
+    let mut depth = 0u32;
+    for t in toks.iter().rev() {
+        match t.as_str() {
+            "," => {
+                saw_ident = false;
+                skip_word = true;
+                continue;
+            }
+            "(" => {
+                if depth > 0 {
+                    depth -= 1;
+                    // Function name precedes `(` — not a table/alias.
+                    skip_word = true;
+                    continue;
+                }
+                return Clause::Select;
+            }
+            ")" => {
+                depth += 1;
+                continue;
+            }
+            "." => {
+                skip_word = true;
+                continue;
+            }
+            _ => {}
+        }
+        let up = t.to_ascii_uppercase();
+        if up == "DISTINCT" || up == "ALL" || up == "AS" {
+            saw_ident = false;
+            skip_word = false;
+            continue;
+        }
+        if skip_word && clause_keyword(up.as_str()).is_none() {
+            skip_word = false;
+            continue;
+        }
+        skip_word = false;
+        if depth > 0 {
+            continue;
+        }
+        match clause_keyword(up.as_str()) {
+            Some(Clause::Select) => {
+                return if saw_ident { Clause::Bare } else { Clause::Select };
+            }
+            Some(Clause::From) => {
+                return if saw_ident { Clause::Bare } else { Clause::From };
+            }
+            Some(other) => return other,
+            None => saw_ident = true,
+        }
+    }
+    Clause::Bare
+}
+
+/// True when an empty prefix may still pop up: cursor right after an
+/// operand-expecting clause keyword (`FROM |`, `WHERE |`, `SELECT |`).
+/// Guards the space-trigger so post-identifier spaces stay quiet.
+pub fn allows_empty_prefix(text: &str, offset: usize) -> bool {
+    use crate::sql::split_statements;
+    let offset = offset.min(text.len());
+    let stmts = split_statements(text);
+    let base = stmts
+        .iter()
+        .find(|s| s.start <= offset && offset < s.end)
+        .or_else(|| {
+            stmts
+                .iter()
+                .rev()
+                .find(|s| s.start <= offset && offset <= s.end)
+        })
+        .map(|s| s.start)
+        .unwrap_or(offset);
+    let toks = tokenize(&text[base..offset]);
+    matches!(
+        scan_clause(&toks),
+        Clause::Select | Clause::From | Clause::Predicate
+    )
+}
 /// True when `offset` sits inside a string literal, quoted identifier, or
 /// comment — positions where suggestions must never trigger. Scans the
 /// current line for `--` and the whole head for unclosed `'`/`"`/`/*`.
@@ -252,6 +390,16 @@ pub fn is_trivia_position(text: &str, offset: usize) -> bool {
         }
     }
     singles % 2 == 1 || doubles % 2 == 1
+}
+/// Insert text for a candidate: keywords append a trailing space so the
+/// next word starts cleanly (`SELECT |`, `ORDER BY |`); everything else
+/// inserts verbatim (tables/columns may be followed by an alias, functions
+/// carry their own parens).
+pub fn insert_text_for(kind: CandidateKind, label: &str) -> String {
+    match kind {
+        CandidateKind::Keyword => format!("{label} "),
+        _ => label.to_string(),
+    }
 }
 /// Convert a byte offset into an LSP `(line, character)` pair (`character`
 /// in UTF-16 code units, matching `position_to_offset`). Floors mid-char
@@ -659,6 +807,36 @@ fn owners_match(a: &Option<String>, b: &Option<String>) -> bool {
     }
 }
 
+/// Statement starters for empty statement heads.
+pub const STMT_KEYWORDS: &[&str] = &[
+    "SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "DROP", "ALTER",
+    "TRUNCATE", "DESCRIBE", "EXPLAIN", "COMMIT", "ROLLBACK", "BEGIN", "DECLARE",
+];
+
+/// Expression keywords for select lists.
+pub const EXPR_KEYWORDS: &[&str] = &[
+    "DISTINCT", "ALL", "CASE", "WHEN", "THEN", "ELSE", "NOT", "NULL",
+];
+
+/// Predicate keywords for WHERE/GROUP/ORDER/HAVING/ON conditions.
+pub const PRED_KEYWORDS: &[&str] = &[
+    "AND", "OR", "NOT", "IN", "LIKE", "BETWEEN", "EXISTS", "IS", "NULL", "CASE", "WHEN",
+];
+
+/// Clause-transition keywords valid right after a select list
+/// (`SELECT * fro|` must offer FROM — strictness is about the prefix
+/// matching, not about hiding transitions).
+pub const SELECT_FOLLOW: &[&str] = &[
+    "FROM", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "UNION", "INTERSECT", "MINUS",
+    "INTO", "FETCH",
+];
+
+/// Clause-transition keywords valid after a predicate
+/// (`WHERE x=1 ord|` must offer ORDER).
+pub const PRED_FOLLOW: &[&str] = &[
+    "ORDER", "GROUP", "HAVING", "LIMIT", "UNION", "INTERSECT", "MINUS", "FETCH", "OFFSET",
+];
+
 /// Oracle keywords worth completing (v1 set — statements, clauses, common
 /// functions, sequence pseudo-columns). Uppercase; matching is case-insensitive.
 pub const ORACLE_KEYWORDS: &[&str] = &[
@@ -669,12 +847,55 @@ pub const ORACLE_KEYWORDS: &[&str] = &[
     "BETWEEN", "LIKE", "IS", "NULL", "DISTINCT", "ALL", "AS", "ASC", "DESC",
     "WITH", "CONNECT", "START", "PRIOR", "SIBLINGS", "ROWNUM", "ROWID",
     "NEXTVAL", "CURRVAL", "SYSDATE", "SYSTIMESTAMP", "DUAL",
-    "COUNT", "SUM", "AVG", "MIN", "MAX", "NVL", "NVL2", "COALESCE",
-    "TO_DATE", "TO_CHAR", "TO_NUMBER", "TRUNC", "DECODE", "SUBSTR", "INSTR",
-    "UPPER", "LOWER", "TRIM", "LENGTH", "SYSDATE", "COMMIT", "ROLLBACK",
-    "CREATE", "TABLE", "VIEW", "INDEX", "SEQUENCE", "DESCRIBE", "EXPLAIN",
-    "GRANT", "ORDER", "SIBLINGS",
+    "COMMIT", "ROLLBACK",
+    "CREATE", "DROP", "ALTER", "TRUNCATE", "TABLE", "VIEW", "INDEX", "SEQUENCE", "DESCRIBE", "EXPLAIN",
+    "GRANT", "ORDER", "SIBLINGS", "BEGIN", "DECLARE", "LIMIT", "OFFSET", "FETCH",
 ];
+
+/// Built-in functions: `(NAME, signature shown in the detail pane)`.
+/// Labels complete as `NAME()` — the kit has no snippet engine (`$1` would
+/// insert literally) and no post-accept hook, so the cursor lands after the
+/// closing paren (one Left-arrow into the args). True tab-stops need kit
+/// support. Names here must not repeat in [`ORACLE_KEYWORDS`].
+pub const ORACLE_FUNCTIONS: &[(&str, &str)] = &[
+    ("ADD_MONTHS", "ADD_MONTHS(date, n)"),
+    ("AVG", "AVG([DISTINCT | ALL] expr)"),
+    ("CAST", "CAST(expr AS type)"),
+    ("COALESCE", "COALESCE(expr, …)"),
+    ("COUNT", "COUNT(* | [DISTINCT | ALL] expr)"),
+    ("DECODE", "DECODE(expr, search, result [, …] [, default])"),
+    ("DENSE_RANK", "DENSE_RANK() OVER (…)"),
+    ("EXTRACT", "EXTRACT(field FROM src)"),
+    ("INITCAP", "INITCAP(char)"),
+    ("INSTR", "INSTR(str, substr [, pos [, nth]])"),
+    ("LAST_DAY", "LAST_DAY(date)"),
+    ("LENGTH", "LENGTH(char)"),
+    ("LISTAGG", "LISTAGG(expr [, delim]) WITHIN GROUP (ORDER BY …)"),
+    ("LOWER", "LOWER(char)"),
+    ("MAX", "MAX([DISTINCT | ALL] expr)"),
+    ("MIN", "MIN([DISTINCT | ALL] expr)"),
+    ("MOD", "MOD(n, m)"),
+    ("MONTHS_BETWEEN", "MONTHS_BETWEEN(d1, d2)"),
+    ("NULLIF", "NULLIF(expr1, expr2)"),
+    ("NVL", "NVL(expr1, expr2)"),
+    ("NVL2", "NVL2(expr, v1, v2)"),
+    ("RANK", "RANK() OVER (…)"),
+    ("ROUND", "ROUND(n [, m])"),
+    ("ROW_NUMBER", "ROW_NUMBER() OVER (…)"),
+    ("SUBSTR", "SUBSTR(char, pos [, len])"),
+    ("SUM", "SUM([DISTINCT | ALL] expr)"),
+    ("TO_CHAR", "TO_CHAR(n | date [, fmt [, nls]])"),
+    ("TO_DATE", "TO_DATE(char [, fmt [, nls]])"),
+    ("TO_NUMBER", "TO_NUMBER(char [, fmt [, nls]])"),
+    ("TRIM", "TRIM([LEAD|TRAIL|BOTH] [char] FROM src)"),
+    ("TRUNC", "TRUNC(n [, m] | date [, fmt])"),
+    ("UPPER", "UPPER(char)"),
+];
+
+/// Insert text for a function: call form with empty args.
+pub fn function_insert(name: &str) -> String {
+    format!("{name}()")
+}
 
 /// System schemas hidden by default (toggleable). Covers the Oracle
 /// catalogs a DBA account sees but never queries: core, spatial/text,
@@ -746,7 +967,8 @@ fn kind_rank(k: CandidateKind) -> u8 {
         CandidateKind::Table => 2,
         CandidateKind::Column => 3,
         CandidateKind::Sequence => 4,
-        CandidateKind::Keyword => 5,
+        CandidateKind::Function => 5,
+        CandidateKind::Keyword => 6,
     }
 }
 
@@ -809,13 +1031,92 @@ mod tests {
         );
         assert_eq!(
             classify_context("SELECT em", 9, &no_seq),
-            CompleteContext::BareWord
+            CompleteContext::SelectList
         );
         let is_seq = |n: &str| n == "MYSEQ";
         assert_eq!(
             classify_context("SELECT myseq.", 13, &is_seq),
             CompleteContext::SequenceMember("myseq".to_string())
         );
+    }
+
+    #[test]
+    fn context_gates_by_grammar_position() {
+        use CompleteContext::*;
+        let no_seq = |_: &str| false;
+        let at = |sql: &str| classify_context(sql, sql.len(), &no_seq);
+        // Statement start: starters only.
+        assert_eq!(at(""), StatementStart);
+        assert_eq!(at("SEL"), StatementStart);
+        // Select list: never tables.
+        assert_eq!(at("SELECT "), SelectList);
+        assert_eq!(at("SELECT a, "), SelectList);
+        assert_eq!(at("SELECT COUNT("), SelectList);
+        // After FROM/JOIN: tables.
+        assert_eq!(at("SELECT * FROM emp, "), AfterFrom);
+        assert_eq!(at("DELETE FROM "), AfterFrom);
+        assert_eq!(at("UPDATE "), AfterFrom);
+        // Predicates: never tables.
+        assert_eq!(at("SELECT * FROM emp WHERE "), Predicate);
+        assert_eq!(at("SELECT * FROM emp WHERE deptno = "), Predicate);
+        assert_eq!(at("SELECT * FROM emp ORDER BY "), Predicate);
+        assert_eq!(at("SELECT * FROM emp GROUP BY d, "), Predicate);
+        assert_eq!(at("UPDATE emp SET "), Predicate);
+        // Ambiguous: keywords only.
+        assert_eq!(at("SELECT emp "), BareWord);
+        assert_eq!(at("SELECT * FROM emp "), BareWord);
+        // Subqueries scope inward.
+        assert_eq!(at("SELECT * FROM (SELECT "), SelectList);
+        // New statement after terminator starts over.
+        assert_eq!(at("SELECT 1; "), StatementStart);
+        assert_eq!(at("SELECT 1; SEL"), StatementStart);
+        // Owner qualifier after FROM completes tables, not columns.
+        assert_eq!(
+            at("SELECT * FROM scott."),
+            OwnerTables("scott".to_string())
+        );
+        // Fresh ON conditions route through detect_join_on in the provider;
+        // classify itself sees predicate scope (columns for manual typing).
+        assert_eq!(at("SELECT * FROM emp e JOIN dept d ON "), Predicate);
+    }
+
+    #[test]
+    fn empty_prefix_allowed_only_after_operand_keywords() {
+        let at = |sql: &str| allows_empty_prefix(sql, sql.len());
+        assert!(at("SELECT * FROM "));
+        assert!(at("SELECT "));
+        assert!(at("SELECT * FROM emp WHERE x=1 AND "));
+        assert!(!at("SELECT * FROM emp "));
+        assert!(!at("SELECT emp "));
+        assert!(!at(""));
+        // Finished conditions stay in predicate scope (AND/OR offered).
+        assert!(at("SELECT * FROM emp e JOIN dept d ON e.x = 1 "));
+    }
+
+    #[test]
+    fn follow_sets_cover_transitions() {
+        // The reported gaps: FROM after a select list, ORDER after predicates.
+        assert!(SELECT_FOLLOW.contains(&"FROM"));
+        assert!(SELECT_FOLLOW.contains(&"WHERE"));
+        assert!(PRED_FOLLOW.contains(&"ORDER"));
+        assert!(PRED_FOLLOW.contains(&"GROUP"));
+    }
+
+    #[test]
+    fn keyword_subsets_are_sane() {
+        // Every subset item is a known keyword (no typos silently dropping).
+        for kw in STMT_KEYWORDS
+            .iter()
+            .chain(EXPR_KEYWORDS)
+            .chain(PRED_KEYWORDS)
+            .chain(SELECT_FOLLOW)
+            .chain(PRED_FOLLOW)
+        {
+            assert!(ORACLE_KEYWORDS.contains(kw), "{kw} unknown");
+        }
+        assert!(STMT_KEYWORDS.contains(&"SELECT"));
+        assert!(EXPR_KEYWORDS.contains(&"DISTINCT"));
+        assert!(PRED_KEYWORDS.contains(&"AND"));
     }
 
     #[test]
@@ -870,6 +1171,24 @@ mod tests {
     }
 
     #[test]
+    fn function_table_is_consistent() {
+        // No duplicates with keywords (would double-list), signatures present.
+        for (name, sig) in ORACLE_FUNCTIONS {
+            assert!(
+                !ORACLE_KEYWORDS.contains(name),
+                "{name} in both functions and keywords"
+            );
+            assert!(!sig.is_empty(), "{name} needs a signature");
+            assert_eq!(function_insert(name), format!("{name}()"));
+        }
+        // Sorted for stable popup order among equals.
+        let mut names: Vec<_> = ORACLE_FUNCTIONS.iter().map(|(n, _)| n).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
+    }
+
+    #[test]
     fn ranking_prefers_own_schema() {
         let cand = |label: &str, owner: &str| Candidate {
             label: label.into(),
@@ -884,6 +1203,24 @@ mod tests {
         ];
         let out = rank_candidates("d", cands, "SCOTT", 10);
         assert_eq!(out[0].label, "SCOTT.DEPT");
+    }
+
+    #[test]
+    fn ranking_prefers_functions_over_keywords() {
+        let cand = |label: &str, kind: CandidateKind| Candidate {
+            label: label.into(),
+            detail: "".into(),
+            kind,
+            owner: None,
+            usage: 0,
+        };
+        let cands = vec![
+            cand("CASE", CandidateKind::Keyword),
+            cand("COUNT()", CandidateKind::Function),
+            cand("CREATE", CandidateKind::Keyword),
+        ];
+        let out = rank_candidates("c", cands, "", 10);
+        assert_eq!(out[0].label, "COUNT()");
     }
 
     #[test]
@@ -1003,6 +1340,18 @@ mod tests {
             to_cols: vec!["DEPTNO".into()],
         };
         assert!(join_condition_candidates("b", &right2, &aliases2, &[fk]).is_empty());
+    }
+
+    #[test]
+    fn insert_text_appends_space_for_keywords_only() {
+        assert_eq!(insert_text_for(CandidateKind::Keyword, "SELECT"), "SELECT ");
+        assert_eq!(insert_text_for(CandidateKind::Keyword, "ORDER BY"), "ORDER BY ");
+        assert_eq!(insert_text_for(CandidateKind::Table, "EMP"), "EMP");
+        assert_eq!(insert_text_for(CandidateKind::Function, "TO_DATE()"), "TO_DATE()");
+        assert_eq!(
+            insert_text_for(CandidateKind::ColumnInScope, "EMPNO"),
+            "EMPNO"
+        );
     }
 
     #[test]

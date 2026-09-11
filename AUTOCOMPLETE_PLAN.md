@@ -25,15 +25,17 @@ v1 scope, phased follow-ups, and verification.
 - Popup/keyboard/ghost rendering is automatic once installed. No new editor crate.
 - `CompletionMenuOptions.max_width` tunable via `lsp_mut()` for long `OWNER.TABLE` labels.
 
-## 3. v1 behavior
+## 3. v1 behavior (strict gating since 2026-09-12)
 
 | Context | Candidates |
 |---|---|
-| Bare word | Keywords + tables + sequences + in-scope columns |
-| After `FROM`/`JOIN`/`INTO`/`UPDATE` | Tables first |
-| After `alias.` / `table.` | Columns of that table/view only |
-| Sequence contexts | Sequence names |
-| Else | Ranked union |
+| Statement start | Statement starters only |
+| Select list | In-scope columns, functions, sequences, expr keywords — never tables |
+| After `FROM`/`JOIN`/`INTO`/`UPDATE` | Tables only |
+| Predicates | In-scope columns, functions, sequences, predicate keywords — never tables |
+| `owner.` after `FROM`/`JOIN` | That owner's tables (bare names) |
+| `alias.` / sequences / fresh `ON` | Unchanged (columns / `NEXTVAL` / join conditions) |
+| Ambiguous (post-identifier etc.) | Keywords + functions, never tables/columns |
 
 - Alias map from statement `FROM`/`JOIN` clauses (`e → scott.emp`).
   Unresolvable alias → all cached columns (never empty).
@@ -74,7 +76,7 @@ v1 scope, phased follow-ups, and verification.
 ## 7. Follow-ups (queued, not v1)
 
 1. **Join suggestions:** `ALL_CONSTRAINTS`/`ALL_CONS_COLUMNS` → `ON emp.deptno = dept.deptno` after `JOIN … ON`. — SHIPPED 2026-09-12 (first-condition-only; multi-condition tails deferred).
-2. **Function snippets:** `TO_DATE(|)` tab-stops.
+2. **Function snippets:** 32 built-ins complete as `NAME()` with signatures in the detail pane. — SHIPPED 2026-09-12 (tab-stops impossible: no snippet engine, no post-accept hook, `resolve_completions` never invoked — upstream gap #2; cursor lands after `)`).
 3. **Auto-qualify on collision / auto-alias suggestion.**
 4. **Column comments** (`ALL_COL_COMMENTS`) in popup detail.
 5. **Hover provider** (table → columns; column → type/nullable/comment) — reuses cache.

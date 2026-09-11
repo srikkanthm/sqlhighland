@@ -32,9 +32,11 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use gpui_kit_assets::IconName as KitIcon;
 use crate::complete::{
-    Candidate, CandidateKind, CompleteContext, ForeignKey, build_alias_map, byte_to_lsp_pos,
-    classify_context, detect_join_on, is_trivia_position, is_system_schema,
-    join_condition_candidates, rank_candidates, resolve_qualifier, word_prefix, ORACLE_KEYWORDS,
+    Candidate, CandidateKind, CompleteContext, EXPR_KEYWORDS, ForeignKey, ORACLE_FUNCTIONS,
+    PRED_FOLLOW, PRED_KEYWORDS, SELECT_FOLLOW, STMT_KEYWORDS, allows_empty_prefix,
+    build_alias_map, byte_to_lsp_pos, classify_context, detect_join_on, function_insert,
+    insert_text_for, is_trivia_position, is_system_schema, join_condition_candidates,
+    rank_candidates, resolve_qualifier, word_prefix, ORACLE_KEYWORDS,
 };
 use crate::config::{CompleteMode, Preferences, SavedConfig, SavedTab, TabsManifest, THEME_LIST};
 use crate::db::{
@@ -118,7 +120,9 @@ impl CompletionProvider for OracleCompleter {
         let wordy = last.is_some_and(|c| {
             c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '#'
         });
-        if last != Some('.') && !wordy {
+        // Single space also fires: `FROM |` should offer tables immediately.
+        // (Multi-char pastes never trigger; newlines never trigger.)
+        if last != Some('.') && !wordy && new_text != " " {
             return false;
         }
         // Manual mode: the shortcut path presents directly; never auto-fire.
@@ -3123,11 +3127,13 @@ impl SqlHighlandView {
             return empty;
         }
         let (prefix, word_start) = word_prefix(text, offset);
-        // 2-char gate; a trailing dot forces the column list even empty.
+        // 2-char gate; a trailing dot forces the column list even empty, and
+        // an empty prefix is allowed right after operand-expecting keywords
+        // (`FROM |` lists tables immediately — the space-trigger path).
         if !force && prefix.len() < 2 {
-            let forced = word_start > 0
+            let dot_forced = word_start > 0
                 && text[..word_start.min(text.len())].trim_end().ends_with('.');
-            if !forced {
+            if !dot_forced && !(prefix.is_empty() && allows_empty_prefix(text, offset)) {
                 return empty;
             }
         }
@@ -3157,14 +3163,15 @@ impl SqlHighlandView {
                 .and_then(|c| c.lock().ok().map(|c| c.fks.clone()))
                 .unwrap_or_default();
             let cands = join_condition_candidates(&right_alias, &right, &aliases, &fks);
-            if cands.is_empty() {
-                return empty;
+            if !cands.is_empty() {
+                return (
+                    Self::to_items(cands, text, word_start, offset),
+                    word_start,
+                    prefix,
+                );
             }
-            return (
-                Self::to_items(cands, text, word_start, offset),
-                word_start,
-                prefix,
-            );
+            // No FK links the pair: fall through to Predicate (columns for a
+            // hand-written condition) instead of an empty popup.
         }
         let is_seq = |n: &str| {
             cache.as_ref().is_some_and(|c| {
@@ -3195,6 +3202,82 @@ impl SqlHighlandView {
             !show_system
                 && !owner.eq_ignore_ascii_case(&own_schema)
                 && is_system_schema(owner)
+        };
+        // Shared builders: columns of in-scope tables, keyword lists,
+        // function skeletons. Each context composes only what SQL allows.
+        let push_scope_columns = |cands: &mut Vec<Candidate>| {
+            let Some(cache) = &cache else {
+                return;
+            };
+            let cache = cache.lock().expect("meta lock");
+            let mut seen_tables = std::collections::HashSet::new();
+            for tref in aliases.values() {
+                let key = (
+                    tref.owner.clone().unwrap_or_default().to_ascii_uppercase(),
+                    tref.name.to_ascii_uppercase(),
+                );
+                if !seen_tables.insert(key.clone()) {
+                    continue;
+                }
+                let cols = cache.columns_for(tref.owner.as_deref(), &tref.name);
+                for col in cols {
+                    cands.push(Candidate {
+                        label: col.name.clone(),
+                        detail: format!(
+                            "{} · {}",
+                            if col.data_type.is_empty() {
+                                "COLUMN".to_string()
+                            } else {
+                                col.data_type.clone()
+                            },
+                            tref.name
+                        ),
+                        kind: CandidateKind::ColumnInScope,
+                        owner: tref.owner.clone(),
+                        usage: usage_of(&conn_id, &col.name),
+                    });
+                }
+            }
+        };
+        let push_keywords = |cands: &mut Vec<Candidate>, kws: &[&str]| {
+            for kw in kws {
+                cands.push(Candidate {
+                    label: kw.to_string(),
+                    detail: "KEYWORD".to_string(),
+                    kind: CandidateKind::Keyword,
+                    owner: None,
+                    usage: 0,
+                });
+            }
+        };
+        let push_functions = |cands: &mut Vec<Candidate>| {
+            for (name, sig) in ORACLE_FUNCTIONS {
+                cands.push(Candidate {
+                    label: function_insert(name),
+                    detail: sig.to_string(),
+                    kind: CandidateKind::Function,
+                    owner: None,
+                    usage: usage_of(&conn_id, name),
+                });
+            }
+        };
+        let push_sequences = |cands: &mut Vec<Candidate>| {
+            let Some(cache) = &cache else {
+                return;
+            };
+            let cache = cache.lock().expect("meta lock");
+            for s in &cache.sequences {
+                if hide_system(&s.owner) {
+                    continue;
+                }
+                cands.push(Candidate {
+                    label: s.name.clone(),
+                    detail: format!("SEQUENCE · {}", s.owner),
+                    kind: CandidateKind::Sequence,
+                    owner: Some(s.owner.clone()),
+                    usage: usage_of(&conn_id, &s.name),
+                });
+            }
         };
         match &ctx {
             // Handled above via detect_join_on — unreachable here.
@@ -3240,7 +3323,11 @@ impl SqlHighlandView {
                     }
                 }
             }
+            CompleteContext::StatementStart => {
+                push_keywords(&mut cands, STMT_KEYWORDS);
+            }
             CompleteContext::AfterFrom => {
+                // Tables only — keywords never follow FROM.
                 if let Some(cache) = &cache {
                     let cache = cache.lock().expect("meta lock");
                     for t in &cache.tables {
@@ -3257,22 +3344,13 @@ impl SqlHighlandView {
                         });
                     }
                 }
-                for kw in ["SELECT", "FROM", "WHERE", "JOIN", "ORDER BY", "GROUP BY"] {
-                    cands.push(Candidate {
-                        label: kw.to_string(),
-                        detail: "KEYWORD".to_string(),
-                        kind: CandidateKind::Keyword,
-                        owner: None,
-                        usage: 0,
-                    });
-                }
             }
-            CompleteContext::BareWord => {
-                // Tables (+ views).
+            CompleteContext::OwnerTables(owner) => {
+                // `FROM owner.|` — that owner's tables, bare names.
                 if let Some(cache) = &cache {
                     let cache = cache.lock().expect("meta lock");
                     for t in &cache.tables {
-                        if hide_system(&t.owner) {
+                        if !t.owner.eq_ignore_ascii_case(owner) {
                             continue;
                         }
                         cands.push(Candidate {
@@ -3283,50 +3361,29 @@ impl SqlHighlandView {
                             usage: usage_of(&conn_id, &t.name),
                         });
                     }
-                    // Columns of in-scope tables first.
-                    let mut seen_tables = std::collections::HashSet::new();
-                    for tref in aliases.values() {
-                        let key = (
-                            tref.owner.clone().unwrap_or_default().to_ascii_uppercase(),
-                            tref.name.to_ascii_uppercase(),
-                        );
-                        if !seen_tables.insert(key.clone()) {
-                            continue;
-                        }
-                        let cols = cache.columns_for(tref.owner.as_deref(), &tref.name);
-                        for col in cols {
-                            cands.push(Candidate {
-                                label: col.name.clone(),
-                                detail: format!(
-                                    "{} · {}",
-                                    if col.data_type.is_empty() {
-                                        "COLUMN".to_string()
-                                    } else {
-                                        col.data_type.clone()
-                                    },
-                                    tref.name
-                                ),
-                                kind: CandidateKind::ColumnInScope,
-                                owner: tref.owner.clone(),
-                                usage: usage_of(&conn_id, &col.name),
-                            });
-                        }
-                    }
-                    // Sequences.
-                    for s in &cache.sequences {
-                        if hide_system(&s.owner) {
-                            continue;
-                        }
-                        cands.push(Candidate {
-                            label: s.name.clone(),
-                            detail: format!("SEQUENCE · {}", s.owner),
-                            kind: CandidateKind::Sequence,
-                            owner: Some(s.owner.clone()),
-                            usage: usage_of(&conn_id, &s.name),
-                        });
-                    }
                 }
+            }
+            CompleteContext::SelectList => {
+                push_scope_columns(&mut cands);
+                push_functions(&mut cands);
+                push_sequences(&mut cands);
+                push_keywords(&mut cands, EXPR_KEYWORDS);
+                push_keywords(&mut cands, SELECT_FOLLOW);
+            }
+            CompleteContext::Predicate => {
+                push_scope_columns(&mut cands);
+                push_functions(&mut cands);
+                push_sequences(&mut cands);
+                push_keywords(&mut cands, PRED_KEYWORDS);
+                push_keywords(&mut cands, PRED_FOLLOW);
+            }
+            CompleteContext::BareWord => {
+                // Ambiguous position: keywords + functions, minus the
+                // function names (which complete as call skeletons below).
                 for kw in ORACLE_KEYWORDS {
+                    if ORACLE_FUNCTIONS.iter().any(|(n, _)| n == kw) {
+                        continue;
+                    }
                     cands.push(Candidate {
                         label: kw.to_string(),
                         detail: "KEYWORD".to_string(),
@@ -3335,6 +3392,7 @@ impl SqlHighlandView {
                         usage: 0,
                     });
                 }
+                push_functions(&mut cands);
             }
         }
         let ranked = rank_candidates(&prefix, cands, &own_schema, COMPLETE_LIMIT);
@@ -3370,6 +3428,7 @@ impl SqlHighlandView {
                     }
                     CandidateKind::Table => lsp_types::CompletionItemKind::CLASS,
                     CandidateKind::Sequence => lsp_types::CompletionItemKind::VALUE,
+                    CandidateKind::Function => lsp_types::CompletionItemKind::FUNCTION,
                     CandidateKind::Keyword => lsp_types::CompletionItemKind::KEYWORD,
                 }),
                 sort_text: Some(format!("{ix:04}")),
@@ -3384,7 +3443,7 @@ impl SqlHighlandView {
                             character: e_char,
                         },
                     },
-                    new_text: c.label,
+                    new_text: insert_text_for(c.kind, &c.label),
                 })),
                 ..Default::default()
             })
