@@ -82,8 +82,15 @@ v1 scope, phased follow-ups, and verification.
 4. **Column comments** (`ALL_COL_COMMENTS`) in popup detail.
    — SHIPPED 2026-09-12 (joined fetch, one-line detail).
 5. **Hover provider** (table → columns; column → type/nullable/comment) — reuses cache.
+   — SHIPPED 2026-09-12 (table cards with 30-col cap, qualified + unique
+   bare column cards, Markdown popover, trivia-guarded, silent on unknown).
 6. **Definition provider** (Cmd-click → DESCRIBE output).
-7. **Package members** (`DBMS_*`) via `ALL_OBJECTS`.
+   — SHIPPED 2026-09-12 (`OracleDefiner`: table-only resolution mirroring
+   the hover table cards via `describe_target`; Cmd-hover underlines,
+   Cmd-click runs `DESCRIBE owner.table` through the normal run path via
+   an `oracle-describe:/OWNER/TABLE` `show_document` hook — editor text
+   untouched, unbound tabs get the picker first, unknown schemes fall
+   through to the kit default).7. **Package members** (`DBMS_*`) via `ALL_OBJECTS`.
 8. Keyword-casing follows user/formatter setting.
 
 ## 8. Verify

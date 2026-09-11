@@ -92,6 +92,7 @@ fn is_word_char(c: char) -> bool {
 }
 
 /// Extract the word prefix ending at byte `offset`: returns (prefix, start).
+/// Completion semantics: only text *before* the cursor matters.
 /// Handles quoted identifiers (`"MixedCase|` → prefix `MixedCase`).
 pub fn word_prefix(text: &str, offset: usize) -> (String, usize) {
     let offset = offset.min(text.len());
@@ -115,6 +116,33 @@ pub fn word_prefix(text: &str, offset: usize) -> (String, usize) {
         .map(|(i, _)| i)
         .unwrap_or(offset);
     (head[start..].to_string(), start)
+}
+
+/// Full word under byte `offset`: returns (word, start). Hover semantics —
+/// unlike [`word_prefix`], extends *forward* past the cursor, so a pointer
+/// mid-`EMPLOYEES` yields the whole table name, not the `EMPL` prefix.
+/// Quoted identifiers return the inner name without quotes.
+pub fn word_at(text: &str, offset: usize) -> (String, usize) {
+    let offset = offset.min(text.len());
+    let (prefix, start) = word_prefix(text, offset);
+    // Forward run from the cursor (stops at `.`, whitespace, `"`, …).
+    let tail = &text[offset..];
+    let end = tail
+        .char_indices()
+        .take_while(|(_, c)| is_word_char(*c))
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    if prefix.is_empty() {
+        // At a word start (or on a non-word char): forward only.
+        if end == 0 {
+            return (String::new(), offset);
+        }
+        return (tail[..end].to_string(), offset);
+    }
+    let mut word = prefix;
+    word.push_str(&tail[..end]);
+    (word, start)
 }
 
 /// Qualifier before `word_start`: `e.|` → `Some("e")`, `scott.emp.|` →
@@ -419,7 +447,7 @@ pub fn ambiguous_columns(scope: &[ScopeTable]) -> std::collections::HashSet<Stri
         .collect()
 }
 
-use crate::metadata::ColumnMeta;
+use crate::metadata::{ColumnMeta, MetadataCache};
 
 /// Scope table entry for ambiguity analysis: owner, table, and its columns.
 pub struct ScopeTable {
@@ -444,6 +472,227 @@ pub fn scope_label(
     })
 }
 
+/// Display name for an object: bare `name` when `owner` is the connected
+/// user's own schema (Oracle resolves unqualified names to it first, so the
+/// prefix is noise), else `OWNER.name`. Used for suggestion labels/inserts,
+/// hover titles, and DESCRIBE statements alike.
+pub fn display_name(owner: Option<&str>, name: &str, own_schema: &str) -> String {
+    match owner {
+        Some(o) if !o.is_empty() && !o.eq_ignore_ascii_case(own_schema) => {
+            format!("{o}.{name}")
+        }
+        _ => name.to_string(),
+    }
+}
+
+/// Hover card markdown for the word under the cursor. `qualifier` is the
+/// `x` in `x.word` (None for bare words); `aliases` maps the current
+/// statement's aliases. Returns None when nothing reliable can be said
+/// (unknown object, ambiguous bare column, system object while hidden).
+/// Pure and snapshot-driven — the provider calls it with cached data.
+pub fn hover_markdown(
+    word: &str,
+    qualifier: Option<&str>,
+    aliases: &HashMap<String, TableRef>,
+    cache: &MetadataCache,
+    show_system: bool,
+    own_schema: &str,
+) -> Option<String> {
+    if word.is_empty() {
+        return None;
+    }
+    let hidden = |owner: &str| {
+        !show_system && !owner.eq_ignore_ascii_case(own_schema) && is_system_schema(owner)
+    };
+    // Qualified: `alias.column`, `owner.table` (cursor on the table), or
+    // `owner.table.column`. Alias columns first; a bare owner never lives
+    // in the alias map, so `SYSTEM.EMPLOYEES` resolves directly.
+    if let Some(q) = qualifier {
+        if let Some(tref) = resolve_qualifier(q, aliases) {
+            let cols = cache.columns_for(tref.owner.as_deref(), &tref.name);
+            if !cols.is_empty() {
+                if let Some(col) = cols.iter().find(|c| c.name.eq_ignore_ascii_case(word)) {
+                    return Some(column_card(
+                        tref.owner.as_deref().unwrap_or(""),
+                        &tref.name,
+                        col,
+                        own_schema,
+                    ));
+                }
+                // Qualifier resolves to a real table but the word isn't its
+                // column (cursor on the table part): table card.
+                return Some(table_card(
+                    tref.owner.as_deref(),
+                    &tref.name,
+                    &cols,
+                    own_schema,
+                ));
+            }
+        }
+        let (q_owner, q_table) = split_dotted(q);
+        match (q_owner, q_table) {
+            // Single-segment qualifier + word: `SYSTEM.|EMPLOYEES`.
+            (None, _) => {
+                let cols = cache.columns_for(Some(q), word);
+                if !cols.is_empty() {
+                    return Some(table_card(Some(q), word, &cols, own_schema));
+                }
+            }
+            // Dotted qualifier + word: `scott.emp.|ename` → column card.
+            (Some(o), t) => {
+                let cols = cache.columns_for(Some(&o), &t);
+                if let Some(col) = cols.iter().find(|c| c.name.eq_ignore_ascii_case(word)) {
+                    return Some(column_card(&o, &t, col, own_schema));
+                }
+            }
+        }
+        return None;
+    }
+    // Bare word: prefer the qualifier's own table, then own-schema, then a
+    // unique visible match. Never guess across several schemas.
+    let mut matches: Vec<(&String, &String)> = cache
+        .tables
+        .iter()
+        .filter(|t| t.name.eq_ignore_ascii_case(word) && !hidden(&t.owner))
+        .map(|t| (&t.owner, &t.name))
+        .collect();
+    matches.sort();
+    matches.dedup();
+    if matches.len() == 1 {
+        let (owner, name) = matches[0];
+        let cols = cache.columns_for(Some(owner), name);
+        return Some(table_card(Some(owner), name, &cols, own_schema));
+    }
+    // Bare column: unique across in-scope tables only.
+    let mut holders: Vec<(String, String, ColumnMeta)> = Vec::new();
+    for tref in aliases.values() {
+        for col in cache.columns_for(tref.owner.as_deref(), &tref.name) {
+            if col.name.eq_ignore_ascii_case(word) {
+                holders.push((
+                    tref.owner.clone().unwrap_or_default(),
+                    tref.name.clone(),
+                    col,
+                ));
+            }
+        }
+    }
+    holders.sort_by(|a, b| (&a.0, &a.1, &a.2.name).cmp(&(&b.0, &b.1, &b.2.name)));
+    holders.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1 && a.2.name == b.2.name);
+    if holders.len() == 1 {
+        let (owner, table, col) = &holders[0];
+        return Some(column_card(owner, table, col, own_schema));
+    }
+    None
+}
+
+/// Resolve a hovered word to a describable table: returns
+/// (owner, table). Table-only (v1): column words resolve to `None` — a
+/// Cmd-click on a column is not a table jump. Mirrors the table-card
+/// conditions of [`hover_markdown`] so the Cmd-hover underline and the
+/// hover card agree on what is jumpable.
+pub fn describe_target(
+    word: &str,
+    qualifier: Option<&str>,
+    aliases: &HashMap<String, TableRef>,
+    cache: &MetadataCache,
+    show_system: bool,
+    own_schema: &str,
+) -> Option<(Option<String>, String)> {
+    if word.is_empty() {
+        return None;
+    }
+    let hidden = |owner: &str| {
+        !show_system && !owner.eq_ignore_ascii_case(own_schema) && is_system_schema(owner)
+    };
+    if let Some(q) = qualifier {
+        if let Some(tref) = resolve_qualifier(q, aliases) {
+            let cols = cache.columns_for(tref.owner.as_deref(), &tref.name);
+            if !cols.is_empty() {
+                // Cursor on the table part (word is not one of its columns).
+                if !cols.iter().any(|c| c.name.eq_ignore_ascii_case(word)) {
+                    return Some((tref.owner.clone(), tref.name.clone()));
+                }
+                return None;
+            }
+            // Empty: not an alias hit (`resolve_qualifier` always returns
+            // `Some`) — fall through to direct owner.table resolution below.
+        }
+        let (q_owner, _q_table) = split_dotted(q);
+        if q_owner.is_none() {
+            // `owner.table` with the cursor on the table: direct resolve,
+            // bypassing the system filter like the hover card.
+            if !cache.columns_for(Some(q), word).is_empty() {
+                return Some((Some(q.to_string()), word.to_string()));
+            }
+        }
+        return None;
+    }
+    // Bare word: unique visible table only — never guess across schemas.
+    let mut matches: Vec<(&String, &String)> = cache
+        .tables
+        .iter()
+        .filter(|t| t.name.eq_ignore_ascii_case(word) && !hidden(&t.owner))
+        .map(|t| (&t.owner, &t.name))
+        .collect();
+    matches.sort();
+    matches.dedup();
+    if matches.len() == 1 {
+        let (owner, name) = matches[0];
+        return Some((Some(owner.clone()), name.clone()));
+    }
+    None
+}
+
+/// `**COL** · TYPE · TABLE [· OWNER]` + comment. Shared by qualified
+/// and unique bare column cards. Own-schema tables show bare.
+fn column_card(owner: &str, table: &str, col: &ColumnMeta, own_schema: &str) -> String {
+    let mut md = format!(
+        "**{}** · {}",
+        col.name,
+        if col.data_type.is_empty() {
+            "COLUMN".to_string()
+        } else {
+            col.data_type.clone()
+        }
+    );
+    md.push_str(&format!("\n\n{table}"));
+    if !owner.is_empty() && !owner.eq_ignore_ascii_case(own_schema) {
+        md.push_str(&format!(" · {owner}"));
+    }
+    let c = short_comment(&col.comments);
+    if !c.is_empty() {
+        md.push_str(&format!("\n\n{c}"));
+    }
+    md
+}
+
+/// `**OWNER.TABLE** — TABLE` (bare `**TABLE**` for the connected user's
+/// own schema) + up to 30 `COL — TYPE — comment` lines.
+fn table_card(owner: Option<&str>, table: &str, cols: &[ColumnMeta], own_schema: &str) -> String {
+    let mut md = String::from("**");
+    md.push_str(&display_name(owner, table, own_schema));
+    md.push_str("** — TABLE");
+    let shown = cols.len().min(30);
+    for col in &cols[..shown] {
+        md.push_str(&format!(
+            "\n{} — {}",
+            col.name,
+            if col.data_type.is_empty() {
+                "?"
+            } else {
+                col.data_type.as_str()
+            }
+        ));
+        let c = short_comment(&col.comments);
+        if !c.is_empty() {
+            md.push_str(&format!(" — {c}"));
+        }
+    }
+    if cols.len() > shown {
+        md.push_str(&format!("\n… +{} more", cols.len() - shown));
+    }
+    md
+}
 /// One-line popup detail for a column comment: trimmed, single-spaced,
 /// capped at 80 chars.
 pub fn short_comment(comment: &str) -> String {
@@ -1226,6 +1475,31 @@ mod tests {
     }
 
     #[test]
+    fn word_at_extends_past_cursor() {
+        // Mid-word pointer (the hover case): full word, same start.
+        assert_eq!(
+            word_at("SELECT FIRST_NAME FROM SYSTEM.EMPLOYEES", 34),
+            ("EMPLOYEES".to_string(), 30)
+        );
+        assert_eq!(
+            word_at("SELECT FIRST_NAME FROM SYSTEM.EMPLOYEES", 30),
+            ("EMPLOYEES".to_string(), 30)
+        );
+        // End-of-word: identical to the prefix.
+        let sql = "SELECT FIRST_NAME FROM SYSTEM.EMPLOYEES";
+        assert_eq!(
+            word_at(sql, 39),
+            ("EMPLOYEES".to_string(), 30)
+        );
+        // Non-word positions stay empty; on `.` the word before holds
+        // (unchanged legacy behavior — resolves to no card downstream).
+        assert_eq!(word_at("SELECT a.b", 8), ("a".to_string(), 7));
+        assert_eq!(word_at("SELECT ", 7), ("".to_string(), 7));
+        // Quoted: inner name, no quotes.
+        assert_eq!(word_at("SELECT \"MixedCase\" FROM t", 12), ("MixedCase".to_string(), 8));
+    }
+
+    #[test]
     fn qualifier_detects_dotted() {
         assert_eq!(qualifier_before("SELECT e.", 9), Some("e".to_string()));
         let sql = "SELECT scott.emp.";
@@ -1404,7 +1678,7 @@ mod tests {
             assert_eq!(function_insert(name), format!("{name}()"));
         }
         // Sorted for stable popup order among equals.
-        let mut names: Vec<_> = ORACLE_FUNCTIONS.iter().map(|(n, _)| n).collect();
+        let names: Vec<_> = ORACLE_FUNCTIONS.iter().map(|(n, _)| n).collect();
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted);
@@ -1622,6 +1896,177 @@ mod tests {
         let out = short_comment(&long);
         assert_eq!(out.chars().count(), 80);
         assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn hover_table_card_lists_columns() {
+        let mut cache = MetadataCache {
+            tables: vec![crate::metadata::TableId {
+                owner: "SCOTT".into(),
+                name: "EMP".into(),
+            }],
+            ..Default::default()
+        };
+        cache.columns.insert(
+            ("SCOTT".into(), "EMP".into()),
+            vec![
+                ColumnMeta {
+                    name: "EMPNO".into(),
+                    data_type: "NUMBER".into(),
+                    comments: "employee id".into(),
+                },
+                ColumnMeta {
+                    name: "ENAME".into(),
+                    data_type: "VARCHAR2".into(),
+                    comments: "".into(),
+                },
+            ],
+        );
+        let aliases = build_alias_map("SELECT * FROM scott.emp e");
+        let md = hover_markdown("emp", Some("e"), &aliases, &cache, false, "SCOTT").unwrap();
+        // Own-schema table: bare title, no owner prefix (as-written case).
+        assert!(md.contains("**emp** — TABLE"), "{md}");
+        assert!(!md.to_ascii_uppercase().contains("SCOTT.EMP"), "{md}");
+        assert!(md.contains("EMPNO — NUMBER — employee id"), "{md}");
+        // Unknown object → None, never a guess.
+        assert!(hover_markdown("nope", None, &aliases, &cache, false, "SCOTT").is_none());
+        // Bare unique column resolves with its table.
+        let md = hover_markdown("empno", None, &aliases, &cache, false, "SCOTT").unwrap();
+        assert!(md.contains("**EMPNO**"), "{md}");
+        assert!(md.contains("EMP"), "{md}");
+        // Own-schema column card drops the owner suffix.
+        let md = hover_markdown("ename", Some("e"), &aliases, &cache, false, "SCOTT").unwrap();
+        assert!(md.contains("**ENAME**"), "{md}");
+        assert!(!md.contains("· SCOTT"), "{md}");
+    }
+
+    #[test]
+    fn display_name_bares_own_schema() {
+        assert_eq!(display_name(Some("SYSTEM"), "EMPLOYEES", "system"), "EMPLOYEES");
+        assert_eq!(display_name(Some("SYSTEM"), "EMPLOYEES", "SYSTEM"), "EMPLOYEES");
+        assert_eq!(
+            display_name(Some("SCOTT"), "EMP", "HR"),
+            "SCOTT.EMP"
+        );
+        assert_eq!(display_name(None, "DUAL", "HR"), "DUAL");
+        assert_eq!(display_name(Some(""), "DUAL", "HR"), "DUAL");
+    }
+
+    #[test]
+    fn hover_owner_table_resolves_directly() {
+        // `SYSTEM.|EMPLOYEES`: qualifier is an owner, not an alias — must
+        // not misread as table SYSTEM, and bypasses the system filter.
+        let mut cache = MetadataCache::default();
+        cache.tables = vec![crate::metadata::TableId {
+            owner: "SYSTEM".into(),
+            name: "EMPLOYEES".into(),
+        }];
+        cache.columns.insert(
+            ("SYSTEM".into(), "EMPLOYEES".into()),
+            vec![ColumnMeta {
+                name: "ID".into(),
+                data_type: "NUMBER".into(),
+                comments: "".into(),
+            }],
+        );
+        let aliases = build_alias_map("SELECT first_name FROM system.employees");
+        let md =
+            hover_markdown("EMPLOYEES", Some("SYSTEM"), &aliases, &cache, false, "HR").unwrap();
+        assert!(md.contains("**SYSTEM.EMPLOYEES**"), "{md}");
+        assert!(md.contains("ID — NUMBER"), "{md}");
+        // Dotted qualifier + column: `scott.emp.|ename`.
+        cache.tables.push(crate::metadata::TableId {
+            owner: "SCOTT".into(),
+            name: "EMP".into(),
+        });
+        cache.columns.insert(
+            ("SCOTT".into(), "EMP".into()),
+            vec![ColumnMeta {
+                name: "ENAME".into(),
+                data_type: "VARCHAR2".into(),
+                comments: "".into(),
+            }],
+        );
+        let md = hover_markdown(
+            "ENAME",
+            Some("scott.emp"),
+            &aliases,
+            &cache,
+            false,
+            "HR",
+        )
+        .unwrap();
+        assert!(md.contains("**ENAME**"), "{md}");
+        assert!(md.contains("emp · scott"), "{md}");
+    }
+
+    #[test]
+    fn describe_target_resolves_tables_only() {
+        let mut cache = MetadataCache::default();
+        cache.tables = vec![
+            crate::metadata::TableId {
+                owner: "SYSTEM".into(),
+                name: "EMPLOYEES".into(),
+            },
+            crate::metadata::TableId {
+                owner: "SCOTT".into(),
+                name: "EMP".into(),
+            },
+        ];
+        cache.columns.insert(
+            ("SYSTEM".into(), "EMPLOYEES".into()),
+            vec![ColumnMeta {
+                name: "ID".into(),
+                data_type: "NUMBER".into(),
+                comments: "".into(),
+            }],
+        );
+        cache.columns.insert(
+            ("SCOTT".into(), "EMP".into()),
+            vec![ColumnMeta {
+                name: "ENAME".into(),
+                data_type: "VARCHAR2".into(),
+                comments: "".into(),
+            }],
+        );
+        let aliases = build_alias_map("SELECT first_name FROM system.employees");
+        // Qualified, cursor on the table: owner + table.
+        assert_eq!(
+            describe_target("EMPLOYEES", Some("SYSTEM"), &aliases, &cache, false, "HR"),
+            Some((Some("SYSTEM".to_string()), "EMPLOYEES".to_string()))
+        );
+        // Alias-qualified table part (`e.` + `emp` not a column of it).
+        // Owner/name pass through as written (DESCRIBE folds case).
+        let aliases = build_alias_map("SELECT * FROM scott.emp e");
+        assert_eq!(
+            describe_target("emp", Some("e"), &aliases, &cache, false, "SCOTT"),
+            Some((Some("scott".to_string()), "emp".to_string()))
+        );
+        // Column words are not jumps (v1 table-only).
+        assert_eq!(
+            describe_target("ENAME", Some("scott.emp"), &aliases, &cache, false, "HR"),
+            None
+        );
+        assert_eq!(
+            describe_target("ENAME", Some("e"), &aliases, &cache, false, "SCOTT"),
+            None
+        );
+        // Bare unique visible table.
+        assert_eq!(
+            describe_target("EMP", None, &aliases, &cache, false, "SCOTT"),
+            Some((Some("SCOTT".to_string()), "EMP".to_string()))
+        );
+        // Bare system-owned table stays filtered for other users.
+        assert_eq!(
+            describe_target("EMPLOYEES", None, &aliases, &cache, false, "HR"),
+            None
+        );
+        // Unknown words never resolve.
+        assert_eq!(
+            describe_target("nope", None, &aliases, &cache, false, "SCOTT"),
+            None
+        );
+        assert_eq!(describe_target("", None, &aliases, &cache, false, "SCOTT"), None);
     }
 
     #[test]

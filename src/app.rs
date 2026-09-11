@@ -15,10 +15,11 @@ use std::time::Duration;
 
 use crate::complete::{
     allows_empty_prefix, ambiguous_columns, build_alias_map, byte_to_lsp_pos, classify_context,
-    detect_join_on, function_insert, insert_text_for, is_system_schema, is_trivia_position,
-    join_condition_candidates, rank_candidates, resolve_qualifier, scope_label, short_comment,
-    word_prefix, Candidate, CandidateKind, CompleteContext, ForeignKey, ScopeTable, EXPR_KEYWORDS,
-    ORACLE_FUNCTIONS, ORACLE_KEYWORDS, PRED_FOLLOW, PRED_KEYWORDS, SELECT_FOLLOW, STMT_KEYWORDS,
+    describe_target, detect_join_on, display_name, function_insert, hover_markdown, insert_text_for, is_system_schema,
+    is_trivia_position, join_condition_candidates, qualifier_before, rank_candidates,
+    resolve_qualifier, scope_label, short_comment, word_at, word_prefix, Candidate, CandidateKind, CompleteContext,
+    ForeignKey, ScopeTable, EXPR_KEYWORDS, ORACLE_FUNCTIONS, ORACLE_KEYWORDS, PRED_FOLLOW,
+    PRED_KEYWORDS, SELECT_FOLLOW, STMT_KEYWORDS,
 };
 use crate::config::{CompleteMode, Preferences, SavedConfig, SavedTab, TabsManifest, THEME_LIST};
 use crate::db::{
@@ -40,7 +41,8 @@ use gpui_kit::base::SelectableText;
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{
-    CompletionProvider, Editor, EditorState, Input, InputContentType, InputEvent, InputState,
+    CompletionProvider, DefinitionProvider, Editor, EditorState, HoverProvider, Input,
+    InputContentType, InputEvent, InputState,
 };
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
@@ -86,6 +88,152 @@ gpui_kit::actions!(
 
 /// Max popup rows per request (ranking already orders them best-first).
 const COMPLETE_LIMIT: usize = 100;
+
+/// Oracle definition provider for one tab: Cmd-hover underlines a table
+/// word, Cmd-click jumps to its DESCRIBE output. Table-only (v1, same
+/// rule as the hover table cards). Resolution is snapshot-only like the
+/// other providers; the actual DESCRIBE run happens in the
+/// `show_document` host hook below, which owns a `Context` + `Window`.
+struct OracleDefiner {
+    view: WeakEntity<SqlHighlandView>,
+    tab_id: String,
+}
+
+impl DefinitionProvider for OracleDefiner {
+    fn definitions(
+        &self,
+        text: &Rope,
+        offset: usize,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<lsp_types::LocationLink>>> {
+        let snapshot = text.to_string();
+        let out = self.view.update(cx, |this, _| {
+            let tab = this.tabs.iter().find(|t| t.id == self.tab_id)?;
+            let conn_id = tab.connection_id.clone();
+            if is_trivia_position(&snapshot, offset) {
+                return None;
+            }
+            let (word, start) = word_at(&snapshot, offset);
+            if word.is_empty() {
+                return None;
+            }
+            let stmt = statement_at(&snapshot, offset).unwrap_or_else(|| snapshot.clone());
+            let aliases = build_alias_map(&stmt);
+            let qualifier = qualifier_before(&snapshot, start);
+            let cache = conn_id
+                .as_deref()
+                .and_then(|id| this.meta.get(id))
+                .cloned()?;
+            let cache = cache.lock().ok()?;
+            let tgt = describe_target(
+                &word,
+                qualifier.as_deref(),
+                &aliases,
+                &cache,
+                this.show_system,
+                &this.own_schema_of(&conn_id),
+            );
+            let (owner, table) = tgt?;
+            let owner = owner?;
+            // Single slash: `oracle-describe:/OWNER/TABLE` keeps both
+            // segments in the path. (`://` would parse OWNER as the
+            // authority/host, leaving the path with TABLE only.)
+            let uri: lsp_types::Uri = format!("oracle-describe:/{owner}/{table}").parse().ok()?;
+            let (sl, sc) = byte_to_lsp_pos(&snapshot, start);
+            let (el, ec) = byte_to_lsp_pos(&snapshot, start + word.len());
+            let origin = lsp_types::Range {
+                start: lsp_types::Position {
+                    line: sl,
+                    character: sc,
+                },
+                end: lsp_types::Position {
+                    line: el,
+                    character: ec,
+                },
+            };
+            let zero = lsp_types::Position {
+                line: 0,
+                character: 0,
+            };
+            Some(lsp_types::LocationLink {
+                origin_selection_range: Some(origin),
+                target_uri: uri,
+                target_range: lsp_types::Range {
+                    start: zero,
+                    end: zero,
+                },
+                target_selection_range: lsp_types::Range {
+                    start: zero,
+                    end: zero,
+                },
+            })
+        });
+        match out {
+            Ok(Some(link)) => Task::ready(Ok(vec![link])),
+            _ => Task::ready(Ok(vec![])),
+        }
+    }
+}
+
+/// Oracle hover provider for one tab: table cards (columns) and column
+/// cards (type/table/comment) from the cached dictionary. Snapshot-only —
+/// same entity-lease rule as completions: the editor is mutably leased
+/// along the hover path, so only the `&Rope` plus view-owned state.
+struct OracleHover {
+    view: WeakEntity<SqlHighlandView>,
+    tab_id: String,
+}
+
+impl HoverProvider for OracleHover {
+    fn hover(
+        &self,
+        text: &Rope,
+        offset: usize,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Option<lsp_types::Hover>>> {
+        let snapshot = text.to_string();
+        let out = self.view.update(cx, |this, _| {
+            let tab = this.tabs.iter().find(|t| t.id == self.tab_id)?;
+            let conn_id = tab.connection_id.clone();
+            if is_trivia_position(&snapshot, offset) {
+                return None;
+            }
+            let (word, start) = word_at(&snapshot, offset);
+            if word.is_empty() {
+                return None;
+            }
+            let stmt =
+                statement_at(&snapshot, offset).unwrap_or_else(|| snapshot.clone());
+            let aliases = build_alias_map(&stmt);
+            let qualifier = qualifier_before(&snapshot, start);
+            let cache = conn_id.as_deref().and_then(|id| this.meta.get(id)).cloned()?;
+            let md = {
+                let c = cache.lock().ok()?;
+                hover_markdown(
+                    &word,
+                    qualifier.as_deref(),
+                    &aliases,
+                    &c,
+                    this.show_system,
+                    &this.own_schema_of(&conn_id),
+                )
+            }?;
+            Some(lsp_types::Hover {
+                contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
+                    kind: lsp_types::MarkupKind::Markdown,
+                    value: md,
+                }),
+                range: None,
+            })
+        });
+        match out {
+            Ok(Some(h)) => Task::ready(Ok(Some(h))),
+            _ => Task::ready(Ok(None)),
+        }
+    }
+}
 
 /// Oracle suggestion provider for one tab. Holds only a weak view handle +
 /// tab id and resolves everything live (connection, cache snapshot, prefs),
@@ -1159,9 +1307,54 @@ impl SqlHighlandView {
                 view: cx.entity().downgrade(),
                 tab_id: id.clone(),
             };
+            let hover = OracleHover {
+                view: cx.entity().downgrade(),
+                tab_id: id.clone(),
+            };
+            let definer = OracleDefiner {
+                view: cx.entity().downgrade(),
+                tab_id: id.clone(),
+            };
+            // Definition jump: Cmd-click a table word runs DESCRIBE for it.
+            // The provider answers with an `oracle-describe:/OWNER/TABLE`
+            // location; this host hook performs the run and reports handled.
+            // Unknown schemes fall through to the kit default.
+            let view = cx.entity().downgrade();
+            let jump_tab_id = id.clone();
+            let show_document: Rc<
+                dyn Fn(&lsp_types::ShowDocumentParams, &mut Window, &mut App) -> bool,
+            > = Rc::new(move |params, window, cx| {
+                if !params.uri.scheme().is_some_and(|s| s.as_str() == "oracle-describe") {
+                    return false;
+                }
+                let mut segs = params.uri.path().as_str().split('/').filter(|s| !s.is_empty());
+                let (Some(owner), Some(table)) = (segs.next(), segs.next()) else {
+                    return false;
+                };
+                let sql = format!("DESCRIBE {owner}.{table}");
+                let tab_id = jump_tab_id.clone();
+                view.update(cx, |this, cx| {
+                    // Own-schema tables describe bare (`DESCRIBE EMPLOYEES`
+                    // resolves to the connected schema first).
+                    let sql = match this.tab_by_id(&tab_id).and_then(|t| t.connection_id.clone()) {
+                        Some(cid) => {
+                            let own = this.own_schema_of(&Some(cid));
+                            format!("DESCRIBE {}", display_name(Some(owner), table, &own))
+                        }
+                        None => sql,
+                    };
+                    this.start_run(&tab_id, sql, window, cx);
+                })
+                .ok();
+                true
+            });
             editor.update(cx, |editor, _| {
                 editor.lsp_mut().completion_provider =
                     Some(Rc::new(completer) as Rc<dyn CompletionProvider>);
+                editor.lsp_mut().hover_provider = Some(Rc::new(hover) as Rc<dyn HoverProvider>);
+                editor.lsp_mut().definition_provider =
+                    Some(Rc::new(definer) as Rc<dyn DefinitionProvider>);
+                editor.lsp_mut().show_document = Some(show_document);
             });
         }
         let table = cx
@@ -1662,7 +1855,6 @@ impl SqlHighlandView {
             return;
         };
         let text = self.tabs[ix].editor.read(cx).value().to_string();
-        let name = tab_name_from_sql(&text, &self.tabs[ix].name);
         self.tabs[ix].save_task = None; // drop cancels the pending flush
 
         let bg = cx.background_executor().clone();
@@ -1675,7 +1867,7 @@ impl SqlHighlandView {
                 .spawn(async move {
                     match path {
                         Some(path) => filetab::write(&path, &text)
-                            .map(|stamp| Some(stamp))
+                            .map(Some)
                             .map_err(|e| e.to_string()),
                         None => TabsManifest::write_draft(&write_id, &text)
                             .map(|_| None)
@@ -1693,7 +1885,6 @@ impl SqlHighlandView {
                         if let Some(stamp) = stamp {
                             tab.file_stamp = Some(stamp);
                         }
-                        tab.name = name.into();
                         this.persist_tabs();
                     }
                     Err(msg) => {
@@ -3557,11 +3748,7 @@ impl SqlHighlandView {
         };
         // Own schema (connected user): its objects rank above the shared
         // catalog, so a DBA login still sees their own tables first.
-        let own_schema: String = conn_id
-            .as_deref()
-            .and_then(|id| self.connections.iter().find(|c| c.id == id))
-            .map(|c| c.user.clone())
-            .unwrap_or_default();
+        let own_schema = self.own_schema_of(&conn_id);
         // Client-side mirror of the SQL filter (cache may predate a toggle,
         // or hold system rows from an unfiltered fetch): hide system owners
         // except the connected user's own schema.
@@ -3717,14 +3904,16 @@ impl SqlHighlandView {
                 push_keywords(&mut cands, STMT_KEYWORDS);
             }
             CompleteContext::AfterFrom => {
-                // Tables only — keywords never follow FROM.
+                // Tables only — keywords never follow FROM. Own-schema
+                // tables show (and insert) bare: Oracle resolves
+                // unqualified names to the connected schema first.
                 if let Some(cache) = &cache {
                     let cache = cache.lock().expect("meta lock");
                     for t in &cache.tables {
                         if hide_system(&t.owner) {
                             continue;
                         }
-                        let label = format!("{}.{}", t.owner, t.name);
+                        let label = display_name(Some(&t.owner), &t.name, &own_schema);
                         cands.push(Candidate {
                             label,
                             detail: "TABLE".to_string(),
@@ -3842,6 +4031,15 @@ impl SqlHighlandView {
                 ..Default::default()
             })
             .collect()
+    }
+
+    /// Connected user's schema (for own-schema ranking); "" when unbound.
+    fn own_schema_of(&self, conn_id: &Option<String>) -> String {
+        conn_id
+            .as_deref()
+            .and_then(|id| self.connections.iter().find(|c| c.id == id))
+            .map(|c| c.user.clone())
+            .unwrap_or_default()
     }
 
     /// Fetch (or refresh) the dictionary cache for a connection on the
@@ -4073,11 +4271,11 @@ impl SqlHighlandView {
                     .px_2()
                     .py_1()
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(KitIcon::Database),
+                        Button::new(("conn-icon", ix))
+                            .icon(KitIcon::Database)
+                            .ghost()
+                            .with_size(px(24.))
+                            .text_color(cx.theme().muted_foreground),
                     )
                     .child(
                         v_flex()
@@ -4143,14 +4341,22 @@ impl SqlHighlandView {
                         ),
                 )
                 .child(
-                    Button::new("rail-add")
-                        .icon(KitIcon::Plus)
-                        .ghost()
-                        .small()
-                        .tooltip("Add connection")
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.start_add(window, cx);
-                        })),
+                    div()
+                        .w_full()
+                        .h(px(36.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            Button::new("rail-add")
+                                .icon(KitIcon::Plus)
+                                .ghost()
+                                .small()
+                                .tooltip("Add connection")
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.start_add(window, cx);
+                                })),
+                        ),
                 )
                 .child(
                     div()
@@ -4207,7 +4413,7 @@ impl SqlHighlandView {
                                         Button::new(("conn-rail", ix))
                                             .icon(KitIcon::Database)
                                             .ghost()
-                                            .small()
+                                            .with_size(px(24.))
                                             .tooltip(format!(
                                                 "{}{} — {}@{}/{}{}",
                                                 cfg.environment
@@ -4276,25 +4482,31 @@ impl SqlHighlandView {
                     ),
             )
             .child(
-                div().w_full().px_1().pt_1().child(
-                    div()
-                        .id("add-connection-row")
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .text_color(cx.theme().muted_foreground)
-                        .hover(|this| this.bg(cx.theme().accent.opacity(0.5)))
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.start_add(window, cx);
-                        }))
-                        .child(KitIcon::Plus)
-                        .child(div().text_sm().child("Add New Connection")),
-                ),
+                div()
+                    .w_full()
+                    .h(px(36.))
+                    .px_1()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .id("add-connection-row")
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_color(cx.theme().muted_foreground)
+                            .hover(|this| this.bg(cx.theme().accent.opacity(0.5)))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.start_add(window, cx);
+                            }))
+                            .child(KitIcon::Plus)
+                            .child(div().text_sm().child("Add New Connection")),
+                    ),
             )
             .child(
                 div()
@@ -4323,24 +4535,27 @@ impl SqlHighlandView {
             )
             .child(
                 div()
+                    .id("settings-footer")
                     .w_full()
-                    .h(px(28.))
                     .flex()
                     .items_center()
-                    .justify_center()
                     .px_1()
+                    .py_1()
                     .border_t_1()
                     .border_color(cx.theme().border)
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_settings(window, cx);
+                    }))
                     .child(
                         Button::new("settings-labeled")
                             .icon(KitIcon::Settings)
                             .ghost()
                             .small()
+                            .w_full()
+                            .justify_start()
                             .label("Settings")
-                            .tooltip("Settings (⌘,)")
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.open_settings(window, cx);
-                            })),
+                            .tooltip("Settings (⌘,)"),
                     ),
             )
             .into_any_element()
@@ -4581,10 +4796,9 @@ impl SqlHighlandView {
                     .child(self.render_connection_picker(cx)),
             )
             .child(
-                div()
-                    .min_h_0()
-                    .flex_1()
-                    .child(Editor::new(&editor).size_full()),
+                div().min_h_0().flex_1().id("sql-editor").child(
+                    Editor::new(&editor).size_full(),
+                ),
             )
     }
 
@@ -4904,10 +5118,16 @@ fn env_tag(env: Environment, cx: &App) -> Option<AnyElement> {
     let color = env_color(env, cx)?;
     Some(
         div()
+            .w(px(48.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .flex_none()
             .px_1()
             .rounded_md()
             .bg(color.opacity(0.15))
             .text_xs()
+            .text_center()
             .text_color(color)
             .child(label)
             .into_any_element(),

@@ -262,6 +262,35 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   prefix filtering keeps them invisible until typed); empty-prefix popup
   right after operand-expecting keywords (`FROM |` lists tables); JoinOn
   without FK falls back to Predicate columns.
+- Hover cards (2026-09-12): `HoverProvider` per tab; table cards (columns
+  with types/comments, 30-cap), qualified + unique bare column cards;
+  trivia-guarded, silent on unknown/ambiguous.
+- Hover owner fix (2026-09-12): `SYSTEM.|EMPLOYEES` showed nothing — the
+  qualifier misread as a table name via the alias map, and the system
+  filter killed explicitly-written names. Direct owner.table resolution
+  with filter bypass for qualified hovers (bare words keep the filter).
+- Definition jump (2026-09-12): Cmd-hover underlines table words,
+  Cmd-click runs `DESCRIBE owner.table` in the clicked tab (results grid,
+  editor untouched). `describe_target` in `complete.rs` (table-only v1;
+  columns never jump) + `OracleDefiner` + `show_document` hook on
+  `oracle-describe:/` URIs, all installed per tab in `make_tab`.
+  Clippy clean, 88 lib + 10 live green, release smoke ALIVE (`cmd_w` UI
+  flake pre-existing). Headless harness can't Cmd-click (no
+  modifier-click), so this one needs a live click to confirm.
+- Own-schema names go bare (2026-09-12): connected as SYSTEM, `FROM `
+  suggests `EMPLOYEES` (not `SYSTEM.EMPLOYEES`) and inserts it bare —
+  Oracle resolves unqualified names to the connected schema first, so the
+  prefix was noise. New `display_name` helper applied to AfterFrom labels,
+  hover card titles/column lines, and the Cmd-click DESCRIBE statement;
+  other schemas stay qualified. Clippy clean, 89 lib + 10 live green,
+  release smoke ALIVE (`cmd_w` UI flake pre-existing).
+- Hover mid-word fix (2026-09-12): diagnostic log showed `word="EMPL"`
+  with `md=none` — hover reused completion's `word_prefix` (text *before*
+  the cursor only), so any mid-word pointer looked up a truncated name.
+  New `word_at` extends forward to word end (hover semantics; completion
+  untouched). Confirmed by user in a real session; temp log instrumentation
+  removed. Clippy clean, 87 lib + 10 live green, release smoke ALIVE
+  (`cmd_w` UI flake pre-existing, reproduces on clean tree).
 - Qualify-on-collision + column comments (2026-09-12): columns shared by
   two scope tables complete qualified (`e.DEPTNO`, alias preferred);
   popup detail appends the one-line `ALL_COL_COMMENTS` text (joined fetch,
