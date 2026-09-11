@@ -27,6 +27,7 @@
         "drag_border": "#5E81AC",
         "drop_target.background": "#5E81AC33",
         "foreground": "#2E3440",
+        "input": "#FFFFFF",
         "info.background": "#4C6885",
         "info.foreground": "#ECEFF4",
         "input.border": "#D8DEE9",
@@ -56,7 +57,7 @@
         "secondary.active.background": "#E5E9F0",
         "secondary.foreground": "#2E3440",
         "secondary.hover.background": "#E5E9F0",
-        "selection.background": "#D8DEE9",
+        "selection.background": "#5E81AC",
         "sidebar.background": "#E5E9F0",
         "sidebar.accent.background": "#D8DEE9",
         "sidebar.accent.foreground": "#2E3440",
@@ -203,6 +204,18 @@
           },
           "variable.special": {
             "color": "#5E81AC"
+          },
+          "float": {
+            "color": "#8A6D8F"
+          },
+          "conditional": {
+            "color": "#5E81AC"
+          },
+          "storageclass": {
+            "color": "#5E81AC"
+          },
+          "parameter": {
+            "color": "#8A6D8F"
           }
         }
       }
@@ -234,6 +247,7 @@
         "drag_border": "#88C0D0",
         "drop_target.background": "#88C0D033",
         "foreground": "#ECEFF4",
+        "input": "#3B4252",
         "info.background": "#5E81AC",
         "info.foreground": "#ECEFF4",
         "input.border": "#4C566A",
@@ -262,7 +276,7 @@
         "secondary.active.background": "#434C5E",
         "secondary.foreground": "#ECEFF4",
         "secondary.hover.background": "#434C5E",
-        "selection.background": "#434C5E",
+        "selection.background": "#88C0D0",
         "sidebar.background": "#242933",
         "sidebar.accent.background": "#3B4252",
         "sidebar.accent.foreground": "#ECEFF4",
@@ -305,7 +319,8 @@
         "base.magenta": "#B48EAD",
         "base.magenta.light": "#B48EAD",
         "base.cyan": "#8FBCBB",
-        "base.cyan.light": "#88C0D0"
+        "base.cyan.light": "#88C0D0",
+        "table.head.background": "#3B4252"
       },
       "highlight": {
         "editor.foreground": "#D8DEE9",
@@ -412,6 +427,18 @@
           },
           "variable.special": {
             "color": "#81A1C1"
+          },
+          "float": {
+            "color": "#B48EAD"
+          },
+          "conditional": {
+            "color": "#81A1C1"
+          },
+          "storageclass": {
+            "color": "#81A1C1"
+          },
+          "parameter": {
+            "color": "#B48EAD"
           }
         }
       }

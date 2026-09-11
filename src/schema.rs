@@ -179,6 +179,28 @@ impl SchemaProvider for OracleProvider {
     }
 }
 
+/// Parse a browser object node id (`o:{schema}:{T|V|S}:{object}`) back
+/// into its parts. Column (`c:…`), folder, and malformed ids return None.
+/// Shared by row clicks and the context menu so both resolve identically.
+pub fn parse_object_id(id: &str) -> Option<(String, String, TableKind)> {
+    let rest = id.strip_prefix("o:")?;
+    let mut parts = rest.split(':');
+    let (schema, kind, first) = (parts.next()?, parts.next()?, parts.next()?);
+    let kind = match kind {
+        "T" => TableKind::Table,
+        "V" => TableKind::View,
+        "S" => TableKind::Sequence,
+        _ => return None,
+    };
+    // Rejoin defensively so a `:` inside a quoted name never misresolves.
+    let mut name = first.to_string();
+    for p in parts {
+        name.push(':');
+        name.push_str(p);
+    }
+    Some((schema.to_string(), name, kind))
+}
+
 /// Narrow a tree to schemas/groups/objects matching `needle`
 /// (case-insensitive contains). Columns never filter: a matching object
 /// always shows its full column list. Empty needle returns everything.
@@ -333,6 +355,23 @@ mod tests {
         assert_eq!(filter_tree(&t, "  ").schemas.len(), 2);
         // No match returns nothing.
         assert!(filter_tree(&t, "zzz").schemas.is_empty());
+    }
+
+    #[test]
+    fn object_ids_round_trip() {
+        use TableKind::*;
+        assert_eq!(
+            parse_object_id("o:HR:T:DEPT"),
+            Some(("HR".to_string(), "DEPT".to_string(), Table))
+        );
+        assert_eq!(
+            parse_object_id("o:HR:V:EMPVW"),
+            Some(("HR".to_string(), "EMPVW".to_string(), View))
+        );
+        assert_eq!(parse_object_id("c:HR:DEPT:DEPTNO"), None);
+        assert_eq!(parse_object_id("g:HR/Tables"), None);
+        assert_eq!(parse_object_id("o:HR:X:WEIRD"), None);
+        assert_eq!(parse_object_id("o:HR:T"), None);
     }
 
     #[test]

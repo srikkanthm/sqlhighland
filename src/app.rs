@@ -4366,7 +4366,7 @@ impl SqlHighlandView {
             .find(|c| c.id == conn_id)
             .map(|c| c.user.clone())
             .unwrap_or_default();
-        let tree = OracleProvider.tree(&cache, self.show_system, &own, true);
+        let tree = OracleProvider.tree(&cache, self.show_system, &own, false);
         let tree = crate::schema::filter_tree(&tree, filter);
         if tree.schemas.is_empty() {
             let label = if filter.trim().is_empty() {
@@ -4378,19 +4378,33 @@ impl SqlHighlandView {
         }
         let expanded = self.browser_expanded.get(conn_id).cloned().unwrap_or_default();
         let exp = |id: &str| expanded.contains(id);
-        // Own schema only (per browser mode): with a single schema the
-        // schema folder is noise — its groups become the roots.
-        if tree.schemas.len() == 1 {
-            return Self::browser_group_items(&tree.schemas[0], &exp);
+        // Own schema's groups sit at the root (no schema folder); every
+        // other visible schema nests under "Other Users". The tree model
+        // already orders own-first, so partition preserves display order.
+        const OTHER_ID: &str = "u:users";
+        let (own_schemas, other_schemas): (Vec<_>, Vec<_>) = tree
+            .schemas
+            .iter()
+            .partition(|g| g.name.eq_ignore_ascii_case(&own));
+        let mut roots = Vec::with_capacity(own_schemas.len() + 1);
+        for g in own_schemas {
+            roots.extend(Self::browser_group_items(g, &exp));
         }
-        let mut roots = Vec::with_capacity(tree.schemas.len());
-        for g in &tree.schemas {
-            let sid = format!("s:{}", g.name);
-            let groups = Self::browser_group_items(g, &exp);
+        if !other_schemas.is_empty() {
+            let mut users = Vec::with_capacity(other_schemas.len());
+            for g in other_schemas {
+                let sid = format!("s:{}", g.name);
+                let groups = Self::browser_group_items(g, &exp);
+                users.push(
+                    TreeItem::new(sid.clone(), g.name.clone())
+                        .children(groups)
+                        .expanded(exp(&sid)),
+                );
+            }
             roots.push(
-                TreeItem::new(sid.clone(), g.name.clone())
-                    .children(groups)
-                    .expanded(exp(&sid)),
+                TreeItem::new(OTHER_ID, format!("Other Users ({})", users.len()))
+                    .children(users)
+                    .expanded(exp(OTHER_ID)),
             );
         }
         roots
@@ -4501,6 +4515,9 @@ impl SqlHighlandView {
             move |this: &mut Self, _, ev: &InputEvent, _, cx| {
                 if matches!(ev, InputEvent::Change) {
                     this.refresh_browser(&filter_conn, cx);
+                    // Same as toggles: the container height is computed at
+                    // render time from visible rows.
+                    cx.notify();
                 }
             },
         );
@@ -4514,7 +4531,7 @@ impl SqlHighlandView {
         let items = self.browser_tree_items(conn_id, &filter);
         let state = cx.new(|cx| TreeState::new(cx).items(items));
         let sub_conn = conn_id.to_string();
-        let sub = cx.subscribe(&state, move |this: &mut Self, _, event: &TreeEvent, _| {
+        let sub = cx.subscribe(&state, move |this: &mut Self, _, event: &TreeEvent, cx| {
             let set = this.browser_expanded.entry(sub_conn.clone()).or_default();
             match event {
                 TreeEvent::Expanded(id) => {
@@ -4524,6 +4541,9 @@ impl SqlHighlandView {
                     set.remove(id.as_ref());
                 }
             }
+            // Container height derives from visible rows (read at render),
+            // so toggles must repaint the view, not just the tree.
+            cx.notify();
         });
         self._subs.push(sub);
         self.browser_trees.insert(conn_id.to_string(), state);
@@ -4538,25 +4558,48 @@ impl SqlHighlandView {
         };
         let view = cx.entity().downgrade();
         let conn = conn_id.to_string();
+        // Shared by the row renderer and the context menu below (both
+        // `move` closures, so each gets its own clone).
+        let menu_view = view.clone();
+        let menu_conn = conn.clone();
         tree(
             &state,
-            move |_ix, entry, _selected, _window, _cx| {
+            move |_ix, entry, _selected, _window, cx| {
                 let id = entry.item().id.clone();
                 let depth = entry.depth();
                 let folder = entry.is_folder();
                 let expanded = entry.is_expanded();
                 let label = entry.item().label.clone();
                 let ids = id.to_string();
-                // Folders get disclosure chevrons (the kit draws none
-                // itself); objects a file mark; columns align bare.
-                let glyph: Option<KitIcon> = if folder {
-                    Some(if expanded {
+                // Two fixed glyph slots: disclosure chevron (folders) +
+                // type icon. The kit draws neither itself.
+                let chevron: Option<KitIcon> = folder.then(|| {
+                    if expanded {
                         KitIcon::ChevronDown
                     } else {
                         KitIcon::ChevronRight
-                    })
+                    }
+                });
+                let type_icon: Option<KitIcon> = if ids == "u:users" {
+                    Some(KitIcon::Users)
+                } else if ids.starts_with("s:") {
+                    Some(KitIcon::User)
+                } else if ids.starts_with("g:") {
+                    if ids.ends_with("/Views") {
+                        Some(KitIcon::Eye)
+                    } else if ids.ends_with("/Sequences") {
+                        Some(KitIcon::Hash)
+                    } else {
+                        Some(KitIcon::Table)
+                    }
                 } else if ids.starts_with("o:") {
-                    Some(KitIcon::FileText)
+                    match ids.split(':').nth(2) {
+                        Some("V") => Some(KitIcon::Eye),
+                        Some("S") => Some(KitIcon::Hash),
+                        _ => Some(KitIcon::Table),
+                    }
+                } else if ids.starts_with("c:") {
+                    Some(KitIcon::Dot)
                 } else {
                     None
                 };
@@ -4564,7 +4607,9 @@ impl SqlHighlandView {
                     .gap_1()
                     .items_center()
                     .pl(px(4.0 + depth as f32 * 12.0));
-                row = match glyph {
+                // Chevron slot (folders only) + type-icon slot: fixed
+                // widths keep labels aligned down the tree.
+                row = match chevron {
                     Some(g) => row.child(
                         div()
                             .w(px(16.))
@@ -4575,38 +4620,25 @@ impl SqlHighlandView {
                     ),
                     None => row.child(div().w(px(16.)).flex_shrink_0()),
                 };
+                row = match type_icon {
+                    Some(g) => row.child(
+                        div()
+                            .w(px(16.))
+                            .flex_shrink_0()
+                            .flex()
+                            .justify_center()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(g),
+                    ),
+                    None => row.child(div().w(px(16.)).flex_shrink_0()),
+                };
                 // Object rows (not columns, not folders) open viewer tabs.
-                // Node ids are `o:{schema}:{T|V|S}:{object}` — split on `:`.
-                // (A `/`-split here once attached zero handlers: every
-                // object parsed to nothing and clicks died silently.)
-                let mut target: Option<(String, String, crate::metadata::TableKind)> = None;
-                if let Some(rest) = ids.strip_prefix("o:") {
-                    let mut parts = rest.split(':');
-                    if let (Some(schema), Some(kind), Some(first)) =
-                        (parts.next(), parts.next(), parts.next())
-                    {
-                        let tk = match kind {
-                            "T" => Some(crate::metadata::TableKind::Table),
-                            "V" => Some(crate::metadata::TableKind::View),
-                            "S" => Some(crate::metadata::TableKind::Sequence),
-                            _ => None,
-                        };
-                        // Rejoin the rest defensively so a weird name
-                        // containing `:` never misresolves.
-                        let mut name = first.to_string();
-                        for p in parts {
-                            name.push(':');
-                            name.push_str(p);
-                        }
-                        if let Some(tk) = tk {
-                            target = Some((schema.to_string(), name, tk));
-                        }
-                    }
-                    if target.is_none() {
-                        // ids starting with `o:` always parse (split on
-                        // `:`); anything else is a bug in the id scheme.
-                        debug_assert!(false, "unparsed object row {ids}");
-                    }
+                // Shared id parse (a `/`-split here once attached zero
+                // handlers: every object parsed to nothing and clicks died
+                // silently — the debug_assert below guards the scheme).
+                let target = crate::schema::parse_object_id(&ids);
+                if ids.starts_with("o:") && target.is_none() {
+                    debug_assert!(false, "unparsed object row {ids}");
                 }
                 // Click synthesis (`on_click`) never fires inside the kit's
                 // virtualized rows (its mousedown rebuild drops the pending
@@ -4617,7 +4649,12 @@ impl SqlHighlandView {
                 let up_conn = conn.clone();
                 row = row
                     .child(div().text_xs().truncate().child(label.to_string()))
-                    .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                    .on_mouse_up(MouseButton::Left, move |event, window, cx| {
+                        // Single release only selects (the kit handles that);
+                        // double-click opens the viewer tab.
+                        if event.click_count < 2 {
+                            return;
+                        }
                         if let Some((schema, name, tk)) = &up_target {
                             up_view
                                 .update(cx, |this, cx| {
@@ -4636,6 +4673,57 @@ impl SqlHighlandView {
                 ListItem::new(ids.clone()).child(row)
             },
         )
+        .context_menu(move |_ix, entry, menu, _window, _cx| {
+            // Own menu per row: without it, right-clicks fall through to
+            // the connection row's menu (Connect/Edit/Delete).
+            let ids = entry.item().id.to_string();
+            let view = menu_view.clone();
+            let conn = menu_conn.clone();
+            if let Some((schema, name, tk)) = crate::schema::parse_object_id(&ids) {
+                let open_view = view.clone();
+                let open_conn = conn.clone();
+                let open_schema = schema.clone();
+                let open_name = name.clone();
+                menu.item(
+                    PopupMenuItem::new("Open description")
+                        .icon(KitIcon::FileText)
+                        .on_click(move |_, window, cx| {
+                            open_view
+                                .update(cx, |this, cx| {
+                                    this.open_viewer(
+                                        &open_conn,
+                                        open_schema.clone(),
+                                        open_name.clone(),
+                                        tk,
+                                        window,
+                                        cx,
+                                    );
+                                })
+                                .ok();
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Copy name")
+                        .icon(KitIcon::ClipboardCopy)
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(name.clone()));
+                        }),
+                )
+            } else if let Some(rest) = ids.strip_prefix("c:") {
+                // Column leaf `c:{schema}:{object}:{column}`: copy the
+                // column name (last segment).
+                let col = rest.rsplit(':').next().unwrap_or(rest).to_string();
+                menu.item(
+                    PopupMenuItem::new("Copy name")
+                        .icon(KitIcon::ClipboardCopy)
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(col.clone()));
+                        }),
+                )
+            } else {
+                menu
+            }
+        })
         .into_any_element()
     }
 
@@ -4649,54 +4737,11 @@ impl SqlHighlandView {
         let browser_open = self.browser_open.contains(&cfg.id);
         let toggle_id = conn_id.clone();
         let tree_conn = conn_id.clone();
-        v_flex()
-            .w_full()
-            .child(
-                div()
-                    .id(("conn-row", ix))
-                    .w_full()
-                    .rounded_md()
-                    // Live rows get a success-tinted background so the active
-                    // connection reads at a glance, not just via the status bar.
-                    .when(is_live, |this| this.bg(cx.theme().success.opacity(0.12)))
-                    .hover(|this| this.bg(cx.theme().accent.opacity(0.5)))
-            .context_menu(move |menu, _, _| {
-                let connect_label = if is_live { "Disconnect" } else { "Connect" };
-                let connect_icon = if is_live {
-                    KitIcon::Unplug
-                } else {
-                    KitIcon::Plug
-                };
-                let connect_op = if is_live {
-                    ConnMenuOp::Disconnect
-                } else {
-                    ConnMenuOp::Connect
-                };
-                menu.item(conn_menu_item(
-                    connect_label,
-                    connect_icon,
-                    view.clone(),
-                    conn_id.clone(),
-                    connect_op,
-                ))
-                .item(conn_menu_item(
-                    "Edit…",
-                    KitIcon::SquarePen,
-                    view.clone(),
-                    conn_id.clone(),
-                    ConnMenuOp::Edit,
-                ))
-                .separator()
-                .item(conn_menu_item(
-                    "Delete",
-                    KitIcon::X,
-                    view.clone(),
-                    conn_id.clone(),
-                    ConnMenuOp::Delete,
-                ))
-            })
-            .child(
-                h_flex()
+        // NOTE: the row div and the tree are siblings under this wrapper.
+        // The tree must NEVER nest inside the row div: it owns the
+        // connection context menu, and anything inside its hitbox fires
+        // both menus on right-click (one menu per hitbox, last wins).
+        let row_body = h_flex()
                     .gap_2()
                     .items_stretch()
                     .px_2()
@@ -4746,42 +4791,104 @@ impl SqlHighlandView {
                                     .when_some(env_tag(cfg.environment, cx), |this, tag| {
                                         this.child(tag)
                                     }),
-                            ),
-                    )
+                            )
+                    );
+        let row = div()
+            .id(("conn-row", ix))
+            .w_full()
+            .rounded_md()
+            // Live rows get a success-tinted background so the active
+            // connection reads at a glance, not just via the status bar.
+            .when(is_live, |this| this.bg(cx.theme().success.opacity(0.12)))
+            .hover(|this| this.bg(cx.theme().accent.opacity(0.5)))
+            .context_menu(move |menu, _, _| {
+                let connect_label = if is_live { "Disconnect" } else { "Connect" };
+                let connect_icon = if is_live {
+                    KitIcon::Unplug
+                } else {
+                    KitIcon::Plug
+                };
+                let connect_op = if is_live {
+                    ConnMenuOp::Disconnect
+                } else {
+                    ConnMenuOp::Connect
+                };
+                menu.item(conn_menu_item(
+                    connect_label,
+                    connect_icon,
+                    view.clone(),
+                    conn_id.clone(),
+                    connect_op,
+                ))
+                .item(conn_menu_item(
+                    "Edit…",
+                    KitIcon::SquarePen,
+                    view.clone(),
+                    conn_id.clone(),
+                    ConnMenuOp::Edit,
+                ))
+                .separator()
+                .item(conn_menu_item(
+                    "Delete",
+                    KitIcon::X,
+                    view.clone(),
+                    conn_id.clone(),
+                    ConnMenuOp::Delete,
+                ))
+            })
+            .child(row_body)
                     // Status bar: the live indicator — success green when
                     // connected, faint border tone when idle.
                     .child(div().w(px(3.)).rounded_full().bg(if is_live {
                         cx.theme().success
                     } else {
                         cx.theme().border
-                    })),
-            )
-            // Schema-browser tree under its connection. Fixed height: the
-            // virtualized tree needs a bounded viewport (size_full inside
-            // an auto-height parent collapses to zero and shows nothing).
+                    }));
+        // NOTE: the tree is a SIBLING of the row div, never a child — the
+        // row div owns the connection context menu, and anything nested
+        // inside it (visually below or not) shares its hitbox and fires
+        // both menus on right-click (one menu slot, last opener wins).
+        v_flex()
+            .w_full()
+            .child(row)
             .when(browser_open, |this| {
                 let filter_row = self
                     .browser_filters
                     .get(&tree_conn)
-                    .map(|f| div().w_full().pb_1().child(Input::new(f).w_full()));
+                    .map(|f| {
+                        div().w_full().pt_1().pb_1().child(
+                            Input::new(f).w_full().h(px(18.)).text_xs(),
+                        )
+                    });
+                // Fit the visible rows (ListItem py_1 + text_xs ≈ 28px),
+                // capped so huge schemas scroll internally instead of
+                // pushing the sidebar. Read live: expansion/filter/cache
+                // changes all notify back here.
+                let mut rows = 0;
+                if let Some(state) = self.browser_trees.get(&tree_conn) {
+                    let state = state.read(cx);
+                    while state.entry(rows).is_some() {
+                        rows += 1;
+                    }
+                }
+                let height_px = (36.0 + rows as f32 * 28.0).min(320.0);
                 this.child(
                     v_flex()
                         .w_full()
-                        .h(px(320.))
+                        .h(px(height_px))
                         .pl(px(8.))
                         .pr(px(2.))
                         .pb_1()
-                        .children(filter_row)
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_h_0()
-                                .overflow_hidden()
-                                .child(self.render_browser_tree(&tree_conn, cx)),
-                        ),
-                )
-            })
-    )
+                    .children(filter_row)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .child(self.render_browser_tree(&tree_conn, cx)),
+                    ),
+            )
+        })
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4792,7 +4899,26 @@ impl SqlHighlandView {
             return v_flex()
                 .w(px(44.))
                 .h_full()
-                .border_r_1()
+                .bg(cx.theme().sidebar)
+                .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                    let tab_id = this.active_tab().id.clone();
+                    this.request_close_tab(&tab_id, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &NewTab, window, cx| {
+                    let tab_id = this.add_tab(None, String::new(), window, cx);
+                    if let Some(ix) = this.tab_index(&tab_id) {
+                        this.select_tab(ix, window, cx);
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &NextTab, window, cx| {
+                    this.cycle_tab(1, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
+                    this.cycle_tab(-1, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &Quit, window, cx| {
+                    this.request_quit(window, cx);
+                }))
                 .border_color(cx.theme().border)
                 .items_center()
                 .gap_1()
@@ -4926,9 +5052,34 @@ impl SqlHighlandView {
                 )
                 .into_any_element();
         }
+        // Tab actions live here too (duplicated from render_main): actions
+        // bubble from the focused element up through ancestors only, so with
+        // focus in the sidebar the main-area listeners never fire. Dialog
+        // focus paths are unaffected (dialogs are not under either root),
+        // so this changes nothing while a dialog is open.
 
         v_flex()
             .size_full()
+            .bg(cx.theme().sidebar)
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                let tab_id = this.active_tab().id.clone();
+                this.request_close_tab(&tab_id, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewTab, window, cx| {
+                let tab_id = this.add_tab(None, String::new(), window, cx);
+                if let Some(ix) = this.tab_index(&tab_id) {
+                    this.select_tab(ix, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &NextTab, window, cx| {
+                this.cycle_tab(1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
+                this.cycle_tab(-1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Quit, window, cx| {
+                this.request_quit(window, cx);
+            }))
             .child(
                 h_flex()
                     .h(px(36.))
@@ -5149,6 +5300,7 @@ impl SqlHighlandView {
             .size_full()
             .gap_2()
             .p_2()
+            .bg(cx.theme().tab_bar)
             .border_b_1()
             .border_color(cx.theme().border)
             .on_action(cx.listener(|this, _: &RunQuery, window, cx| {
@@ -5478,6 +5630,7 @@ impl SqlHighlandView {
             .px_2()
             .h(px(28.))
             .items_center()
+            .bg(cx.theme().status_bar)
             .border_t_1()
             .border_color(cx.theme().border)
             .text_xs()
@@ -5510,6 +5663,7 @@ impl SqlHighlandView {
             .gap_2()
             .px_2()
             .items_center()
+            .bg(cx.theme().tab_bar)
             .border_b_1()
             .border_color(cx.theme().border)
             .child(KitIcon::Database)

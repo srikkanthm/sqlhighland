@@ -7,8 +7,12 @@ Implemented + live-confirmed 2026-09-12.
 - Browse any connection's schema **independent of the active query tab**,
   via trees stacked under each connection in the sidebar.
 - v1 objects: **tables, views, sequences** (+ columns under tables/views).
-- Click an object → opens (or focuses) an **object-viewer tab**: DESCRIBE
-  grid only, no editor. Viewer tabs are **ephemeral** (never persisted).
+- Single-click selects only; double-click opens (or focuses) an
+  **object-viewer tab**: DESCRIBE grid for tables/views, catalog row for
+  sequences; grid only, no editor; viewer tabs are **ephemeral** (never
+  persisted). (Single release used to open — changed 2026-09-12; the
+  kit swallows `on_click` in virtualized rows, so release-with-
+  `click_count >= 2` is the trigger.)
 - Client-side **filter box** over cached names (big-schema usability).
 - Expanding a disconnected connection **auto-connects**, then loads.
 

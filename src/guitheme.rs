@@ -14,11 +14,19 @@ use gpui_kit::*;
 const NORD_THEMES: &str = include_str!("../assets/themes/nord.json");
 const CATPPUCCIN_THEMES: &str = include_str!("../assets/themes/catppuccin.json");
 const SOLARIZED_THEMES: &str = include_str!("../assets/themes/solarized.json");
+const GRUVBOX_THEMES: &str = include_str!("../assets/themes/gruvbox.json");
+const AYU_THEMES: &str = include_str!("../assets/themes/ayu.json");
 
 /// Register bundled theme families. Call once after `gpui_kit::init`.
 pub fn register_themes(cx: &mut App) {
     let registry = ThemeRegistry::global_mut(cx);
-    for content in [NORD_THEMES, CATPPUCCIN_THEMES, SOLARIZED_THEMES] {
+    for content in [
+        NORD_THEMES,
+        CATPPUCCIN_THEMES,
+        SOLARIZED_THEMES,
+        GRUVBOX_THEMES,
+        AYU_THEMES,
+    ] {
         if let Err(e) = registry.load_themes_from_str(content) {
             eprintln!("failed to load bundled themes: {e:#}");
         }

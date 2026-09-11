@@ -187,8 +187,9 @@ impl TabsManifest {
 pub const SYSTEM_THEME: &str = "System";
 
 /// Every selectable theme: the stock Default pair plus our bundled families.
-/// Catppuccin ships all four variants; the rest ship light + dark.
-pub const THEME_LIST: [&str; 11] = [
+/// Catppuccin ships all four variants; Ayu adds Mirage; the rest ship
+/// light + dark.
+pub const THEME_LIST: [&str; 16] = [
     SYSTEM_THEME,
     "Default Light",
     "Default Dark",
@@ -200,6 +201,11 @@ pub const THEME_LIST: [&str; 11] = [
     "Catppuccin Mocha",
     "Solarized Light",
     "Solarized Dark",
+    "Gruvbox Dark",
+    "Gruvbox Light",
+    "Ayu Dark",
+    "Ayu Light",
+    "Ayu Mirage",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

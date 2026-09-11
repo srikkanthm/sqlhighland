@@ -292,6 +292,53 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   resizable-panel sizing as query tabs (flex-only collapses body rows).
   Temp logging stripped. Clippy clean, 94 lib + 10 live green, release
   smoke ALIVE (`cmd_w` UI flake pre-existing).
+- Theme surfaces differentiated (2026-09-12): the kit already had
+  Zed-style surface slots — the gap was our chrome painting everything
+  in base `background` (sidebar/status/headers were transparent). JSONs
+  gained `input` everywhere, `table.head.background` on dark variants,
+  and subtly off-base `editor.background` in all 8 variants; app chrome
+  now reads `sidebar`/`status_bar`/`tab_bar` tokens. New
+  `tests/themes.rs` guards all 8 variants (parse + register + apply).
+  Clippy clean, 95 lib + 10 live green, release smoke ALIVE.
+- Gruvbox + Ayu themes (2026-09-12): converted Zed's official files
+  (not from memory) via a slot-mapping script — Gruvbox Dark/Light,
+  Ayu Dark/Light/Mirage, 13 variants total. Surface slots, syntax
+  (+ float/conditional/storageclass/parameter extras), translucent
+  `players[0]` selections, and our 70%-toward-sidebar editor rule all
+  carried over; `THEME_LIST` + themes test extended. Clippy clean,
+  95 lib + 10 live + themes green, release smoke ALIVE.
+- Selection readability + editor distinction (2026-09-12): the kit
+  clamps selection alpha to 0.3, so muted slate selections melted away
+  app-wide — all 8 variants now use saturated theme blues that survive
+  the wash. Editor backgrounds pushed ~70% toward sidebar tones so the
+  query window reads as its own region.
+- Editor backgrounds lifted (2026-09-12): per Zed's own files the
+  editor anchors the central surface (== active tab == toolbar) while
+  chrome steps away in tiers — our 70%-toward-sidebar rule was too timid
+  and muddy. Darks now sit at 85% toward panel tone, lights lift toward
+  near-white. All 13 variants green.
+- Syntax highlighting gaps (2026-09-12): the palettes themselves are
+  stock upstream (well-designed) — the gap was 4 captures the SQL
+  grammar emits with no theme key (`parameter` binds, `float`,
+  `conditional` THEN/ELSE, `storageclass`), which fell back to plain
+  foreground. Added per variant mirroring each palette's own families
+  (parameter→constant, float→number, conditional/storageclass→keyword);
+  identifiers (`variable`/`field`) and operators stay foreground by
+  design. Themes test still green.
+- Browser UX round 2 (2026-09-12): single-click now only selects —
+  double-click (release with `click_count >= 2`) opens the viewer.
+  Cmd+W/⌘T/ctrl-tab fixed from sidebar focus: tab actions bubble from
+  the focused element up through ancestors only, so the render_main
+  listeners never fired with focus in the tree — the four tab actions
+  are duplicated on both sidebar roots (dialog paths unaffected).
+  Cmd+Q duplicated the same way (quit-from-sidebar).
+- Browser UX round 3 (2026-09-12): Other Users folder (own groups at
+  root, other schemas nested, zero new queries); per-row type icons
+  (Users/User/Table/Eye/Hash/Dot + chevrons); dynamic tree height from
+  visible rows (capped 320); per-connection filter fields (18px);
+  row context menus (Open description + Copy name; columns Copy name).
+  Nesting bug fixed: tree rendered inside the row div shared its hitbox
+  and fired both menus — now true siblings (verified in probe paths).
 - Own-schema names go bare (2026-09-12): connected as SYSTEM, `FROM `
    suggests `EMPLOYEES` (not `SYSTEM.EMPLOYEES`) and inserts it bare —
   Oracle resolves unqualified names to the connected schema first, so the
