@@ -292,6 +292,18 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   resizable-panel sizing as query tabs (flex-only collapses body rows).
   Temp logging stripped. Clippy clean, 94 lib + 10 live green, release
   smoke ALIVE (`cmd_w` UI flake pre-existing).
+- Browser auto-reveal on expand (2026-09-12): expanding pins the node
+  to top when capped so fresh children show. Two kit ordering traps:
+  `Expanded` fires before entries rebuild (defer past it or counts go
+  stale), and `scroll_to_item` is non-strict (no-op when the node is
+  already visible — exactly the expand case), so strict positioning is
+  required. Temp logging stripped.
+- Borderless results grid (2026-09-12): `table.row.border` :=
+  `table.background` in all 13 variants — rejected in review (too naked).
+- Zebra results grid (2026-09-12): `table.even.background` filled in all
+  13 (midpoint of table/head tones) + `.stripe(true)` on the grid;
+  hairlines stay dissolved for now (one variable at a time — restore if
+  zebra alone feels loose).
 - Theme surfaces differentiated (2026-09-12): the kit already had
   Zed-style surface slots — the gap was our chrome painting everything
   in base `background` (sidebar/status/headers were transparent). JSONs
@@ -312,6 +324,13 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   app-wide — all 8 variants now use saturated theme blues that survive
   the wash. Editor backgrounds pushed ~70% toward sidebar tones so the
   query window reads as its own region.
+- Button + row-state slots (2026-09-12): buttons rendered in kit
+  defaults in every theme (no `button_*` slots anywhere) — all 13
+  variants now derive button_primary/secondary/danger/info/success/
+  warning families (+hover/active 8% steps) from their own kind colors;
+  table/list hover + selected-row washes reuse the selection wash;
+  state hover/active steps + switch thumbs filled the same way.
+  Clippy clean, themes + 95 lib + 10 live green, release smoke ALIVE.
 - Editor backgrounds lifted (2026-09-12): per Zed's own files the
   editor anchors the central surface (== active tab == toolbar) while
   chrome steps away in tiers — our 70%-toward-sidebar rule was too timid
