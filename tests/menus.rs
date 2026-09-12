@@ -18,7 +18,9 @@ async fn menu_coverage(_cx: &mut TestAppContext) {
     }
     eprintln!("menu actions: {names:?}");
     // Every shortcut-bearing action exactly once — except CopySelection,
-    // whose grid-scoped ⌘C must never route through the menu.
+    // whose grid/output-scoped ⌘C twins must never route through the
+    // menu (a menu item would hijack AppKit's Cmd+C globally, breaking
+    // normal copy in the editor).
     for expected in [
         "OpenSettings",
         "Quit",
@@ -26,6 +28,7 @@ async fn menu_coverage(_cx: &mut TestAppContext) {
         "PickConnection",
         "RebindConnection",
         "CloseTab",
+        "NewConnection",
         "OpenSql",
         "SaveSql",
         "SaveSqlAs",
@@ -35,8 +38,15 @@ async fn menu_coverage(_cx: &mut TestAppContext) {
         "CommitTxn",
         "RollbackTxn",
         "TriggerComplete",
+        "ToggleSidebar",
         "NextTab",
         "PrevTab",
+        "DismissResults",
+        "ZoomIn",
+        "ZoomOut",
+        "ZoomReset",
+        "GrowEditor",
+        "ShrinkEditor",
     ] {
         assert_eq!(
             names.iter().filter(|n| n.as_str() == expected).count(),

@@ -42,12 +42,13 @@ use crate::sql::{
     find_substitution_vars, format_sql, is_dml, line_at, parse_at_directive, split_statements,
     statement_at, statement_at_range, statement_kind, txn_end, StatementKind, SubVar,
 };
+use gpui_kit::component::resizable::ResizableState;
 use gpui_kit::base::SelectableText;
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{
     CompletionProvider, DefinitionProvider, Editor, EditorState, HoverProvider, Input,
-    InputContentType, InputEvent, InputState,
+    InputContentType, InputEvent, InputState, Textarea, TextareaState,
 };
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
@@ -91,6 +92,14 @@ gpui_kit::actions!(
         PickConnection,
         RebindConnection,
         RunScript,
+        ToggleSidebar,
+        NewConnection,
+        ZoomIn,
+        ZoomOut,
+        ZoomReset,
+        GrowEditor,
+        ShrinkEditor,
+        DismissResults,
         OpenSql,
         SaveSql,
         SaveSqlAs,
@@ -431,6 +440,22 @@ impl TableDelegate for ResultsDelegate {
         Column::new(format!("col-{col_ix}"), name).width(px(180.))
     }
 
+    /// Header labels as native selectable text: drag-select a name and
+    /// Cmd+C copies it through the window selection layer — no special
+    /// column-copy mode. (Column-select mode is off at the table, so a
+    /// plain header click is inert instead of selecting the column.)
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let name = self.column(col_ix, cx).name;
+        div()
+            .size_full()
+            .child(SelectableText::new(format!("col-th-{col_ix}"), name))
+    }
+
     fn render_td(
         &mut self,
         row_ix: usize,
@@ -691,6 +716,15 @@ struct QueryTab {
     pending_txn: bool,
     /// Most recent selection kind. See [`CopySel`].
     copy_sel: Option<CopySel>,
+    /// Dismissed bottom pane: Dismiss (output pane) or the grid's close
+    /// button hides everything below the editor — Dismiss means show
+    /// only the query window. Cleared by every new run.
+    hide_results: bool,
+    /// Read-only message view for the output pane: a real text area, so
+    /// the pane has a caret, selection, and native Cmd+C. Synced from
+    /// `output` at render (only when the text differs, so caret and
+    /// selection survive repaints).
+    output_text: Entity<TextareaState>,
     /// Last executed statement text. Feeds the `query` sheet on Excel export.
     last_sql: String,
     /// An export drain is paging this tab's cursor past the grid cap.
@@ -1223,6 +1257,11 @@ pub struct SqlHighlandView {
     tab_scroll: ScrollHandle,
     untitled_counter: usize,
     sidebar_collapsed: bool,
+    /// Owned splitter state for the query editor/results split. Held
+    /// (not keyed) so keyboard height steps drive the same state the
+    /// mouse drags — `ResizablePanel::size()` is initial-only, which is
+    /// why an `editor_h` field never moved the panel.
+    editor_split: Entity<ResizableState>,
     /// Index being edited in the connection dialog (`None` = adding).
     editing: Option<usize>,
     /// Pending environment tag for the open connection dialog. Set by
@@ -1444,6 +1483,21 @@ impl SqlHighlandView {
         // chord): paired with Cmd+Enter (statement) as Shift+Cmd+Enter
         // (buffer). No kit Input binding uses it (checked), editor-only.
         cx.bind_keys([KeyBinding::new("shift-cmd-enter", RunScript, Some("Input"))]);
+        // Ergonomics: sidebar toggle (VSCode-standard Cmd+B), new
+        // connection, font zoom, editor-height step. All context-free
+        // (verified free of kit/macOS claims) so they work from the
+        // editor, the grid, and the sidebar alike.
+        cx.bind_keys([KeyBinding::new("cmd-b", ToggleSidebar, None)]);
+        cx.bind_keys([KeyBinding::new("cmd-shift-n", NewConnection, None)]);
+        cx.bind_keys([KeyBinding::new("cmd-=", ZoomIn, None)]);
+        cx.bind_keys([KeyBinding::new("cmd--", ZoomOut, None)]);
+        cx.bind_keys([KeyBinding::new("cmd-0", ZoomReset, None)]);
+        cx.bind_keys([KeyBinding::new("ctrl-cmd-up", GrowEditor, None)]);
+        cx.bind_keys([KeyBinding::new("ctrl-cmd-down", ShrinkEditor, None)]);
+        // Dismiss the bottom pane (VSCode panel-toggle parallel). Free
+        // in the kit and macOS; context-free so it fires from the
+        // editor, grid, and sidebar alike.
+        cx.bind_keys([KeyBinding::new("cmd-j", DismissResults, None)]);
         // Refresh the native menu now that every binding exists: AppKit
         // resolves key equivalents from the keymap snapshot at set_menus
         // time, and main.rs runs before these bindings are registered
@@ -1461,6 +1515,7 @@ impl SqlHighlandView {
             tab_scroll: ScrollHandle::new(),
             untitled_counter: 0,
             sidebar_collapsed: false,
+            editor_split: cx.new(|_| ResizableState::default()),
             editing: None,
             pending_env: Environment::default(),
             pending_role: OracleRole::default(),
@@ -1611,7 +1666,14 @@ impl SqlHighlandView {
             });
         }
         let table = cx
-            .new(|cx| TableState::new(ResultsDelegate::empty(), window, cx).cell_selectable(true));
+            .new(|cx| {
+                TableState::new(ResultsDelegate::empty(), window, cx)
+                    .cell_selectable(true)
+                    // No column-select mode: header clicks must not select
+                    // whole columns — header labels are plain text, copied
+                    // with a normal drag-select + Cmd+C (see render_th).
+                    .col_selectable(false)
+            });
         let tab_id = id.clone();
         let table_tab_id = id.clone();
         let subs = vec![
@@ -1630,6 +1692,9 @@ impl SqlHighlandView {
                 match ev {
                     TableEvent::SelectCell(..) => tab.copy_sel = Some(CopySel::Cell),
                     TableEvent::SelectRow(..) => tab.copy_sel = Some(CopySel::Row),
+                    // Column-select mode is off at the table, so header
+                    // clicks never reach here; keyboard column nav still
+                    // can — it clears, as before.
                     TableEvent::ClearSelection | TableEvent::SelectColumn(..) => {
                         tab.copy_sel = None;
                     }
@@ -1656,6 +1721,8 @@ impl SqlHighlandView {
             run_started: None,
             pending_txn: false,
             copy_sel: None,
+            hide_results: false,
+            output_text: cx.new(|cx| TextareaState::new(window, cx)),
             last_sql: String::new(),
             exporting: false,
             export_rows: 0,
@@ -2596,9 +2663,9 @@ impl SqlHighlandView {
                                                             .gap_2()
                                                             .items_center()
                                                             .child(
-                                                                v_flex()
-                                                                    .flex_1()
-                                                                    .child(
+        v_flex()
+            .flex_1()
+                                                                     .child(
                                                                         div()
                                                                             .text_sm()
                                                                             .child(
@@ -4692,6 +4759,8 @@ impl SqlHighlandView {
         // grid repaints empty with `Running…` in the status bar until the
         // fresh fetch lands. `has_result` stays true so the first-run
         // placeholder doesn't flash in its place.
+        // A new run also reopens a dismissed bottom pane.
+        self.tabs[ix].hide_results = false;
         self.tabs[ix].fetch = None;
         self.tabs[ix].copy_sel = None;
         self.tabs[ix].table.update(cx, |table, cx| {
@@ -4957,6 +5026,8 @@ impl SqlHighlandView {
         }
         self.ensure_meta(&conn_id, cx);
         // Drop stale results NOW (same flash-avoidance as run_sql).
+        // A new run also reopens a dismissed bottom pane.
+        self.tabs[ix].hide_results = false;
         self.tabs[ix].fetch = None;
         self.tabs[ix].copy_sel = None;
         self.tabs[ix].table.update(cx, |table, cx| {
@@ -4970,7 +5041,6 @@ impl SqlHighlandView {
         let bg = cx.background_executor().clone();
         let tab_id = tab_id.to_string();
         let conn_id_bg = conn_id.clone();
-        let cap = Preferences::load().result_cap.clamp(1_000, 5_000_000);
         // Same live `Running… Ns` ticker as run_sql.
         {
             let view = cx.entity().downgrade();
@@ -4998,14 +5068,13 @@ impl SqlHighlandView {
         }
         cx.spawn(async move |view, cx| {
             enum StmtOutcome {
-                Rows(u64, u128),
-                Done(u64, u64),
+                Rows(u128),
+                Done(u64),
             }
             let total = statements.len();
             let mut total_ms: u128 = 0;
             let mut total_affected: u64 = 0;
             let mut executed: usize = 0;
-            let mut last_qid: u64 = 0;
             let mut last_select: Option<String> = None;
             let mut failed: Option<(usize, String)> = None;
             // Per-statement trail for the Script Output pane (SQL
@@ -5049,17 +5118,14 @@ impl SqlHighlandView {
                                     let inner = std::time::Instant::now();
                                     session
                                         .start_query(&stmt_c, FETCH_CHUNK, &b)
-                                        .map(|(_, _, id)| {
-                                            StmtOutcome::Rows(id, inner.elapsed().as_millis())
+                                        .map(|_| {
+                                            StmtOutcome::Rows(inner.elapsed().as_millis())
                                         })
                                         .map_err(|e| e.to_string())
                                 }
                                 StatementKind::Execute => session
                                     .exec(&stmt_c, &b)
-                                    .map(|(affected, _)| {
-                                        let qid = session.query_id();
-                                        StmtOutcome::Done(affected, qid)
-                                    })
+                                    .map(|(affected, _)| StmtOutcome::Done(affected))
                                     .map_err(|e| e.to_string()),
                             }
                         })();
@@ -5069,15 +5135,13 @@ impl SqlHighlandView {
                 total_ms += ms;
                 executed = i + 1;
                 match result {
-                    Ok(StmtOutcome::Rows(id, elapsed)) => {
-                        last_qid = id;
+                    Ok(StmtOutcome::Rows(elapsed)) => {
                         last_select = Some(stmt.clone());
                         if trail.len() < Self::SCRIPT_TRAIL_CAP {
                             trail.push(format!("✓ #{} query executed ({} ms)", i + 1, elapsed));
                         }
                     }
-                    Ok(StmtOutcome::Done(affected, qid)) => {
-                        last_qid = qid;
+                    Ok(StmtOutcome::Done(affected)) => {
                         total_affected += affected;
                         if trail.len() < Self::SCRIPT_TRAIL_CAP {
                             trail.push(format!(
@@ -5141,25 +5205,10 @@ impl SqlHighlandView {
                 if let Some(label) = last_select {
                     this.tabs[ix].last_sql = label;
                 }
-                // Empty fetch keeps the post-Dismiss grid + export plumbing
-                // working; the pane (set below) is what the user sees.
-                let fetch = Arc::new(FetchState {
-                    session: session.clone(),
-                    query_id: last_qid,
-                    chunk: FETCH_CHUNK,
-                    cap,
-                    data: Mutex::new(ResultData {
-                        columns: Vec::new(),
-                        rows: Vec::new(),
-                        elapsed_ms: total_ms,
-                        exhausted: true,
-                        loading: false,
-                        capped: false,
-                    }),
-                    view: view.clone(),
-                    tab_id: tab_id.clone(),
-                });
-                this.tabs[ix].fetch = Some(fetch.clone());
+                // No grid fetch of our own: Dismiss restores the stashed
+                // pre-script results (or the full-height editor on a fresh
+                // tab) instead of an empty grid. Session bookkeeping still
+                // applies — the connection went live either way.
                 this.mark_siblings_exhausted(&tab_id, &session);
                 this.live.insert(conn_id_bg.clone());
                 this.ensure_meta(&conn_id_bg, cx);
@@ -5173,14 +5222,8 @@ impl SqlHighlandView {
                     summary(0)
                 };
                 trail.push(meta.clone());
-                this.tabs[ix].result_meta = meta.clone().into();
+                this.tabs[ix].result_meta = meta.into();
                 this.tabs[ix].output = Some(Output::info(trail.join("\n")));
-                this.tabs[ix].has_result = true;
-                this.tabs[ix].table.update(cx, |table, cx| {
-                    table.delegate_mut().set_fetch(Some(fetch));
-                    table.clear_selection(cx);
-                    table.refresh(cx);
-                });
                 cx.notify();
             })
             .ok();
@@ -6093,7 +6136,16 @@ impl SqlHighlandView {
 
     /// Copy the grid selection to the clipboard: the most recently selected
     /// cell or row. Silent no-op with no selection.
-    fn copy_selection(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    fn copy_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Native text selection wins wherever it exists (grid header
+        // labels, output-pane message): grid cell/row copy below is the
+        // fallback when nothing is selected as text. Editor inputs match
+        // neither copy context, so native copy there is untouched.
+        let selected = gpui_kit::base::TextSelection::selected_text(window, cx);
+        if !selected.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(selected));
+            return;
+        }
         let tab = self.active_tab();
         let text = {
             let table = tab.table.read(cx);
@@ -6712,6 +6764,12 @@ impl SqlHighlandView {
                 .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
                     this.cycle_tab(-1, window, cx);
                 }))
+                // Dismiss lives here too (same bubble-path reason):
+                // dialogs sit outside every root, so modals are safe.
+                .on_action(cx.listener(|this, _: &DismissResults, _, cx| {
+                    let tab_id = this.active_tab().id.clone();
+                    this.dismiss_results(&tab_id, cx);
+                }))
                 // File commands live here too (same bubble-path reason as
                 // the tab actions above): with focus in the sidebar the
                 // main-area listeners never fire, so Cmd+S/O would die.
@@ -6782,6 +6840,12 @@ impl SqlHighlandView {
             }))
             .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
                 this.cycle_tab(-1, window, cx);
+            }))
+            // Dismiss lives here too (same bubble-path reason):
+            // dialogs sit outside every root, so modals are safe.
+            .on_action(cx.listener(|this, _: &DismissResults, _, cx| {
+                let tab_id = this.active_tab().id.clone();
+                this.dismiss_results(&tab_id, cx);
             }))
             // File commands live here too (same bubble-path reason as
             // the tab actions above): with focus in the sidebar the
@@ -7176,6 +7240,7 @@ impl SqlHighlandView {
                     .min_h_0()
                     .flex_1()
                     .id("sql-editor")
+                    .test_support()
                     .when_some(ring, |this, ring| {
                         this.border_1().border_color(ring).rounded_md()
                     })
@@ -7185,7 +7250,12 @@ impl SqlHighlandView {
             )
     }
 
-    fn render_results(&self, tab: &QueryTab, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_results(
+        &self,
+        tab: &QueryTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         // min_w_0 + overflow_hidden: without them flex items refuse to shrink
         // below the table's full content width, the table sees an unbounded
         // viewport, renders every column (no virtualization), and its
@@ -7194,7 +7264,7 @@ impl SqlHighlandView {
         // without it the virtualized body collapses to zero rows while the
         // fixed-height header/export/column rows still paint.
         if tab.output.is_some() {
-            self.render_output_pane(tab, cx).into_any_element()
+            self.render_output_pane(tab, window, cx).into_any_element()
         } else {
             let view = cx.entity().downgrade();
             let tab_id = tab.id.clone();
@@ -7206,31 +7276,52 @@ impl SqlHighlandView {
                 .min_h_0()
                 .overflow_hidden()
                 .child(
-                    h_flex().w_full().justify_end().px_2().pt_2().pb_1().child(
-                        Button::new("export")
-                            .outline()
-                            .small()
-                            .w(px(ACTION_BUTTON_W))
-                            .icon(KitIcon::Download)
-                            .label("Export")
-                            .tooltip("Export all result rows to CSV or Excel")
-                            .dropdown_menu(move |menu, _, _| {
-                                let mut menu = menu.max_h(px(320.)).scrollable(true);
-                                for fmt in [ExportFormat::Csv, ExportFormat::Xlsx] {
-                                    let view = exp_view.clone();
-                                    let tab_id = exp_tab.clone();
-                                    menu = menu.item(PopupMenuItem::new(fmt.label()).on_click(
-                                        move |_, window, cx| {
-                                            view.update(cx, |this, cx| {
-                                                this.start_export(&tab_id, fmt, window, cx);
-                                            })
-                                            .ok();
-                                        },
-                                    ));
-                                }
-                                menu
-                            }),
-                    ),
+                    h_flex()
+                        .w_full()
+                        .justify_end()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .pt_2()
+                        .pb_1()
+                        .child(
+                            Button::new("dismiss-results")
+                                .ghost()
+                                .small()
+                                .icon(KitIcon::X)
+                                .tooltip("Dismiss results (⌘J)")
+                                .on_click(cx.listener({
+                                    let dismiss_tab = tab.id.clone();
+                                    move |this, _: &ClickEvent, _, cx| {
+                                        this.dismiss_results(&dismiss_tab, cx);
+                                    }
+                                })),
+                        )
+                        .child(
+                            Button::new("export")
+                                .outline()
+                                .small()
+                                .w(px(ACTION_BUTTON_W))
+                                .icon(KitIcon::Download)
+                                .label("Export")
+                                .tooltip("Export all result rows to CSV or Excel")
+                                .dropdown_menu(move |menu, _, _| {
+                                    let mut menu = menu.max_h(px(320.)).scrollable(true);
+                                    for fmt in [ExportFormat::Csv, ExportFormat::Xlsx] {
+                                        let view = exp_view.clone();
+                                        let tab_id = exp_tab.clone();
+                                        menu = menu.item(PopupMenuItem::new(fmt.label()).on_click(
+                                            move |_, window, cx| {
+                                                view.update(cx, |this, cx| {
+                                                    this.start_export(&tab_id, fmt, window, cx);
+                                                })
+                                                .ok();
+                                            },
+                                        ));
+                                    }
+                                    menu
+                                }),
+                        ),
                 )
                 .child(
                     div()
@@ -7261,14 +7352,28 @@ impl SqlHighlandView {
     }
 
     /// Output pane: replaces the grid with the tab's latest action outcome —
-    /// failures (red) and non-query confirmations (neutral) alike. A new run
-    /// clears the output and returns to the grid automatically; Dismiss
-    /// reveals the previous results (if any) without re-running.
-    fn render_output_pane(&self, tab: &QueryTab, cx: &mut Context<Self>) -> impl IntoElement {
+    /// failures (red) and non-query confirmations (neutral) alike. The
+    /// message is a read-only text area (caret, select, native Cmd+C); a
+    /// new run clears the output and reopens automatically. Dismiss hides
+    /// the whole bottom pane, showing only the query editor.
+    fn render_output_pane(
+        &self,
+        tab: &QueryTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let output = tab.output.clone().unwrap_or(Output::info(""));
         let tab_id = tab.id.clone();
-        let copy_text = output.text.clone();
-        let select_id = tab.id.clone();
+        // Sync the read-only view from the message (only when different,
+        // so caret and selection survive repaints). A view-entity update
+        // would double-lease here — this is a *different* entity, which
+        // is safe — and the guard keeps it a no-op past the first frame.
+        let message = output.text.clone();
+        tab.output_text.update(cx, |s, cx| {
+            if s.value() != message {
+                s.set_value(message, window, cx);
+            }
+        });
         let is_error = output.kind == OutputKind::Error;
         let (accent, title, icon, bg) = if is_error {
             (
@@ -7286,12 +7391,17 @@ impl SqlHighlandView {
             )
         };
         v_flex()
+            .id("output-pane")
+            .test_support()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
             .p_2()
             .gap_2()
+            // No focus/context/copy plumbing by design: the message below
+            // is a real (read-only) text area — caret, selection, and the
+            // kit's native Input-context Cmd+C all come free.
             .child(
                 h_flex()
                     .gap_2()
@@ -7299,31 +7409,18 @@ impl SqlHighlandView {
                     .child(div().text_color(accent).child(icon))
                     .child(div().text_sm().text_color(accent).child(title))
                     .child(div().flex_1())
-                    .child(
-                        Button::new("output-copy")
-                            .ghost()
-                            .small()
-                            .icon(KitIcon::Copy)
-                            .label("Copy")
-                            .tooltip("Copy the full message")
-                            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    copy_text.to_string(),
-                                ));
-                            })),
-                    )
+                    // Icon-only ×, matching the grid's dismiss control.
                     .child(
                         Button::new("output-dismiss")
                             .ghost()
                             .small()
                             .icon(KitIcon::X)
-                            .label("Dismiss")
-                            .tooltip("Back to results")
+                            .tooltip("Dismiss results (⌘J)")
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                if let Some(t) = this.tab_by_id(&tab_id) {
-                                    t.output = None;
-                                }
-                                cx.notify();
+                                // Dismiss means show only the query window:
+                                // the whole bottom pane (output or grid)
+                                // goes away until the next run.
+                                this.dismiss_results(&tab_id, cx);
                             })),
                     ),
             )
@@ -7331,18 +7428,20 @@ impl SqlHighlandView {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scrollbar()
+                    .overflow_hidden()
                     .p_3()
                     .rounded_md()
                     .bg(bg)
                     .text_sm()
                     .text_color(cx.theme().foreground)
-                    // Drag-selectable message (Cmd+C via the window
-                    // selection layer) plus the header Copy button.
-                    .child(SelectableText::new(
-                        format!("output-text-{select_id}"),
-                        output.text.clone(),
-                    )),
+                    // Read-only text area: caret, select, native Cmd+C.
+                    .child(
+                        Textarea::new(&tab.output_text)
+                            .readonly(true)
+                            .appearance(false)
+                            .bordered(false)
+                            .size_full(),
+                    ),
             )
     }
 
@@ -7470,7 +7569,7 @@ impl SqlHighlandView {
             })
     }
 
-    fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_main(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let tab = self.active_tab();
         // Object-viewer tabs (schema browser): grid only, no editor.
         // Layout mirrors the query split (resizable panel + body) on
@@ -7479,9 +7578,9 @@ impl SqlHighlandView {
         // to zero rows while fixed-height siblings still paint.
         let content: AnyElement = if matches!(tab.kind, TabKind::Viewer { .. }) {
             let body: AnyElement = if tab.output.is_some() {
-                self.render_output_pane(tab, cx).into_any_element()
+                self.render_output_pane(tab, window, cx).into_any_element()
             } else if tab.has_result {
-                self.render_results(tab, cx).into_any_element()
+                self.render_results(tab, window, cx).into_any_element()
             } else {
                 div()
                     .size_full()
@@ -7504,11 +7603,12 @@ impl SqlHighlandView {
                 .child(body)
                 .into_any_element()
         } else {
-            // Fresh tab (never ran, no output): editor takes the full
-            // height — no empty bottom pane. Once anything runs, the
-            // resizable editor/results split appears and stays.
+            // Dismissed (output Dismiss or grid close): editor takes the
+            // full height — no empty bottom pane. A fresh tab (never ran,
+            // no output) renders the same way. Any new run reopens.
+            let dismissed = tab.hide_results;
             let fresh = !tab.has_result && tab.output.is_none();
-            if fresh {
+            if dismissed || fresh {
                 div()
                     .flex_1()
                     .min_h_0()
@@ -7516,10 +7616,14 @@ impl SqlHighlandView {
                     .into_any_element()
             } else {
                 let body: AnyElement = match tab.output.is_some() {
-                    true => self.render_output_pane(tab, cx).into_any_element(),
-                    false => self.render_results(tab, cx).into_any_element(),
+                    true => self.render_output_pane(tab, window, cx).into_any_element(),
+                    false => self.render_results(tab, window, cx).into_any_element(),
                 };
                 v_resizable("query-split")
+                    // Owned state: keyboard steps (`resize_panel`) and
+                    // mouse drags share it, so neither fights the other.
+                    // The panel's `.size()` below is initial-only.
+                    .with_state(&self.editor_split)
                     .child(
                         resizable_panel()
                             .size(px(300.))
@@ -7545,6 +7649,13 @@ impl SqlHighlandView {
             .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
                 this.cycle_tab(-1, window, cx);
             }))
+            // Dismiss lives here too (same bubble-path reason as the tab
+            // actions above; dialogs are outside every root, so modals
+            // never see it).
+            .on_action(cx.listener(|this, _: &DismissResults, _, cx| {
+                let tab_id = this.active_tab().id.clone();
+                this.dismiss_results(&tab_id, cx);
+            }))
             // NewTab/CloseTab stay app-global (main.rs): element-level
             // duplicates double-fire, and dialogs sit outside this
             // root so they never see dialog-focused keypresses.
@@ -7565,9 +7676,63 @@ impl SqlHighlandView {
             .into_any_element()
     }
 
-    fn toggle_sidebar(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_collapsed = !self.sidebar_collapsed;
+    /// Dismiss the bottom pane (output or grid): show only the query
+    /// window until the next run reopens it. Shared by the output-pane
+    /// Dismiss, the grid's close button, and the Cmd+J action.
+    fn dismiss_results(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        if let Some(t) = self.tab_by_id(tab_id) {
+            t.output = None;
+            t.hide_results = true;
+        }
         cx.notify();
+    }
+
+    fn toggle_sidebar(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_sidebar_collapsed(!self.sidebar_collapsed, cx);
+    }
+
+    /// Shared by the collapse button/rail and the Cmd+B action.
+    fn set_sidebar_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        self.sidebar_collapsed = collapsed;
+        cx.notify();
+    }
+
+    /// Editor font zoom: step the saved size by `delta` points, clamped
+    /// to the Settings stepper bounds (10..24), then persist + apply.
+    /// Takes `&mut Context` directly — `Context` derefs to `App`, which
+    /// is all `apply_font_prefs` needs.
+    fn zoom_font(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let mut prefs = Preferences::load();
+        prefs.font_size = (prefs.font_size as i32 + delta).clamp(10, 24) as u32;
+        let _ = prefs.save();
+        crate::guitheme::apply_font_prefs(&prefs, cx);
+        cx.notify();
+    }
+
+    /// Reset the editor font to the 13pt default.
+    fn zoom_font_reset(&mut self, cx: &mut Context<Self>) {
+        let mut prefs = Preferences::load();
+        prefs.font_size = 13;
+        let _ = prefs.save();
+        crate::guitheme::apply_font_prefs(&prefs, cx);
+        cx.notify();
+    }
+
+    /// Step the query-editor pane height through the owned splitter
+    /// state (the same state mouse drags write), clamped to the panel's
+    /// own range (160..900). No-op before first layout (empty sizes).
+    fn step_editor_h(&mut self, dir: i32, window: &mut Window, cx: &mut Context<Self>) {
+        let cur: f32 = self
+            .editor_split
+            .read(cx)
+            .sizes()
+            .first()
+            .map(|s| (*s).into())
+            .unwrap_or(300.0);
+        let next = (cur + dir as f32 * 48.0).clamp(160.0, 900.0);
+        self.editor_split.update(cx, |s, cx| {
+            s.resize_panel(0, px(next), window, cx)
+        });
     }
 }
 
@@ -7688,42 +7853,55 @@ pub fn app_menus() -> Vec<Menu> {
             ],
             disabled: false,
         },
-                Menu {
-                    name: "File".into(),
-                    items: vec![
-                        MenuItem::action("New Tab", NewTab),
-                        MenuItem::action("New Tab with Connection…", PickConnection),
-                        MenuItem::action("Change Tab Connection…", RebindConnection),
-                        MenuItem::action("Close Tab", CloseTab),
-                MenuItem::Separator,
-                MenuItem::action("Open SQL File…", OpenSql),
-                MenuItem::action("Save", SaveSql),
-                MenuItem::action("Save As…", SaveSqlAs),
-            ],
-            disabled: false,
-        },
+            Menu {
+                name: "File".into(),
+                items: vec![
+                    MenuItem::action("New Tab", NewTab),
+                    MenuItem::action("New Tab with Connection…", PickConnection),
+                    MenuItem::action("Change Tab Connection…", RebindConnection),
+                    MenuItem::action("Close Tab", CloseTab),
+                    MenuItem::Separator,
+                    MenuItem::action("New Connection…", NewConnection),
+                    MenuItem::Separator,
+                    MenuItem::action("Open SQL File…", OpenSql),
+                    MenuItem::action("Save", SaveSql),
+                    MenuItem::action("Save As…", SaveSqlAs),
+                ],
+                disabled: false,
+            },
             Menu {
                 name: "Query".into(),
                 items: vec![
                     MenuItem::action("Run Query", RunQuery),
                     MenuItem::action("Run as Script", RunScript),
                     MenuItem::action("Format Query", FormatQuery),
-                MenuItem::Separator,
-                MenuItem::action("Commit Transaction", CommitTxn),
-                MenuItem::action("Rollback Transaction", RollbackTxn),
-                MenuItem::Separator,
-                MenuItem::action("Trigger Completion", TriggerComplete),
-            ],
-            disabled: false,
-        },
-        Menu {
-            name: "View".into(),
-            items: vec![
-                MenuItem::action("Next Tab", NextTab),
-                MenuItem::action("Previous Tab", PrevTab),
-            ],
-            disabled: false,
-        },
+                    MenuItem::Separator,
+                    MenuItem::action("Commit Transaction", CommitTxn),
+                    MenuItem::action("Rollback Transaction", RollbackTxn),
+                    MenuItem::Separator,
+                    MenuItem::action("Trigger Completion", TriggerComplete),
+                ],
+                disabled: false,
+            },
+            Menu {
+                name: "View".into(),
+                items: vec![
+                    MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                    MenuItem::Separator,
+                    MenuItem::action("Next Tab", NextTab),
+                    MenuItem::action("Previous Tab", PrevTab),
+                    MenuItem::Separator,
+                    MenuItem::action("Dismiss Results", DismissResults),
+                    MenuItem::Separator,
+                    MenuItem::action("Zoom In", ZoomIn),
+                    MenuItem::action("Zoom Out", ZoomOut),
+                    MenuItem::action("Reset Zoom", ZoomReset),
+                    MenuItem::Separator,
+                    MenuItem::action("Grow Editor", GrowEditor),
+                    MenuItem::action("Shrink Editor", ShrinkEditor),
+                ],
+                disabled: false,
+            },
     ]
 }
 
@@ -7773,7 +7951,7 @@ impl Render for SqlHighlandView {
             h_flex()
                 .size_full()
                 .child(self.render_sidebar(cx))
-                .child(self.render_main(cx))
+                .child(self.render_main(window, cx))
                 .into_any_element()
         } else {
             h_resizable("main-split")
@@ -7784,7 +7962,7 @@ impl Render for SqlHighlandView {
                         .flex_none()
                         .child(self.render_sidebar(cx)),
                 )
-                .child(self.render_main(cx))
+                .child(self.render_main(window, cx))
                 .into_any_element()
         };
 
@@ -7805,6 +7983,30 @@ impl Render for SqlHighlandView {
             }))
             .on_action(cx.listener(|this, _: &RebindConnection, window, cx| {
                 this.open_pick_for_rebind(window, cx);
+            }))
+            // Ergonomics singletons (sole registrations, same reasoning
+            // as PickConnection above): sidebar toggle, new connection,
+            // font zoom, editor-height step.
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _window, cx| {
+                this.set_sidebar_collapsed(!this.sidebar_collapsed, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewConnection, window, cx| {
+                this.start_add(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ZoomIn, _window, cx| {
+                this.zoom_font(1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ZoomOut, _window, cx| {
+                this.zoom_font(-1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ZoomReset, _window, cx| {
+                this.zoom_font_reset(cx);
+            }))
+            .on_action(cx.listener(|this, _: &GrowEditor, window, cx| {
+                this.step_editor_h(1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShrinkEditor, window, cx| {
+                this.step_editor_h(-1, window, cx);
             }))
             .child(
                 v_flex()

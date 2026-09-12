@@ -640,3 +640,23 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   ran 3 DDL/DML statements via real picker pick — trail + `seed.sql:
   3 statements, 0 errors`. Clean `clippy`, 108 lib, 11 live,
   menus/themes/browser_tree green, GUI builds.
+
+## Ergonomics batch (2026-09-12)
+
+- New shortcuts (all context-free, kit/macOS-conflict checked):
+  Cmd+B sidebar, Shift+Cmd+N new connection, Cmd+=/-/0 font zoom
+  (10..24, persist + live apply), Ctrl+Cmd+↑/↓ editor height via the
+  owned ResizableState (`.size()` is initial-only — an `editor_h`
+  field could never work), Cmd+J dismiss results.
+- Native copy everywhere: grid headers render as SelectableText with
+  column-select mode off (no more whole-column selects); output pane
+  message is a read-only Textarea (caret, select, native Cmd+C) synced
+  only on text change; shared copy handler prefers live window
+  selection, falls back to cell/row. Output Copy button removed.
+- Dismiss means editor-only: hide_results flag, × on output pane
+  (icon-only, consistent) and grid export row; new runs reopen.
+- Menus cover all 25 actions (View: sidebar/zoom/editor/dismiss;
+  File: new connection). Verified headless where observable
+  (toggle, dialog open, zoom steps, height bounds +48, pane copy
+  exact-match, dismiss states); clean `clippy`, 108 lib +
+  menus/themes/browser_tree green.
