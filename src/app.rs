@@ -2858,10 +2858,10 @@ impl SqlHighlandView {
                             v_flex()
                                 .gap_2()
                                 .w_full()
-                                // Gutter for the overlaid scrollbar thumb
-                                // (8px): without it the thumb sits on top
+                                // Gutter for the overlaid scrollbar track
+                                // (16px): without it the thumb sits on top
                                 // of the full-width inputs.
-                                .pr_3()
+                                .pr_5()
                                 .child(dialog_field("Name", &name, false, muted))
                         .child(dialog_field("Host", &host, false, muted))
                         .child(
@@ -3642,8 +3642,8 @@ impl SqlHighlandView {
                 .flex()
                 .flex_col()
                 .gap_1()
-                // Gutter for the overlaid scrollbar thumb (see dialog).
-                .pr_3();
+                // Gutter for the overlaid scrollbar track (see dialog).
+                .pr_5();
             for (rix, r) in shown.iter().enumerate() {
                 let pick_view = view.clone();
                 let pick_tab = tab_id.clone();
