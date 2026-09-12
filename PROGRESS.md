@@ -613,3 +613,17 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   against local Oracle via real picker clicks — summary and
   `statement 2/3 failed: ORA-00942` asserted from the output pane.
   Clean `clippy`, 108 lib, 11 live, menus/themes/browser_tree green.
+
+## Scripts render text-only, no grid (2026-09-12)
+
+- SQL Developer parity (Run Script/F5 -> Script Output tab, never a
+  grid): run_script completion always sets the info pane with a
+  per-statement trail (capped at 50 + "+N more") plus the summary, and
+  never builds a grid fetch. Error path shows the trail + `✗ #i/N`.
+  Empty fetch retained for post-Dismiss/export plumbing; last SELECT
+  still recorded in last_sql.
+- Verified live (probe since removed): real 4-statement script ->
+  trail + `@probe_seed.sql: 4 statements, 0 errors`, failing script
+  -> trail + `✗ #2/3 — ORA-00942`, asserted from the pane via
+  clipboard. Clean `clippy`, 108 lib, 11 live, menus/themes/
+  browser_tree green, GUI builds.

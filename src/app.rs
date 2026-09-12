@@ -4779,14 +4779,19 @@ impl SqlHighlandView {
         .detach();
     }
 
+    /// Max per-statement lines in the script-output trail before a
+    /// "+N more" cap (SQL Developer parity: scripts render text, never a
+    /// grid — the pane must stay bounded for large migrations).
+    const SCRIPT_TRAIL_CAP: usize = 50;
+
     /// Sequential `@`-script runner: executes each statement in order on
-    /// the tab's session, then presents the last SELECT in the grid (or a
-    /// summary when no query ran). Stops at the first error; Cancel rides
-    /// the same `run_token` umbrella as `run_sql` and aborts between
-    /// statements. Per-statement binds are partitioned from the shared
-    /// list so unused names never reach the driver (Oracle errors on
-    /// unbound extras). The per-round-trip call timeout applies per
-    /// statement, unchanged.
+    /// the tab's session and always reports through the Script Output
+    /// info pane (per-statement trail + summary; never a grid). Stops at
+    /// the first error; Cancel rides the same `run_token` umbrella as
+    /// `run_sql` and aborts between statements. Per-statement binds are
+    /// partitioned from the shared list so unused names never reach the
+    /// driver (Oracle errors on unbound extras). The per-round-trip call
+    /// timeout applies per statement, unchanged.
     fn run_script(
         &mut self,
         tab_id: &str,
@@ -4876,7 +4881,7 @@ impl SqlHighlandView {
         }
         cx.spawn(async move |view, cx| {
             enum StmtOutcome {
-                Rows(Vec<ColumnInfo>, FetchPage, u64, u128),
+                Rows(u64, u128),
                 Done(u64, u64),
             }
             let total = statements.len();
@@ -4884,8 +4889,12 @@ impl SqlHighlandView {
             let mut total_affected: u64 = 0;
             let mut executed: usize = 0;
             let mut last_qid: u64 = 0;
+            let mut last_select: Option<String> = None;
             let mut failed: Option<(usize, String)> = None;
-            let mut last_query: Option<(Vec<ColumnInfo>, FetchPage, u64, u128, String)> = None;
+            // Per-statement trail for the Script Output pane (SQL
+            // Developer parity: scripts never show a grid). Capped so a
+            // 500-statement migration doesn't explode the layout.
+            let mut trail: Vec<String> = Vec::new();
             for (i, stmt) in statements.iter().enumerate() {
                 // Cancel/close checkpoint between statements.
                 let cont = view
@@ -4923,13 +4932,8 @@ impl SqlHighlandView {
                                     let inner = std::time::Instant::now();
                                     session
                                         .start_query(&stmt_c, FETCH_CHUNK, &b)
-                                        .map(|(columns, page, id)| {
-                                            StmtOutcome::Rows(
-                                                columns,
-                                                page,
-                                                id,
-                                                inner.elapsed().as_millis(),
-                                            )
+                                        .map(|(_, _, id)| {
+                                            StmtOutcome::Rows(id, inner.elapsed().as_millis())
                                         })
                                         .map_err(|e| e.to_string())
                                 }
@@ -4948,13 +4952,24 @@ impl SqlHighlandView {
                 total_ms += ms;
                 executed = i + 1;
                 match result {
-                    Ok(StmtOutcome::Rows(columns, page, id, elapsed)) => {
+                    Ok(StmtOutcome::Rows(id, elapsed)) => {
                         last_qid = id;
-                        last_query = Some((columns, page, id, elapsed, stmt.clone()));
+                        last_select = Some(stmt.clone());
+                        if trail.len() < Self::SCRIPT_TRAIL_CAP {
+                            trail.push(format!("✓ #{} query executed ({} ms)", i + 1, elapsed));
+                        }
                     }
                     Ok(StmtOutcome::Done(affected, qid)) => {
                         last_qid = qid;
                         total_affected += affected;
+                        if trail.len() < Self::SCRIPT_TRAIL_CAP {
+                            trail.push(format!(
+                                "✓ #{} {} ({} ms)",
+                                i + 1,
+                                exec_summary(stmt, affected),
+                                ms
+                            ));
+                        }
                     }
                     Err(msg) => {
                         failed = Some((i, msg));
@@ -4977,14 +4992,15 @@ impl SqlHighlandView {
                         if errors == 1 { "" } else { "s" }
                     )
                 };
+                // Scripts never show the grid (SQL Developer parity: Run
+                // Script renders text, only Run Statement grids). The pane
+                // always gets the per-statement trail plus the summary.
+                if executed > Self::SCRIPT_TRAIL_CAP {
+                    trail.push(format!("… +{} more", executed - Self::SCRIPT_TRAIL_CAP));
+                }
                 if let Some((i, msg)) = failed {
-                    this.tabs[ix].output = Some(Output::error(format!(
-                        "{}: statement {}/{} failed: {}",
-                        script_name,
-                        i + 1,
-                        total,
-                        msg
-                    )));
+                    trail.push(format!("✗ #{}/{} — {}", i + 1, total, msg));
+                    this.tabs[ix].output = Some(Output::error(trail.join("\n")));
                     this.tabs[ix].result_meta = format!("Failed · {total_ms} ms").into();
                     cx.notify();
                     return;
@@ -5004,77 +5020,50 @@ impl SqlHighlandView {
                 if saw_txn_end {
                     this.clear_pending(&conn_id_bg);
                 }
-                match last_query {
-                    Some((columns, page, query_id, elapsed_ms, label)) => {
-                        this.tabs[ix].last_sql = label.clone();
-                        let fetch = Arc::new(FetchState {
-                            session: session.clone(),
-                            query_id,
-                            chunk: FETCH_CHUNK,
-                            cap,
-                            data: Mutex::new(ResultData {
-                                columns,
-                                rows: to_shared(page.rows),
-                                elapsed_ms,
-                                exhausted: page.exhausted,
-                                loading: false,
-                                capped: false,
-                            }),
-                            view: view.clone(),
-                            tab_id: tab_id.clone(),
-                        });
-                        this.tabs[ix].fetch = Some(fetch.clone());
-                        this.mark_siblings_exhausted(&tab_id, &session);
-                        this.live.insert(conn_id_bg.clone());
-                        this.ensure_meta(&conn_id_bg, cx);
-                        this.tabs[ix].result_meta =
-                            format!("{} · {}", describe_fetch(&fetch), summary(0)).into();
-                        this.tabs[ix].has_result = true;
-                        this.tabs[ix].table.update(cx, |table, cx| {
-                            table.delegate_mut().set_fetch(Some(fetch));
-                            table.clear_selection(cx);
-                            table.refresh(cx);
-                        });
-                    }
-                    None => {
-                        let fetch = Arc::new(FetchState {
-                            session: session.clone(),
-                            query_id: last_qid,
-                            chunk: FETCH_CHUNK,
-                            cap,
-                            data: Mutex::new(ResultData {
-                                columns: Vec::new(),
-                                rows: Vec::new(),
-                                elapsed_ms: total_ms,
-                                exhausted: true,
-                                loading: false,
-                                capped: false,
-                            }),
-                            view: view.clone(),
-                            tab_id: tab_id.clone(),
-                        });
-                        this.tabs[ix].fetch = Some(fetch.clone());
-                        this.mark_siblings_exhausted(&tab_id, &session);
-                        this.live.insert(conn_id_bg.clone());
-                        this.ensure_meta(&conn_id_bg, cx);
-                        let meta = if total_affected > 0 {
-                            format!(
-                                "{summary} · {total_affected} rows affected",
-                                summary = summary(0)
-                            )
-                        } else {
-                            summary(0)
-                        };
-                        this.tabs[ix].result_meta = meta.clone().into();
-                        this.tabs[ix].output = Some(Output::info(meta));
-                        this.tabs[ix].has_result = true;
-                        this.tabs[ix].table.update(cx, |table, cx| {
-                            table.delegate_mut().set_fetch(Some(fetch));
-                            table.clear_selection(cx);
-                            table.refresh(cx);
-                        });
-                    }
+                // Export audit stays truthful: last SELECT when one ran.
+                if let Some(label) = last_select {
+                    this.tabs[ix].last_sql = label;
                 }
+                // Empty fetch keeps the post-Dismiss grid + export plumbing
+                // working; the pane (set below) is what the user sees.
+                let fetch = Arc::new(FetchState {
+                    session: session.clone(),
+                    query_id: last_qid,
+                    chunk: FETCH_CHUNK,
+                    cap,
+                    data: Mutex::new(ResultData {
+                        columns: Vec::new(),
+                        rows: Vec::new(),
+                        elapsed_ms: total_ms,
+                        exhausted: true,
+                        loading: false,
+                        capped: false,
+                    }),
+                    view: view.clone(),
+                    tab_id: tab_id.clone(),
+                });
+                this.tabs[ix].fetch = Some(fetch.clone());
+                this.mark_siblings_exhausted(&tab_id, &session);
+                this.live.insert(conn_id_bg.clone());
+                this.ensure_meta(&conn_id_bg, cx);
+                let meta = if total_affected > 0 {
+                    format!(
+                        "{summary} · {total_affected} row{} affected",
+                        if total_affected == 1 { "" } else { "s" },
+                        summary = summary(0)
+                    )
+                } else {
+                    summary(0)
+                };
+                trail.push(meta.clone());
+                this.tabs[ix].result_meta = meta.clone().into();
+                this.tabs[ix].output = Some(Output::info(trail.join("\n")));
+                this.tabs[ix].has_result = true;
+                this.tabs[ix].table.update(cx, |table, cx| {
+                    table.delegate_mut().set_fetch(Some(fetch));
+                    table.clear_selection(cx);
+                    table.refresh(cx);
+                });
                 cx.notify();
             })
             .ok();
