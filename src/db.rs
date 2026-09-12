@@ -4,7 +4,7 @@
 //! stays in this module. All calls are blocking — callers must run them on a
 //! GPUI background executor, never on the UI thread.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::model::{ColumnInfo, ConnectionConfig, QueryResult};
 
@@ -94,6 +94,25 @@ impl OracledbSession {
         self.query_id
     }
 
+    /// Apply the configured call timeout to the live connection. Read
+    /// fresh on every call (not just at connect) so preference changes
+    /// take effect without reconnecting; the setter itself is cheap.
+    /// 0 seconds means unlimited (driver default). The budget is per
+    /// network round trip, not total query time — healthy paged drains
+    /// answer each fetch in milliseconds, so only stuck calls trip it.
+    fn apply_call_timeout(&self) -> Result<(), DbError> {
+        let Some(conn) = self.conn.as_ref() else {
+            return Ok(());
+        };
+        let secs = crate::config::Preferences::load().query_timeout_secs;
+        let timeout = if secs == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(secs))
+        };
+        conn.set_call_timeout(timeout).map_err(DbError::from)
+    }
+
     /// Execute and pull the first page, holding the cursor open for more.
     /// Returns the columns, the first page, and the new generation id.
     /// Supersedes any previously open cursor (it is dropped/closed).
@@ -112,6 +131,7 @@ impl OracledbSession {
             .as_ref()
             .ok_or_else(|| DbError("not connected".to_string()))?;
         let sql = sanitize_statement(sql)?;
+        self.apply_call_timeout()?;
         // DESCRIBE is a SQL*Plus client command, not SQL — the server
         // rejects it (ORA-00900). Emulate it via ALL_TAB_COLUMNS.
         let rewritten;
@@ -201,6 +221,7 @@ impl OracledbSession {
             .as_ref()
             .ok_or_else(|| DbError("not connected".to_string()))?;
         let sql = sanitize_statement(sql)?;
+        self.apply_call_timeout()?;
         let started = Instant::now();
         let result = exec_with_binds(conn, sql, binds).map_err(|e| {
             if is_poisoned(&e) {
@@ -293,6 +314,15 @@ impl std::error::Error for DbError {}
 
 impl From<oracledb::Error> for DbError {
     fn from(err: oracledb::Error) -> Self {
+        // A tripped call timeout leaves the connection usable (it is NOT
+        // poisoning — see is_poisoned), so translate it once, centrally,
+        // into what the status bar should say.
+        if err.kind() == &oracledb::ErrorKind::CallTimeoutExceeded {
+            let secs = crate::config::Preferences::load().query_timeout_secs;
+            return Self(format!(
+                "Query timed out after {secs}s (query timeout setting)"
+            ));
+        }
         Self(err.to_string())
     }
 }
@@ -322,6 +352,8 @@ impl DbClient for OracledbSession {
         self.cursor = None;
         self.pending = None;
         self.columns.clear();
+        // Bound the worst case from the first round trip on.
+        self.apply_call_timeout()?;
         Ok(())
     }
 

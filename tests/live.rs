@@ -292,3 +292,35 @@ fn live_fk_fetch_groups_keys() {
     s.exec(&format!("DROP TABLE {parent}"), &[])
         .expect("drop parent");
 }
+
+#[test]
+fn live_call_timeout_trips_and_survives() {
+    // Staged prefs (SQLHIGHLAND_CONFIG_DIR is process-global): keep the
+    // window tiny and the budget small. Sibling live queries take
+    // milliseconds, so a 2s budget cannot trip them mid-flight.
+    let dir = std::env::temp_dir().join(format!("sqlhighland-timeout-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("preferences.toml"), "query_timeout_secs = 2\n").unwrap();
+    unsafe { std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir) };
+    let mut session = OracledbSession::new();
+    session.connect(&cfg()).expect("live connect");
+    // Ten-second sleep against a two-second budget: must trip. SLEEP is
+    // a procedure, so this goes through the exec path (which the timeout
+    // covers too); DBMS_SESSION is PUBLIC-executable, unlike DBMS_LOCK.
+    let err = session
+        .exec("BEGIN DBMS_SESSION.SLEEP(10); END;", &[])
+        .expect_err("sleep should exceed the call timeout");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("timed out after 2s"),
+        "friendly timeout message, got: {msg}"
+    );
+    // Still usable afterwards: a timeout is not connection poisoning.
+    let ok = session
+        .run_query("SELECT 1 AS one FROM DUAL", 100, &[])
+        .expect("post-timeout query");
+    assert_eq!(ok.row_count(), 1);
+    unsafe { std::env::remove_var("SQLHIGHLAND_CONFIG_DIR") };
+    let _ = std::fs::remove_dir_all(&dir);
+}

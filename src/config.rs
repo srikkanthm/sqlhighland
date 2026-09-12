@@ -236,6 +236,10 @@ pub struct Preferences {
     /// themes); stepper-clamped 10..24 in Settings.
     #[serde(default = "default_font_size")]
     pub font_size: u32,
+    /// Query timeout in seconds (0 = unlimited). Applied per call on
+    /// every round trip; missing (older files) → 60.
+    #[serde(default = "default_query_timeout")]
+    pub query_timeout_secs: u64,
     // --- Legacy family+mode matrix (pre-flat themes). Still parsed (via
     // the original key names) so old files migrate instead of resetting;
     // never written back. ---
@@ -258,6 +262,7 @@ impl Default for Preferences {
             csv_header: default_true(),
             font_family: String::new(),
             font_size: default_font_size(),
+            query_timeout_secs: default_query_timeout(),
             legacy_family: LegacyFamily::default(),
             legacy_mode: LegacyMode::default(),
             legacy_catppuccin_dark: LegacyCatppuccinDark::default(),
@@ -279,6 +284,10 @@ fn default_true() -> bool {
 
 fn default_font_size() -> u32 {
     13
+}
+
+fn default_query_timeout() -> u64 {
+    60
 }
 
 /// Suggestion popup behavior for the query editor.
@@ -412,6 +421,8 @@ mod tests {
         // Missing file → system-follow.
         assert_eq!(Preferences::load(), Preferences::default());
         assert_eq!(Preferences::load().theme_name(), SYSTEM_THEME);
+        // Query timeout defaults to 60s (0 = unlimited when set).
+        assert_eq!(Preferences::load().query_timeout_secs, 60);
         let prefs = Preferences {
             theme: "Catppuccin Macchiato".to_string(),
             ..Default::default()
@@ -455,6 +466,7 @@ mod tests {
         assert!(p.csv_header);
         assert_eq!(p.font_family, "");
         assert_eq!(p.font_size, 13);
+        assert_eq!(p.query_timeout_secs, 60);
         let p: Preferences = toml::from_str("theme = \"Nord Dark\"\n").unwrap();
         assert_eq!(p.result_cap, 100_000);
         assert_eq!(p.csv_delimiter, ",");

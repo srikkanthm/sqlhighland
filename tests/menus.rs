@@ -24,6 +24,7 @@ async fn menu_coverage(_cx: &mut TestAppContext) {
         "Quit",
         "NewTab",
         "PickConnection",
+        "RebindConnection",
         "CloseTab",
         "OpenSql",
         "SaveSql",

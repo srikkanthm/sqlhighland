@@ -570,3 +570,26 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - Verified headless (dialog Cmd+Enter ignored, sidebar-focus save
   writes the file; serial threads — config-dir env is process-global),
   clean `clippy`, 101 lib + menus/themes/browser_tree green.
+
+## Shift+Cmd+K rebind active tab (2026-09-12)
+
+- `PendingPick` bool became three-way `PickAfter` (Run/NewTab/Rebind).
+  New `RebindConnection` action on cmd-shift-k (root listener, free
+  in kit): picker picks rebind the ACTIVE tab, connect eagerly, no
+  new tab, no run. Both pick sites + hint text branch; File menu +
+  coverage test updated. Fixed a latent lease panic en route
+  (focus helper must run outside view.update).
+- Verified headless (no new tab, picker closes), clean `clippy`,
+  101 lib + menus green.
+
+## Query timeout, 60s default (2026-09-12)
+
+- `query_timeout_secs` pref (default 60, 0 = unlimited) + Settings →
+  Results picker (30s/1min/2min/5min/Unlimited). Applied per call on
+  the live connection at connect + every query/exec (cheap setter, no
+  reconnect needed); per-round-trip semantics documented. Timeout maps
+  centrally to "Query timed out after Ns"; excluded from poisoning so
+  the session survives. Cancel unchanged.
+- Verified live against local Oracle: 10s sleep trips at staged 2s
+  with friendly message, next query succeeds. Clean `clippy`, 101
+  lib, 11 live, menus/themes/browser_tree green, GUI builds.

@@ -88,6 +88,7 @@ gpui_kit::actions!(
         CloseTab,
         NewTab,
         PickConnection,
+        RebindConnection,
         OpenSql,
         SaveSql,
         SaveSqlAs,
@@ -975,13 +976,22 @@ struct PendingBind {
 
 /// A run deferred for connection choice: the statement waits while the user
 /// picks the tab's connection. Only one pick dialog opens at a time.
+/// What picking a connection does once chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickAfter {
+    /// Classic unbound-run mode: bind the tab and run its statement.
+    Run,
+    /// Cmd+K mode: open a NEW tab bound to the pick (no run).
+    NewTab,
+    /// Shift+Cmd+K mode: rebind the ACTIVE tab to the pick (no run).
+    Rebind,
+}
+
 #[derive(Debug, Clone)]
 struct PendingPick {
     tab_id: String,
     sql: String,
-    /// Cmd+K mode: picking opens a NEW tab bound to the connection (no
-    /// run). False = classic unbound-run mode (bind tab + run).
-    new_tab: bool,
+    after: PickAfter,
 }
 
 /// Password prompt in flight: which connection, and the run to resume
@@ -1101,6 +1111,34 @@ fn pick_connection_for_new_tab(
     if let Some(tab_id) = new_id {
         focus_tab_editor(view, &tab_id, window, cx);
     }
+}
+
+/// Rebind the ACTIVE tab to the picked connection (Shift+Cmd+K flow):
+/// closes the picker, swaps the tab's binding, connects eagerly, and
+/// refocuses its editor. No new tab, no run (contrast the siblings
+/// above/below).
+fn pick_connection_for_rebind(
+    view: &WeakEntity<SqlHighlandView>,
+    tab_id: &str,
+    conn_id: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    // Close the picker first so focus lands cleanly below.
+    window.close_dialog(cx);
+    view.update(cx, |this, cx| {
+        if let Some(t) = this.tab_by_id(tab_id) {
+            t.connection_id = Some(conn_id.to_string());
+        }
+        this.pending_pick = None;
+        this.persist_tabs();
+        // Same eager session as a fresh Cmd+K tab (failures surface
+        // through the standard connect-failed path).
+        this.connect_connection(conn_id, window, cx);
+    })
+    .ok();
+    // Outside the update above: reading the leased view here would panic.
+    focus_tab_editor(view, tab_id, window, cx);
 }
 
 /// Return keyboard focus to the tab's editor so the next Cmd+Enter works
@@ -1342,6 +1380,9 @@ impl SqlHighlandView {
         // No kit Input binding uses cmd-k (checked), so it fires from
         // the editor, the grid, and dialogs alike.
         cx.bind_keys([KeyBinding::new("cmd-k", PickConnection, None)]);
+        // Shift+Cmd+K rebinds the ACTIVE tab instead of opening one.
+        // Same freedom: no kit binding uses it.
+        cx.bind_keys([KeyBinding::new("cmd-shift-k", RebindConnection, None)]);
         cx.bind_keys([KeyBinding::new("cmd-o", OpenSql, None)]);
         cx.bind_keys([KeyBinding::new("cmd-s", SaveSql, None)]);
         cx.bind_keys([KeyBinding::new("cmd-shift-s", SaveSqlAs, None)]);
@@ -2745,6 +2786,49 @@ impl SqlHighlandView {
                                             "results", "limit", "rows", "cap", "grid",
                                         ]),
                                     ]),
+                                    SettingGroup::new().title("Query timeout").items(vec![
+                                        SettingItem::render(move |_, _, cx| {
+                                            const OPTS: &[(u64, &str)] = &[
+                                                (30, "30 seconds"),
+                                                (60, "1 minute"),
+                                                (120, "2 minutes"),
+                                                (300, "5 minutes"),
+                                                (0, "Unlimited"),
+                                            ];
+                                            let current =
+                                                Preferences::load().query_timeout_secs;
+                                            let ids = [
+                                                "settings-timeout-0",
+                                                "settings-timeout-1",
+                                                "settings-timeout-2",
+                                                "settings-timeout-3",
+                                                "settings-timeout-4",
+                                            ];
+                                            v_flex().gap_1().children(OPTS.iter().enumerate().map(
+                                                |(ix, (n, label))| {
+                                                    let n = *n;
+                                                    settings_pick_row(
+                                                        ids[ix],
+                                                        label.to_string(),
+                                                        None,
+                                                        current == n,
+                                                        cx,
+                                                        move |_, window, _| {
+                                                            let mut prefs =
+                                                                Preferences::load();
+                                                            prefs.query_timeout_secs = n;
+                                                            let _ = prefs.save();
+                                                            window.refresh();
+                                                        },
+                                                    )
+                                                },
+                                            ))
+                                        })
+                                        .keywords([
+                                            "query", "timeout", "seconds", "slow",
+                                            "cancel", "stuck", "hang",
+                                        ]),
+                                    ]),
                                     SettingGroup::new().title("CSV export").items(vec![
                                         SettingItem::render(move |_, _, cx| {
                                             const DELIMS: &[(&str, &str)] = &[
@@ -3633,7 +3717,7 @@ impl SqlHighlandView {
                 self.pending_pick = Some(PendingPick {
                     tab_id: tab_id.to_string(),
                     sql,
-                    new_tab: false,
+                    after: PickAfter::Run,
                 });
                 self.open_conn_pick_dialog(window, cx);
                 return;
@@ -3694,7 +3778,23 @@ impl SqlHighlandView {
         self.pending_pick = Some(PendingPick {
             tab_id,
             sql: String::new(),
-            new_tab: true,
+            after: PickAfter::NewTab,
+        });
+        self.open_conn_pick_dialog(window, cx);
+    }
+
+    /// Shift+Cmd+K: open the connection picker; choosing rebinds the
+    /// ACTIVE tab to the pick and connects (no new tab, no run). Same
+    /// already-pending guard as Cmd+K.
+    fn open_pick_for_rebind(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_pick.is_some() {
+            return;
+        }
+        let tab_id = self.active_tab().id.clone();
+        self.pending_pick = Some(PendingPick {
+            tab_id,
+            sql: String::new(),
+            after: PickAfter::Rebind,
         });
         self.open_conn_pick_dialog(window, cx);
     }
@@ -3731,9 +3831,10 @@ impl SqlHighlandView {
         let view = cx.entity().downgrade();
         let tab_id = pending.tab_id.clone();
         let sql = pending.sql.clone();
-        // Cmd+K mode: picking opens a new tab (no run). Cloned into
-        // every handler below (click, Enter) so both paths agree.
-        let new_tab = pending.new_tab;
+        // Picker mode: Run binds the tab and runs; Cmd+K opens a new
+        // tab; Shift+Cmd+K rebinds the active tab. Cloned into every
+        // handler below (click, Enter) so both paths agree.
+        let pick_mode = pending.after;
         // Explicit scroll handle (NOT the overflow_y_scrollbar() wrapper):
         // the wrapper's caller-id keying misbehaves for dialog content that
         // rebuilds every render, while an owned handle tracks stably.
@@ -3795,10 +3896,11 @@ impl SqlHighlandView {
                     div()
                         .text_sm()
                         .text_color(muted)
-                        .child(if new_tab {
-                            "No connections yet — add one to get started."
-                        } else {
-                            "No connections yet — add one to run this statement."
+                        .child(match pick_mode {
+                            PickAfter::Run => "No connections yet — add one to run this statement.",
+                            PickAfter::NewTab | PickAfter::Rebind => {
+                                "No connections yet — add one to get started."
+                            }
                         }),
                 );
             } else if shown.is_empty() {
@@ -3813,10 +3915,14 @@ impl SqlHighlandView {
                     div()
                         .text_xs()
                         .text_color(muted)
-                        .child(if new_tab {
-                            "Type to filter, Enter opens a new tab on the highlighted match."
-                        } else {
-                            "Type to filter, Enter runs on the highlighted match."
+                        .child(match pick_mode {
+                            PickAfter::Run => "Type to filter, Enter runs on the highlighted match.",
+                            PickAfter::NewTab => {
+                                "Type to filter, Enter opens a new tab on the highlighted match."
+                            }
+                            PickAfter::Rebind => {
+                                "Type to filter, Enter rebinds the active tab to the highlighted match."
+                            }
                         }),
                 );
             }
@@ -3848,7 +3954,7 @@ impl SqlHighlandView {
                 let pick_view = view.clone();
                 let pick_tab = tab_id.clone();
                 let pick_sql = sql.clone();
-                let pick_new = new_tab;
+                let pick_mode = pick_mode;
                 let hover_view = view.clone();
                 let hover_active = active.clone();
                 let conn_id = r.id.clone();
@@ -3887,12 +3993,20 @@ impl SqlHighlandView {
                             }
                         })
                         .on_click(move |_, window, cx: &mut App| {
-                            if pick_new {
-                                pick_connection_for_new_tab(&pick_view, &conn_id, window, cx);
-                            } else {
-                                pick_connection_and_run(
-                                    &pick_view, &pick_tab, &pick_sql, &conn_id, window, cx,
-                                );
+                            match pick_mode {
+                                PickAfter::Run => {
+                                    pick_connection_and_run(
+                                        &pick_view, &pick_tab, &pick_sql, &conn_id, window, cx,
+                                    );
+                                }
+                                PickAfter::NewTab => {
+                                    pick_connection_for_new_tab(&pick_view, &conn_id, window, cx);
+                                }
+                                PickAfter::Rebind => {
+                                    pick_connection_for_rebind(
+                                        &pick_view, &pick_tab, &conn_id, window, cx,
+                                    );
+                                }
                             }
                         }),
                 );
@@ -3922,7 +4036,7 @@ impl SqlHighlandView {
             let ok_shown = shown_ids.clone();
             let ok_tab = tab_id.clone();
             let ok_sql = sql.clone();
-            let ok_new = new_tab;
+            let ok_mode = pick_mode;
             let cancel_view = view.clone();
             let cancel_tab = tab_id.clone();
             let esc_view = view.clone();
@@ -3985,20 +4099,28 @@ impl SqlHighlandView {
                     });
                     match pick {
                         Some(row) => {
-                            if ok_new {
-                                pick_connection_for_new_tab(&ok_view, &row.id, window, cx);
-                            } else {
-                                window.close_dialog(cx);
-                                ok_view
-                                    .update(cx, |this, cx| {
-                                        if let Some(t) = this.tab_by_id(&ok_tab) {
-                                            t.connection_id = Some(row.id.clone());
-                                        }
-                                        this.pending_pick = None;
-                                        this.persist_tabs();
-                                        this.start_run(&ok_tab, ok_sql.clone(), window, cx);
-                                    })
-                                    .ok();
+                            match ok_mode {
+                                PickAfter::Run => {
+                                    window.close_dialog(cx);
+                                    ok_view
+                                        .update(cx, |this, cx| {
+                                            if let Some(t) = this.tab_by_id(&ok_tab) {
+                                                t.connection_id = Some(row.id.clone());
+                                            }
+                                            this.pending_pick = None;
+                                            this.persist_tabs();
+                                            this.start_run(&ok_tab, ok_sql.clone(), window, cx);
+                                        })
+                                        .ok();
+                                }
+                                PickAfter::NewTab => {
+                                    pick_connection_for_new_tab(&ok_view, &row.id, window, cx);
+                                }
+                                PickAfter::Rebind => {
+                                    pick_connection_for_rebind(
+                                        &ok_view, &ok_tab, &row.id, window, cx,
+                                    );
+                                }
                             }
                             false
                         }
@@ -6975,12 +7097,13 @@ pub fn app_menus() -> Vec<Menu> {
             ],
             disabled: false,
         },
-        Menu {
-            name: "File".into(),
-            items: vec![
-                MenuItem::action("New Tab", NewTab),
-                MenuItem::action("New Tab with Connection…", PickConnection),
-                MenuItem::action("Close Tab", CloseTab),
+                Menu {
+                    name: "File".into(),
+                    items: vec![
+                        MenuItem::action("New Tab", NewTab),
+                        MenuItem::action("New Tab with Connection…", PickConnection),
+                        MenuItem::action("Change Tab Connection…", RebindConnection),
+                        MenuItem::action("Close Tab", CloseTab),
                 MenuItem::Separator,
                 MenuItem::action("Open SQL File…", OpenSql),
                 MenuItem::action("Save", SaveSql),
@@ -7087,6 +7210,9 @@ impl Render for SqlHighlandView {
             // and the listener gets &mut Window directly (no re-take).
             .on_action(cx.listener(|this, _: &PickConnection, window, cx| {
                 this.open_pick_for_new_tab(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RebindConnection, window, cx| {
+                this.open_pick_for_rebind(window, cx);
             }))
             .child(
                 v_flex()
