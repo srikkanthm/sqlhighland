@@ -6000,6 +6000,12 @@ impl SqlHighlandView {
                 .w(px(44.))
                 .h_full()
                 .bg(cx.theme().sidebar)
+                // Right-edge divider: the expanded pane gets its separator
+                // from the resizable handle, which doesn't exist in this
+                // branch — without an explicit border the rail bleeds
+                // into main content. (border_color alone paints nothing.)
+                .border_r_1()
+                .border_color(cx.theme().border)
                 // NewTab/CloseTab stay app-global (main.rs): element-level
                 // duplicates double-fire, and dialogs sit outside these
                 // roots so they never see dialog-focused keypresses.
@@ -6011,7 +6017,6 @@ impl SqlHighlandView {
                 }))
                 // Quit/Settings stay app-global (main.rs): a second,
                 // element-level registration double-fires the action.
-                .border_color(cx.theme().border)
                 .items_center()
                 .gap_1()
                 .child(
