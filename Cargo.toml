@@ -12,6 +12,9 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 # Stable ids for saved connections.
 uuid = { version = "1", features = ["v4"] }
+# macOS login keychain for stored connection passwords. Pinned like the
+# rest; the .crate is vendored so this resolves offline.
+security-framework = "=3.7.0"
 # SQL formatter (https://github.com/shssoichiro/sqlformat-rs).
 sqlformat = "=0.5.0"
 # LSP types for the editor completion provider (gui-only).

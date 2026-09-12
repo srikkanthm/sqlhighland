@@ -23,20 +23,23 @@ use crate::complete::{
 };
 use crate::config::{CompleteMode, Preferences, SavedConfig, SavedTab, TabsManifest, THEME_LIST};
 use crate::db::{
-    is_describe_statement, BindParam, DbClient, FetchPage, OracledbSession, FETCH_CAP, FETCH_CHUNK,
+    is_describe_statement, BindParam, DbClient, FetchPage, OracledbSession, FETCH_CHUNK,
 };
-use crate::export::{csv_header_line, csv_line, sheet_name, XlsxBuilder};
+use crate::export::{csv_header_line_with, csv_line_with, sheet_name, XlsxBuilder};
 use crate::filetab::{self, FileStamp};
 use crate::metadata::{
     fetch_columns_blocking, fetch_fks_blocking, fetch_sequences_blocking, fetch_tables_blocking,
     MetadataCache, SharedCache,
 };
-use crate::model::{csv_row, tab_name_from_sql, ColumnInfo, ConnectionConfig, Environment};
+use crate::model::{
+    csv_row, tab_name_from_sql, ColumnInfo, ConnectionConfig, Environment, OracleRole, PasswordMode,
+    ServiceKind,
+};
 use crate::schema::{OracleProvider, SchemaProvider as _};
 use crate::session::SessionPool;
 use crate::sql::{
     apply_substitutions, exec_summary, find_bind_vars, find_substitution_vars, format_sql, is_dml,
-    statement_at, statement_kind, txn_end, StatementKind, SubVar,
+    statement_at, statement_at_range, statement_kind, txn_end, StatementKind, SubVar,
 };
 use gpui_kit::base::SelectableText;
 use gpui_kit::base::TestSupportExt as _;
@@ -47,6 +50,7 @@ use gpui_kit::component::input::{
 };
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::setting::{
@@ -602,7 +606,7 @@ fn conn_menu_item(
         .icon(icon)
         .on_click(move |_, window, cx| {
             view.update(cx, |this, cx| match op {
-                ConnMenuOp::Connect => this.connect_connection(&conn_id, cx),
+                ConnMenuOp::Connect => this.connect_connection(&conn_id, window, cx),
                 ConnMenuOp::Disconnect => this.disconnect_connection(&conn_id, cx),
                 ConnMenuOp::Edit => {
                     if let Some(ix) = this.connection_index(&conn_id) {
@@ -611,7 +615,7 @@ fn conn_menu_item(
                 }
                 ConnMenuOp::Delete => {
                     if let Some(ix) = this.connection_index(&conn_id) {
-                        this.delete_connection(ix, cx);
+                        this.confirm_delete_connection(ix, window, cx);
                     }
                 }
             })
@@ -785,6 +789,8 @@ fn export_drain_blocking(
     sheet: &str,
     query_sql: &str,
     cancel: &Arc<std::sync::atomic::AtomicBool>,
+    csv_delim: char,
+    csv_header: bool,
 ) -> ExportOutcome {
     use std::sync::atomic::Ordering;
     let tmp = path.with_extension("part");
@@ -799,13 +805,15 @@ fn export_drain_blocking(
                 Err(e) => return ExportOutcome::Failed(format!("cannot write file: {e}")),
             };
             let mut w = std::io::BufWriter::new(file);
-            if let Err(e) = (|| -> std::io::Result<()> {
-                use std::io::Write as _;
-                w.write_all(csv_header_line(columns).as_bytes())?;
-                w.write_all(b"\n")?;
-                Ok(())
-            })() {
-                return ExportOutcome::Failed(format!("cannot write file: {e}"));
+            if csv_header {
+                if let Err(e) = (|| -> std::io::Result<()> {
+                    use std::io::Write as _;
+                    w.write_all(csv_header_line_with(columns, csv_delim).as_bytes())?;
+                    w.write_all(b"\n")?;
+                    Ok(())
+                })() {
+                    return ExportOutcome::Failed(format!("cannot write file: {e}"));
+                }
             }
             csv_out = Some(w);
         }
@@ -833,7 +841,7 @@ fn export_drain_blocking(
             ExportFormat::Csv => {
                 use std::io::Write as _;
                 let w = csv_out.as_mut().ok_or("csv writer missing")?;
-                w.write_all(csv_line(row).as_bytes())
+                w.write_all(csv_line_with(row, csv_delim).as_bytes())
                     .and_then(|_| w.write_all(b"\n"))
                     .map_err(|e| format!("cannot write file: {e}"))
             }
@@ -971,6 +979,13 @@ struct PendingPick {
     sql: String,
 }
 
+/// Password prompt in flight: which connection, and the run to resume
+/// afterwards (`None` = plain connect from the sidebar/tree).
+struct PendingPassword {
+    conn_id: String,
+    run: Option<(String, String)>,
+}
+
 /// One row in the variables dialog: `&name` substitution or `:name` bind.
 struct BindField {
     /// Display key: `&name` or `:name`.
@@ -1092,6 +1107,11 @@ pub struct SqlHighlandView {
     /// start_add/start_edit, mutated by the dialog's pill row, read by save.
     /// (Only one connection dialog opens at a time, like `editing`.)
     pending_env: Environment,
+    /// Same pattern for role / service-kind / SSL / password-mode rows.
+    pending_role: OracleRole,
+    pending_service_kind: ServiceKind,
+    pending_ssl: bool,
+    pending_password_mode: PasswordMode,
     // Dialog form fields (entities persist across dialog open/close).
     name: Entity<InputState>,
     host: Entity<InputState>,
@@ -1099,6 +1119,8 @@ pub struct SqlHighlandView {
     service: Entity<InputState>,
     user: Entity<InputState>,
     password: Entity<InputState>,
+    /// Password prompt field (Ask mode / Keychain miss). Cleared on submit.
+    pwd_prompt: Entity<InputState>,
     /// Transient notice for the status bar ("Saved X", "Connecting…").
     status: SharedString,
     /// `&&name` values defined this session, per connection id. Once defined,
@@ -1108,6 +1130,13 @@ pub struct SqlHighlandView {
     pending_bind: Option<PendingBind>,
     /// Run waiting on the connection picker (cleared on pick or cancel).
     pending_pick: Option<PendingPick>,
+    /// Session-unlocked passwords, per connection id. Memory only, never
+    /// persisted: Ask mode and Keychain-miss prompts land here, and every
+    /// connect/run path prefers them over whatever is stored.
+    unlocked: std::collections::HashMap<String, String>,
+    /// Password prompt in flight (cleared on submit or cancel). `run` is
+    /// set when the prompt gates a query run rather than a plain connect.
+    pending_password: Option<PendingPassword>,
     /// Dictionary snapshots per connection id for autocomplete. Filled on
     /// the background executor; the provider only clones the `Arc`.
     meta: std::collections::HashMap<String, SharedCache>,
@@ -1220,7 +1249,13 @@ impl SqlHighlandView {
         let service =
             cx.new(|cx| InputState::new(window, cx).default_value(blank.service_name.clone()));
         let user = cx.new(|cx| InputState::new(window, cx).default_value(blank.user.clone()));
-        let password = cx.new(|cx| InputState::new(window, cx).placeholder("password"));
+        let password =
+            cx.new(|cx| InputState::new(window, cx).placeholder("password").masked(true));
+        let pwd_prompt = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("password for this session")
+                .masked(true)
+        });
 
         // Cmd+Enter runs the statement under the cursor. Scoped to the
         // editor's own `Input` key context; the handler double-checks focus.
@@ -1263,16 +1298,23 @@ impl SqlHighlandView {
             sidebar_collapsed: false,
             editing: None,
             pending_env: Environment::default(),
+            pending_role: OracleRole::default(),
+            pending_service_kind: ServiceKind::default(),
+            pending_ssl: false,
+            pending_password_mode: PasswordMode::default(),
             name,
             host,
             port,
             service,
             user,
             password,
+            pwd_prompt,
             status: "".into(),
             defines: std::collections::HashMap::new(),
             pending_bind: None,
             pending_pick: None,
+            unlocked: std::collections::HashMap::new(),
+            pending_password: None,
             meta: std::collections::HashMap::new(),
             usage: std::collections::HashMap::new(),
             complete_auto: prefs.completion == CompleteMode::Auto,
@@ -2032,6 +2074,12 @@ impl SqlHighlandView {
         // No engine picker in the dialog yet: every connection is Oracle.
         // Preserve the stored engine when editing (forward-compat).
         let engine = edited.map(|c| c.engine).unwrap_or_default();
+        // Keychain/Ask modes never persist the typed secret in the file —
+        // save_from_dialog routes it to the keychain (or drops it).
+        let password = match self.pending_password_mode {
+            PasswordMode::File => self.password.read(cx).value().to_string(),
+            PasswordMode::Keychain | PasswordMode::Ask => String::new(),
+        };
         ConnectionConfig {
             id,
             name: self.name.read(cx).value().to_string(),
@@ -2039,9 +2087,13 @@ impl SqlHighlandView {
             port: self.port.read(cx).value().parse().unwrap_or(1521),
             service_name: self.service.read(cx).value().to_string(),
             user: self.user.read(cx).value().to_string(),
-            password: self.password.read(cx).value().to_string(),
+            password,
             environment: self.pending_env,
             engine,
+            role: self.pending_role,
+            service_kind: self.pending_service_kind,
+            ssl: self.pending_ssl,
+            password_mode: self.pending_password_mode,
         }
     }
 
@@ -2057,8 +2109,14 @@ impl SqlHighlandView {
         });
         self.user
             .update(cx, |s, cx| s.set_value(cfg.user.clone(), window, cx));
+        // Never fill stored secrets back into the form: File mode shows
+        // its (legacy) value; Keychain/Ask always start blank.
+        let shown_password = match cfg.password_mode {
+            PasswordMode::File => cfg.password.clone(),
+            PasswordMode::Keychain | PasswordMode::Ask => String::new(),
+        };
         self.password
-            .update(cx, |s, cx| s.set_value(cfg.password.clone(), window, cx));
+            .update(cx, |s, cx| s.set_value(shown_password, window, cx));
     }
 
     fn persist(&self) {
@@ -2075,6 +2133,10 @@ impl SqlHighlandView {
     fn start_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.editing = None;
         self.pending_env = Environment::Untagged;
+        self.pending_role = OracleRole::default();
+        self.pending_service_kind = ServiceKind::default();
+        self.pending_ssl = false;
+        self.pending_password_mode = PasswordMode::default();
         // Blank form: text fields empty, standard Oracle port kept.
         self.fill_form(
             &ConnectionConfig {
@@ -2099,6 +2161,10 @@ impl SqlHighlandView {
         self.editing = Some(ix);
         let cfg = self.connections[ix].clone();
         self.pending_env = cfg.environment;
+        self.pending_role = cfg.role;
+        self.pending_service_kind = cfg.service_kind;
+        self.pending_ssl = cfg.ssl;
+        self.pending_password_mode = cfg.password_mode;
         self.fill_form(&cfg, window, cx);
         self.open_connection_dialog(&title, window, cx);
     }
@@ -2114,10 +2180,11 @@ impl SqlHighlandView {
     /// Rows apply, notify the view for a full re-render (GPUI only repaints
     /// dirty views — window refreshes alone reuse cached ones), then close.
     pub fn open_settings_dialog(view: &Entity<SqlHighlandView>, window: &mut Window, cx: &mut App) {
-        // One settings dialog at a time: without this every Cmd+, stacks
-        // another instance (there is no universal on-close hook to track
-        // overlay/Esc dismissal with a flag, so ask the window instead).
+        // Cmd+, toggles: a second press dismisses the top dialog. The kit
+        // only reports *whether* a dialog is open, not which one, so this
+        // closes whatever is showing (same call the Cancel buttons use).
         if window.has_active_dialog(cx) {
+            window.close_dialog(cx);
             return;
         }
         // Owned for the 'static dialog builder below.
@@ -2180,57 +2247,11 @@ impl SqlHighlandView {
                 }
                 v_flex().gap_1().children(rows)
             };
-            // Reloaded on every rebuild so check marks follow live prefs.
+            // Reloaded on every rebuild so switches follow live prefs.
             let current_mode = Preferences::load().completion;
             let show_system = Preferences::load().show_system_schemas;
             let complete_view = view.clone();
             let system_view = view.clone();
-            // Row helper: label + sublabel + check mark, click applies.
-            let complete_row = move |ix: usize,
-                                    label: &str,
-                                    sub: &str,
-                                    selected: bool,
-                                    apply: CompleteMode,
-                                    view: Entity<SqlHighlandView>| {
-                let row_view = view.clone();
-                div()
-                    .id(("settings-complete", ix))
-                    .w_full()
-                    .p_2()
-                    .rounded_md()
-                    .hover(move |this| this.bg(hover_bg))
-                    .on_click(move |_, _, cx| {
-                        row_view.update(cx, |this, cx| {
-                            let mut prefs = Preferences::load();
-                            prefs.completion = apply;
-                            let _ = prefs.save();
-                            this.complete_auto = apply == CompleteMode::Auto;
-                            cx.notify();
-                        });
-                    })
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .child(div().text_sm().child(label.to_string()))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(muted)
-                                            .child(sub.to_string()),
-                                    ),
-                            )
-                            .when(selected, |this| {
-                                this.child(
-                                    div().text_color(muted).child(KitIcon::Check),
-                                )
-                            }),
-                    )
-                    .into_any_element()
-            };
             let system_selected = show_system;
             let system_view_outer = system_view.clone();
             dialog
@@ -2242,7 +2263,13 @@ impl SqlHighlandView {
                             SettingPage::new("Themes")
                                 .icon(KitIcon::Palette)
                                 .groups(vec![SettingGroup::new().title("Appearance").items(
-                                    vec![SettingItem::render(theme_list)],
+                                    vec![SettingItem::render(theme_list).keywords([
+                                        "theme",
+                                        "appearance",
+                                        "color",
+                                        "dark",
+                                        "light",
+                                    ])],
                                 )]),
                             SettingPage::new("Editor")
                                 .icon(KitIcon::SquarePen)
@@ -2250,59 +2277,85 @@ impl SqlHighlandView {
                                     .title("Suggestions")
                                     .items(vec![
                                         SettingItem::render(move |_, _, _| {
-                                            v_flex().gap_1().children([
-                                                complete_row(
-                                                    0,
-                                                    "Automatic",
-                                                    "Popup while typing (Ctrl+Space also works)",
-                                                    current_mode == CompleteMode::Auto,
-                                                    CompleteMode::Auto,
-                                                    complete_view.clone(),
-                                                ),
-                                                complete_row(
-                                                    1,
-                                                    "Manual",
-                                                    "Popup only on Ctrl+Space",
-                                                    current_mode == CompleteMode::Manual,
-                                                    CompleteMode::Manual,
-                                                    complete_view.clone(),
-                                                ),
-                                            ])
-                                        }),
+                                            let auto_view = complete_view.clone();
+                                            div()
+                                                .id("settings-complete-toggle")
+                                                .w_full()
+                                                .p_2()
+                                                .rounded_md()
+                                                .child(
+                                                    h_flex()
+                                                        .gap_2()
+                                                        .items_center()
+                                                        .child(
+                                                            v_flex().flex_1()
+                                                                .child(
+                                                                    div().text_sm().child(
+                                                                        "Automatic suggestions",
+                                                                    ),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .text_xs()
+                                                                        .text_color(muted)
+                                                                        .child(
+                                                                            "Popup while typing (off: Ctrl+Space only)",
+                                                                        ),
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            Switch::new("settings-complete-auto")
+                                                                .small()
+                                                                .checked(
+                                                                    current_mode
+                                                                        == CompleteMode::Auto,
+                                                                )
+                                                                .on_change(
+                                                                    move |checked, _, cx| {
+                                                                        let apply = if *checked {
+                                                                            CompleteMode::Auto
+                                                                        } else {
+                                                                            CompleteMode::Manual
+                                                                        };
+                                                                        auto_view
+                                                                            .update(
+                                                                                cx,
+                                                                                |this, cx| {
+                                                                                    let mut prefs =
+                                                                                        Preferences::load(
+                                                                                        );
+                                                                                    prefs.completion =
+                                                                                        apply;
+                                                                                    let _ =
+                                                                                        prefs.save();
+                                                                                    this.complete_auto =
+                                                                                        apply
+                                                                                            == CompleteMode::Auto;
+                                                                                    cx.notify();
+                                                                                },
+                                                                            );
+                                                                    },
+                                                                ),
+                                                        ),
+                                                )
+                                        })
+                                        .keywords([
+                                            "completion",
+                                            "suggest",
+                                            "automatic",
+                                            "manual",
+                                            "typing",
+                                            "popup",
+                                            "shortcut",
+                                        ]),
                                         SettingItem::render(move |_, _, _| {
-                                            let system_row_view = system_view_outer.clone();
+                                            let system_switch_view = system_view_outer.clone();
                                             v_flex().gap_1().child(
                                                 div()
                                                     .id("settings-system-schemas")
                                                     .w_full()
                                                     .p_2()
                                                     .rounded_md()
-                                                    .hover(move |this| this.bg(hover_bg))
-                                                    .on_click(move |_, _, cx| {
-                                                        system_row_view.update(
-                                                            cx,
-                                                            |this, cx| {
-                                                                let mut prefs =
-                                                                    Preferences::load();
-                                                                prefs.show_system_schemas =
-                                                                    !prefs.show_system_schemas;
-                                                                let _ = prefs.save();
-                                                                this.show_system =
-                                                                    prefs.show_system_schemas;
-                                                                // Scope changed: drop caches so
-                                                                // the next trigger refetches
-                                                                // with the new filter.
-                                                                for cache in this.meta.values() {
-                                                                    if let Ok(mut c) =
-                                                                        cache.lock()
-                                                                    {
-                                                                        c.fetched_at = None;
-                                                                    }
-                                                                }
-                                                                cx.notify();
-                                                            },
-                                                        );
-                                                    })
                                                     .child(
                                                         h_flex()
                                                             .gap_2()
@@ -2326,40 +2379,353 @@ impl SqlHighlandView {
                                                                             ),
                                                                     ),
                                                             )
-                                                            .when(system_selected, |this| {
-                                                                this.child(
-                                                                    div()
-                                                                        .text_color(muted)
-                                                                        .child(KitIcon::Check),
-                                                                )
-                                                            }),
+                                                            .child(
+                                                                Switch::new("settings-system")
+                                                                    .small()
+                                                                    .checked(system_selected)
+                                                                    .on_change(
+                                                                        move |checked, _, cx| {
+                                                                            system_switch_view
+                                                                                .update(
+                                                                                    cx,
+                                                                                    |this, cx| {
+                                                                                        let mut prefs =
+                                                                                            Preferences::load(
+                                                                                            );
+                                                                                        prefs.show_system_schemas =
+                                                                                            *checked;
+                                                                                        let _ = prefs
+                                                                                            .save(
+                                                                                            );
+                                                                                        this.show_system =
+                                                                                            prefs.show_system_schemas;
+                                                                                        // Scope changed: drop caches so
+                                                                                        // the next trigger refetches
+                                                                                        // with the new filter.
+                                                                                        for cache in this
+                                                                                            .meta
+                                                                                            .values(
+                                                                                            )
+                                                                                        {
+                                                                                            if let Ok(mut c) =
+                                                                                                cache.lock(
+                                                                                                )
+                                                                                            {
+                                                                                                c.fetched_at =
+                                                                                                    None;
+                                                                                            }
+                                                                                        }
+                                                                                        cx.notify();
+                                                                                    },
+                                                                                );
+                                                                        },
+                                                                    ),
+                                                            ),
                                                     ),
                                             )
-                                        }),
-                                    ])]),
+                                        })
+                                        .keywords([
+                                            "system",
+                                            "schemas",
+                                            "sys",
+                                            "hidden",
+                                            "filter",
+                                        ]),
+                                    ]),
+                                    SettingGroup::new().title("Font").items(vec![
+                                        SettingItem::render(move |_, _, cx| {
+                                            let current = Preferences::load().font_family;
+                                            let rows = [
+                                                ("", "Theme default"),
+                                                ("SF Mono", "SF Mono"),
+                                                ("Menlo", "Menlo"),
+                                                ("JetBrains Mono", "JetBrains Mono"),
+                                                ("Fira Code", "Fira Code"),
+                                            ];
+                                            v_flex().gap_1().children(rows.into_iter().enumerate().map(
+                                                |(ix, (value, label))| {
+                                                    let value = value.to_string();
+                                                    let ids = [
+                                                        "settings-font-default",
+                                                        "settings-font-sf",
+                                                        "settings-font-menlo",
+                                                        "settings-font-jb",
+                                                        "settings-font-fira",
+                                                    ];
+                                                    settings_pick_row(
+                                                        ids[ix],
+                                                        label.to_string(),
+                                                        None,
+                                                        current == value,
+                                                        cx,
+                                                        move |_, window, cx| {
+                                                            let mut prefs =
+                                                                Preferences::load();
+                                                            prefs.font_family = value.clone();
+                                                            let _ = prefs.save();
+                                                            crate::guitheme::apply_font_prefs(
+                                                                &prefs, cx,
+                                                            );
+                                                            window.refresh();
+                                                        },
+                                                    )
+                                                },
+                                            ))
+                                        })
+                                        .keywords(["font", "family", "mono", "typeface"]),
+                                        SettingItem::render(move |_, _, cx| {
+                                            let size = Preferences::load().font_size;
+                                            div()
+                                                .id("settings-font-size")
+                                                .w_full()
+                                                .p_2()
+                                                .rounded_md()
+                                                .child(
+                                                    h_flex()
+                                                        .gap_2()
+                                                        .items_center()
+                                                        .child(
+                                                            v_flex().flex_1()
+                                                                .child(
+                                                                    div().text_sm().child("Size"),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .text_xs()
+                                                                        .text_color(
+                                                                            cx.theme()
+                                                                                .muted_foreground,
+                                                                        )
+                                                                        .child(
+                                                                            "Editor text size in points",
+                                                                        ),
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            Button::new("settings-font-minus")
+                                                                .label("−")
+                                                                .small()
+                                                                .on_click(
+                                                                    move |_,
+                                                                          window,
+                                                                          cx| {
+                                                                        let mut prefs =
+                                                                            Preferences::load();
+                                                                        prefs.font_size = prefs
+                                                                            .font_size
+                                                                            .saturating_sub(1)
+                                                                            .max(10);
+                                                                        let _ = prefs.save();
+                                                                        crate::guitheme::apply_font_prefs(
+                                                                            &prefs, cx,
+                                                                        );
+                                                                        window.refresh();
+                                                                    },
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_sm()
+                                                                .w(px(28.))
+                                                                .text_center()
+                                                                .child(size.to_string()),
+                                                        )
+                                                        .child(
+                                                            Button::new("settings-font-plus")
+                                                                .label("+")
+                                                                .small()
+                                                                .on_click(
+                                                                    move |_,
+                                                                          window,
+                                                                          cx| {
+                                                                        let mut prefs =
+                                                                            Preferences::load();
+                                                                        prefs.font_size = prefs
+                                                                            .font_size
+                                                                            .saturating_add(1)
+                                                                            .min(24);
+                                                                        let _ = prefs.save();
+                                                                        crate::guitheme::apply_font_prefs(
+                                                                            &prefs, cx,
+                                                                        );
+                                                                        window.refresh();
+                                                                    },
+                                                                ),
+                                                        ),
+                                                )
+                                        })
+                                        .keywords(["font", "size", "text"]),
+                                    ]),
+                                ]),
+                            SettingPage::new("Results")
+                                .icon(KitIcon::Table)
+                                .groups(vec![
+                                    SettingGroup::new().title("Row limit").items(vec![
+                                        SettingItem::render(move |_, _, cx| {
+                                            const CAPS: &[(usize, &str)] = &[
+                                                (10_000, "10,000"),
+                                                (50_000, "50,000"),
+                                                (100_000, "100,000"),
+                                                (500_000, "500,000"),
+                                                (1_000_000, "1,000,000"),
+                                            ];
+                                            let current =
+                                                Preferences::load().result_cap;
+                                            let ids = [
+                                                "settings-cap-0",
+                                                "settings-cap-1",
+                                                "settings-cap-2",
+                                                "settings-cap-3",
+                                                "settings-cap-4",
+                                            ];
+                                            v_flex().gap_1().children(CAPS.iter().enumerate().map(
+                                                |(ix, (n, label))| {
+                                                    let n = *n;
+                                                    settings_pick_row(
+                                                        ids[ix],
+                                                        format!("{label} rows"),
+                                                        None,
+                                                        current == n,
+                                                        cx,
+                                                        move |_, window, _| {
+                                                            let mut prefs =
+                                                                Preferences::load();
+                                                            prefs.result_cap = n;
+                                                            let _ = prefs.save();
+                                                            window.refresh();
+                                                        },
+                                                    )
+                                                },
+                                            ))
+                                        })
+                                        .keywords([
+                                            "results", "limit", "rows", "cap", "grid",
+                                        ]),
+                                    ]),
+                                    SettingGroup::new().title("CSV export").items(vec![
+                                        SettingItem::render(move |_, _, cx| {
+                                            const DELIMS: &[(&str, &str)] = &[
+                                                (",", "Comma"),
+                                                (";", "Semicolon"),
+                                                ("\t", "Tab"),
+                                                ("|", "Pipe"),
+                                            ];
+                                            let current =
+                                                Preferences::load().csv_delimiter.clone();
+                                            let ids = [
+                                                "settings-delim-0",
+                                                "settings-delim-1",
+                                                "settings-delim-2",
+                                                "settings-delim-3",
+                                            ];
+                                            v_flex().gap_1().children(
+                                                DELIMS.iter().enumerate().map(
+                                                    |(ix, (value, label))| {
+                                                        let value = value.to_string();
+                                                        settings_pick_row(
+                                                            ids[ix],
+                                                            label.to_string(),
+                                                            None,
+                                                            current == value,
+                                                            cx,
+                                                            move |_, window, _| {
+                                                                let mut prefs =
+                                                                    Preferences::load();
+                                                                prefs.csv_delimiter =
+                                                                    value.clone();
+                                                                let _ = prefs.save();
+                                                                window.refresh();
+                                                            },
+                                                        )
+                                                    },
+                                                ),
+                                            )
+                                        })
+                                        .keywords([
+                                            "export", "csv", "delimiter", "separator",
+                                        ]),
+                                        SettingItem::render(move |_, _, cx| {
+                                            v_flex().gap_1().child(
+                                                div()
+                                                    .id("settings-csv-header")
+                                                    .w_full()
+                                                    .p_2()
+                                                    .rounded_md()
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_2()
+                                                            .items_center()
+                                                            .child(
+                                                                v_flex().flex_1()
+                                                                    .child(
+                                                                        div().text_sm().child(
+                                                                            "Header row",
+                                                                        ),
+                                                                    )
+                                                                    .child(
+                                                                        div()
+                                                                            .text_xs()
+                                                                            .text_color(
+                                                                                cx.theme()
+                                                                                    .muted_foreground,
+                                                                            )
+                                                                            .child(
+                                                                                "First line holds column names",
+                                                                            ),
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                Switch::new("settings-csv-header-sw")
+                                                                    .small()
+                                                                    .checked(
+                                                                        Preferences::load()
+                                                                            .csv_header,
+                                                                    )
+                                                                    .on_change(
+                                                                        move |checked, window, _| {
+                                                                            let mut prefs =
+                                                                                Preferences::load(
+                                                                                );
+                                                                            prefs.csv_header =
+                                                                                *checked;
+                                                                            let _ =
+                                                                                prefs.save();
+                                                                            window.refresh();
+                                                                        },
+                                                                    ),
+                                                            ),
+                                                    ),
+                                            )
+                                        })
+                                        .keywords(["export", "csv", "header", "columns"]),
+                                    ]),
+                                ]),
                             SettingPage::new("About")
                                 .icon(KitIcon::Info)
                                 .groups(vec![SettingGroup::new().title("About").items(vec![
                                     SettingItem::render(move |_, _, _| {
                                         v_flex().gap_1().child(
                                             div().text_sm().child(format!(
-                                                "SQLHighland {} — Oracle SQL client",
+                                                "SQLHighland {} — SQL database client",
                                                 env!("CARGO_PKG_VERSION")
                                             )),
                                         )
-                                    }),
+                                    })
+                                    .keywords(["about", "version"]),
                                     SettingItem::render(move |_, _, _| {
                                         v_flex().gap_1().child(
                                             div()
                                                 .text_xs()
                                                 .text_color(muted)
                                                 .child(
-                                                    "Oracle-only GUI client built with Rust \
-                                                     and GPUI, using the official thin driver \
-                                                     (no Oracle Client required).",
+                                                    "Oracle support today, built on a provider \
+                                                     architecture for more databases. Rust + GPUI \
+                                                     with the official thin driver (no Oracle \
+                                                     Client required).",
                                                 ),
                                         )
-                                    }),
+                                    })
+                                    .keywords(["about", "database", "oracle", "driver"]),
                                     SettingItem::render(move |_, _, _| {
                                         v_flex().gap_1().children(
                                             [
@@ -2394,7 +2760,8 @@ impl SqlHighlandView {
                                             })
                                             .collect::<Vec<_>>(),
                                         )
-                                    }),
+                                    })
+                                    .keywords(["about", "paths", "files", "config"]),
                                 ])]),
                         ]),
                     ),
@@ -2428,6 +2795,18 @@ impl SqlHighlandView {
         // and aborts). Click handlers (safe, outside render) sync the cell back
         // to `pending_env` and notify to rebuild with the new highlight.
         let pending_cell: Rc<RefCell<Environment>> = Rc::new(RefCell::new(self.pending_env));
+        // Same pattern for role / service-kind / SSL / password-mode rows.
+        let role_cell: Rc<RefCell<OracleRole>> = Rc::new(RefCell::new(self.pending_role));
+        let kind_cell: Rc<RefCell<ServiceKind>> =
+            Rc::new(RefCell::new(self.pending_service_kind));
+        let ssl_cell: Rc<RefCell<bool>> = Rc::new(RefCell::new(self.pending_ssl));
+        let pwmode_cell: Rc<RefCell<PasswordMode>> =
+            Rc::new(RefCell::new(self.pending_password_mode));
+        // Owned scroll handle: the form now spans role/service/SSL/password
+        // rows, so small windows overflow. Explicit handle + overflow_y_scroll
+        // (NOT the Scrollable wrapper, whose caller-id keying misbehaves for
+        // dialog content that rebuilds every render).
+        let scroll_handle = Rc::new(ScrollHandle::new());
         window.open_dialog(cx, move |dialog, _, cx| {
             let save_view = view.clone();
             let pending = pending_cell.clone();
@@ -2438,10 +2817,17 @@ impl SqlHighlandView {
                 .title(title.clone())
                 .w(px(400.))
                 .child(
-                    v_flex()
-                        .gap_2()
+                    div()
+                        .id("conn-dialog-scroll")
                         .w_full()
-                        .child(dialog_field("Name", &name, false, muted))
+                        .max_h(px(480.))
+                        .overflow_y_scroll()
+                        .track_scroll(&scroll_handle)
+                        .child(
+                            v_flex()
+                                .gap_2()
+                                .w_full()
+                                .child(dialog_field("Name", &name, false, muted))
                         .child(dialog_field("Host", &host, false, muted))
                         .child(
                             h_flex()
@@ -2454,11 +2840,135 @@ impl SqlHighlandView {
                                 .child(
                                     div()
                                         .flex_1()
-                                        .child(dialog_field("Service", &service, false, muted)),
+                                        .child(dialog_field(
+                                            if *kind_cell.borrow() == ServiceKind::Sid {
+                                                "SID"
+                                            } else {
+                                                "Service name"
+                                            },
+                                            &service,
+                                            false,
+                                            muted
+                                        ))
                                 ),
                         )
                         .child(dialog_field("User", &user, false, muted))
                         .child(dialog_field("Password", &password, true, muted))
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(div().text_xs().text_color(muted).child("Role"))
+                                .child({
+                                    let cell = role_cell.clone();
+                                    let current = *cell.borrow();
+                                    let row_view = view.clone();
+                                    dialog_pills(
+                                        "conn-role",
+                                        &[
+                                            (OracleRole::Default, "SYSDEFAULT"),
+                                            (OracleRole::Sysdba, "SYSDBA"),
+                                            (OracleRole::Sysoper, "SYSOPER")
+                                        ],
+                                        current,
+                                        Rc::new(move |r, cx: &mut App| {
+                                            *cell.borrow_mut() = r;
+                                            row_view
+                                                .update(cx, |this, cx| {
+                                                    this.pending_role = r;
+                                                    cx.notify();
+                                                })
+                                                .ok();
+                                        }),
+                                        cx
+                                    )
+                                })
+                        )
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(div().text_xs().text_color(muted).child("Service lookup"))
+                                .child({
+                                    let cell = kind_cell.clone();
+                                    let current = *cell.borrow();
+                                    let row_view = view.clone();
+                                    dialog_pills(
+                                        "conn-kind",
+                                        &[
+                                            (ServiceKind::ServiceName, "Service"),
+                                            (ServiceKind::Sid, "SID")
+                                        ],
+                                        current,
+                                        Rc::new(move |k, cx: &mut App| {
+                                            *cell.borrow_mut() = k;
+                                            row_view
+                                                .update(cx, |this, cx| {
+                                                    this.pending_service_kind = k;
+                                                    cx.notify();
+                                                })
+                                                .ok();
+                                        }),
+                                        cx
+                                    )
+                                })
+                        )
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .justify_between()
+                                .child(div().text_xs().text_color(muted).child("Use SSL (TCPS)"))
+                                .child({
+                                    let cell = ssl_cell.clone();
+                                    let current = *cell.borrow();
+                                    let row_view = view.clone();
+                                    Switch::new("conn-ssl")
+                                        .small()
+                                        .checked(current)
+                                        .on_change(move |checked, _, cx| {
+                                            *cell.borrow_mut() = *checked;
+                                            row_view
+                                                .update(cx, |this, cx| {
+                                                    this.pending_ssl = *checked;
+                                                    cx.notify();
+                                                })
+                                                .ok();
+                                        })
+                                })
+                        )
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(div().text_xs().text_color(muted).child("Password storage"))
+                                .child({
+                                    let cell = pwmode_cell.clone();
+                                    let current = *cell.borrow();
+                                    let row_view = view.clone();
+                                    dialog_pills(
+                                        "conn-pwmode",
+                                        &[
+                                            (PasswordMode::File, "Save in file"),
+                                            (PasswordMode::Keychain, "Keychain"),
+                                            (PasswordMode::Ask, "Prompt each time")
+                                        ],
+                                        current,
+                                        Rc::new(move |m, cx: &mut App| {
+                                            *cell.borrow_mut() = m;
+                                            row_view
+                                                .update(cx, |this, cx| {
+                                                    this.pending_password_mode = m;
+                                                    cx.notify();
+                                                })
+                                                .ok();
+                                        }),
+                                        cx
+                                    )
+                                })
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child("Database: the PDB service name (e.g. highlandpdb).")
+                        )
                         .child(
                             v_flex()
                                 .gap_1()
@@ -2510,7 +3020,8 @@ impl SqlHighlandView {
                                             .child(label)
                                     }),
                                 )),
-                        ),
+                        )
+                        )
                 )
                 .footer(
                     h_flex()
@@ -2544,6 +3055,25 @@ impl SqlHighlandView {
         if cfg.name.trim().is_empty() {
             cfg.name = "Untitled".to_string();
         }
+        // Keychain mode: the typed secret goes to the login keychain (or
+        // is cleared there when blank), never to the file.
+        if cfg.password_mode == PasswordMode::Keychain {
+            cfg.ensure_id();
+            let typed = self.password.read(cx).value().to_string();
+            if typed.is_empty() {
+                crate::keychain::delete(&cfg.id);
+            } else if let Err(e) = crate::keychain::set(&cfg.id, &typed) {
+                self.status = format!("Keychain store failed: {e}").into();
+            }
+        }
+        // Leaving Keychain mode orphans nothing: drop the entry.
+        if cfg.password_mode != PasswordMode::Keychain {
+            if let Some(old) = self.editing.and_then(|ix| self.connections.get(ix)) {
+                if old.password_mode == PasswordMode::Keychain && old.id == cfg.id {
+                    crate::keychain::delete(&cfg.id);
+                }
+            }
+        }
         if let Some(ix) = self.editing {
             if ix < self.connections.len() {
                 cfg.ensure_id();
@@ -2565,11 +3095,68 @@ impl SqlHighlandView {
         cx.notify();
     }
 
+    /// Delete with confirmation: removing a connection drops its tabs'
+    /// bindings (and its keychain entry), so it asks first.
+    fn confirm_delete_connection(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(cfg) = self.connections.get(ix).cloned() else {
+            return;
+        };
+        let view = cx.entity().downgrade();
+        let conn_id = cfg.id.clone();
+        let name: SharedString = format!("Delete “{}”?", cfg.name).into();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let delete_view = view.clone();
+            alert
+                .icon(KitIcon::TriangleAlert)
+                .title(name.clone())
+                .description(
+                    "Tabs bound to it become unbound. A stored keychain password is removed too.",
+                )
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_center()
+                        .child(
+                            Button::new("delete-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("delete-confirm")
+                                .label("Delete")
+                                .danger()
+                                .on_click({
+                                    let conn_id = conn_id.clone();
+                                    move |_, window, cx| {
+                                        window.close_dialog(cx);
+                                        delete_view
+                                            .update(cx, |this, cx| {
+                                                if let Some(ix) = this
+                                                    .connections
+                                                    .iter()
+                                                    .position(|c| c.id == conn_id)
+                                                {
+                                                    this.delete_connection(ix, cx);
+                                                }
+                                            })
+                                            .ok();
+                                    }
+                                }),
+                        ),
+                )
+        });
+    }
+
     fn delete_connection(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix >= self.connections.len() {
             return;
         }
         let removed = self.connections.remove(ix);
+        crate::keychain::delete(&removed.id);
+        self.unlocked.remove(&removed.id);
+        if self.pending_password.as_ref().is_some_and(|p| p.conn_id == removed.id) {
+            self.pending_password = None;
+        }
         self.pool.remove(&removed.id);
         self.live.remove(&removed.id);
         // Tabs bound to it fall back to "no connection".
@@ -2588,8 +3175,133 @@ impl SqlHighlandView {
 
     /// Eagerly connect a saved connection (sidebar menu). Tabs auto-connect
     /// lazily on Run, so this is strictly optional.
-    fn connect_connection(&mut self, conn_id: &str, cx: &mut Context<Self>) {
+    /// Effective password for a connection: session unlock first, then
+    /// stored (File) or keychain (Keychain). None = must prompt (Ask,
+    /// Keychain miss, empty File entry).
+    fn effective_password(&self, cfg: &ConnectionConfig) -> Option<String> {
+        if let Some(pw) = self.unlocked.get(&cfg.id) {
+            return Some(pw.clone());
+        }
+        match cfg.password_mode {
+            PasswordMode::File => {
+                if cfg.password.is_empty() {
+                    None
+                } else {
+                    Some(cfg.password.clone())
+                }
+            }
+            PasswordMode::Keychain => crate::keychain::get(&cfg.id).ok().flatten(),
+            PasswordMode::Ask => None,
+        }
+    }
+
+    /// Resolve the password, opening the prompt when the mode needs one
+    /// and none is available. Returns the config with the usable password,
+    /// or None when the prompt took over — it resumes via
+    /// `submit_password` (re-running `run`, or plain-connecting).
+    fn with_password(
+        &mut self,
+        mut cfg: ConnectionConfig,
+        run: Option<(String, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<ConnectionConfig> {
+        match self.effective_password(&cfg) {
+            Some(pw) => {
+                cfg.password = pw;
+                Some(cfg)
+            }
+            None => {
+                self.pending_password = Some(PendingPassword {
+                    conn_id: cfg.id.clone(),
+                    run,
+                });
+                self.pwd_prompt
+                    .update(cx, |s, cx| s.set_value(String::new(), window, cx));
+                let name = cfg.name.clone();
+                let pwd = self.pwd_prompt.clone();
+                let view = cx.entity().downgrade();
+                window.open_dialog(cx, move |dialog, _, cx| {
+                    let submit = view.clone();
+                    let pwd_in = pwd.clone();
+                    dialog
+                        .title(format!("Password for {name}"))
+                        .w(px(360.))
+                        .child(dialog_field("Password", &pwd_in, true, cx.theme().muted_foreground))
+                        .footer(
+                            h_flex()
+                                .gap_2()
+                                .child(div().flex_1())
+                                .child(Button::new("pwd-cancel").label("Cancel").on_click(
+                                    move |_, window, cx| {
+                                        window.close_dialog(cx);
+                                    },
+                                ))
+                                .child(
+                                    Button::new("pwd-connect")
+                                        .label("Connect")
+                                        .primary()
+                                        .on_click(move |_, window, cx| {
+                                            submit.update(cx, |this, cx| {
+                                                this.submit_password(window, cx);
+                                            })
+                                            .ok();
+                                        }),
+                                ),
+                        )
+                });
+                None
+            }
+        }
+    }
+
+    /// Password prompt submit: unlock the session (persisting to the
+    /// keychain when that mode is missing its entry), close the prompt,
+    /// then resume the pending connect or run.
+    fn submit_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_password.take() else {
+            return;
+        };
+        let pw = self.pwd_prompt.read(cx).value().to_string();
+        self.pwd_prompt
+            .update(cx, |s, cx| s.set_value(String::new(), window, cx));
+        if pw.is_empty() {
+            self.status = "Password required — cancelled".into();
+            cx.notify();
+            return;
+        }
+        let mode = self
+            .connections
+            .iter()
+            .find(|c| c.id == pending.conn_id)
+            .map(|c| c.password_mode);
+        if mode == Some(PasswordMode::Keychain) {
+            if let Err(e) = crate::keychain::set(&pending.conn_id, &pw) {
+                self.status = format!("Keychain store failed: {e}").into();
+                cx.notify();
+                return;
+            }
+        }
+        self.unlocked.insert(pending.conn_id.clone(), pw);
+        window.close_dialog(cx);
+        match pending.run {
+            Some((tab_id, sql)) => self.start_run(&tab_id, sql, window, cx),
+            None => self.connect_connection(&pending.conn_id, window, cx),
+        }
+    }
+
+    fn connect_connection(
+        &mut self,
+        conn_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(cfg) = self.connections.iter().find(|c| c.id == conn_id).cloned() else {
+            return;
+        };
+        // Keychain/Ask modes (or an empty File password) resolve here —
+        // the prompt resumes by re-entering this same function.
+        let Some(cfg) = self.with_password(cfg, None, window, cx) else {
             return;
         };
         self.status = format!("Connecting to {}…", cfg.connect_string()).into();
@@ -2722,6 +3434,22 @@ impl SqlHighlandView {
             }
         };
         if self.tabs[ix].busy {
+            return;
+        }
+        // Password gate before variables: Ask/Keychain-miss prompts here,
+        // resuming this same run on submit (unlocked for the session).
+        // run_sql picks up the unlock below — no password travels further.
+        let ready = self
+            .connections
+            .iter()
+            .find(|c| c.id == conn_id)
+            .cloned()
+            .map(|cfg| {
+                let run = Some((tab_id.to_string(), sql.clone()));
+                self.with_password(cfg, run, window, cx).is_some()
+            })
+            .unwrap_or(false);
+        if !ready {
             return;
         }
         let sub_vars = find_substitution_vars(&sql);
@@ -3239,11 +3967,17 @@ impl SqlHighlandView {
                 return;
             }
         };
-        let Some(cfg) = self.connections.iter().find(|c| c.id == conn_id).cloned() else {
+        let Some(mut cfg) = self.connections.iter().find(|c| c.id == conn_id).cloned() else {
             self.tabs[ix].output = Some(Output::error("Connection not found — pick another"));
             cx.notify();
             return;
         };
+        // Session unlock (or keychain) wins over the stored password.
+        // No prompt here — start_run gated already; direct callers resume
+        // unlocked sessions only.
+        if let Some(pw) = self.effective_password(&cfg) {
+            cfg.password = pw;
+        }
         self.tabs[ix].busy = true;
         self.tabs[ix].output = None;
         self.tabs[ix].run_token = self.tabs[ix].run_token.wrapping_add(1);
@@ -3281,6 +4015,9 @@ impl SqlHighlandView {
         let kind = statement_kind(&sql);
         let dml = is_dml(&sql);
         let sql_label = sql.clone();
+        // Grid row cap from Settings (exports stay uncapped by design).
+        // Clamped so a hand-edited preferences file can't OOM the grid.
+        let cap = Preferences::load().result_cap.clamp(1_000, 5_000_000);
         // Ticker repainting the live `Running… Ns` status twice a second.
         // Exits on its own once the run ends (token mismatch or not busy);
         // no handle needed because a newer run's ticker supersedes it.
@@ -3378,7 +4115,7 @@ impl SqlHighlandView {
                             session: session.clone(),
                             query_id,
                             chunk: FETCH_CHUNK,
-                            cap: FETCH_CAP,
+                            cap,
                             data: Mutex::new(ResultData {
                                 columns,
                                 rows: to_shared(page.rows),
@@ -3411,7 +4148,7 @@ impl SqlHighlandView {
                             session: session.clone(),
                             query_id,
                             chunk: FETCH_CHUNK,
-                            cap: FETCH_CAP,
+                            cap,
                             data: Mutex::new(ResultData {
                                 columns: Vec::new(),
                                 rows: Vec::new(),
@@ -3629,11 +4366,16 @@ impl SqlHighlandView {
         let tab_id = tab_id.to_string();
         let sheet = sheet_name(&self.tabs[ix].name);
         let path_done = path.clone();
+        // Snapshot export settings: the drain runs detached on a worker.
+        let csv_prefs = Preferences::load();
+        let csv_delim = crate::export::csv_delim(&csv_prefs.csv_delimiter);
+        let csv_header = csv_prefs.csv_header;
         cx.spawn(async move |_, cx| {
             let outcome = bg
                 .spawn(async move {
                     export_drain_blocking(
                         &session, &fetch, query_id, &columns, fmt, &path, &sheet, &sql, &cancel,
+                        csv_delim, csv_header,
                     )
                 })
                 .await;
@@ -3768,12 +4510,58 @@ impl SqlHighlandView {
         .detach();
     }
 
+    /// Format the statement at the cursor (same scope as Run), leaving
+    /// the rest of the buffer untouched. No statement → no-op.
     fn format_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ix = self.active;
-        let raw = self.tabs[ix].editor.read(cx).value().to_string();
-        let formatted = format_sql(&raw);
+        if !matches!(self.tabs[ix].kind, TabKind::Query) {
+            return;
+        }
+        let editor = self.tabs[ix].editor.clone();
+        let (text, cursor) = editor.read_with(cx, |e, _| (e.value().to_string(), e.cursor()));
+        let Some((_, start, end)) = statement_at_range(&text, cursor) else {
+            return;
+        };
+        // The splitter trims the statement text but keeps raw span bounds;
+        // reformat the trimmed core and preserve the original surrounding
+        // whitespace so neighboring statements never join or drift.
+        let span = &text[start..end];
+        let core = span.trim();
+        if core.is_empty() {
+            return;
+        }
+        let formatted = format_sql(core).trim().to_string();
+        if formatted == core {
+            return;
+        }
+        let lead = span.len() - span.trim_start().len();
+        let trail = span.len() - span.trim_end().len();
+        let mut out =
+            String::with_capacity(text.len() + formatted.len().saturating_sub(span.len()));
+        out.push_str(&text[..start]);
+        out.push_str(&span[..lead]);
+        out.push_str(&formatted);
+        out.push_str(&span[span.len() - trail..]);
+        out.push_str(&text[end..]);
+        // Keep the caret glued to its surroundings: before the core it
+        // stays put; inside it lands at the formatted end; after it
+        // shifts by the length delta. Floored to a char boundary.
+        let core_start = start + lead;
+        let core_end = end - trail;
+        let mut new_cursor = if cursor <= core_start {
+            cursor
+        } else if cursor >= core_end {
+            (cursor + formatted.len()).saturating_sub(core_end - core_start)
+        } else {
+            core_start + formatted.len()
+        }
+        .min(out.len());
+        while !out.is_char_boundary(new_cursor) {
+            new_cursor -= 1;
+        }
         self.tabs[ix].editor.update(cx, |editor, cx| {
-            editor.set_value(formatted, window, cx);
+            editor.set_value(out, window, cx);
+            editor.set_selected_range(new_cursor..new_cursor, cx);
         });
         cx.notify();
     }
@@ -4177,9 +4965,14 @@ impl SqlHighlandView {
         if !stale {
             return;
         }
-        let Some(cfg) = self.connections.iter().find(|c| c.id == conn_id).cloned() else {
+        let Some(mut cfg) = self.connections.iter().find(|c| c.id == conn_id).cloned() else {
             return;
         };
+        // Same unlock/keychain preference as runs; background triggers
+        // never prompt — a missing password just fails this fetch.
+        if let Some(pw) = self.effective_password(&cfg) {
+            cfg.password = pw;
+        }
         if let Ok(mut c) = cache.lock() {
             c.loading = true;
         }
@@ -4502,7 +5295,7 @@ impl SqlHighlandView {
         }
         self.browser_open.insert(conn_id.to_string());
         if !self.live.contains(conn_id) {
-            self.connect_connection(conn_id, cx);
+            self.connect_connection(conn_id, window, cx);
         }
         self.ensure_meta(conn_id, cx);
         // Per-connection filter: keystrokes rebuild only this tree.
@@ -5321,12 +6114,12 @@ impl SqlHighlandView {
                             let name = conn.name.clone();
                             menu =
                                 menu.item(PopupMenuItem::new(format!("{prefix}{name}")).on_click(
-                                    move |_, _, cx| {
+                                    move |_, window, cx| {
                                         view.update(cx, |this, cx| {
                                             if let Some(t) = this.tab_by_id(&tab_id) {
                                                 t.connection_id = Some(conn_id.clone());
                                                 this.persist_tabs();
-                                                this.connect_connection(&conn_id, cx);
+                                                this.connect_connection(&conn_id, window, cx);
                                             }
                                             cx.notify();
                                         })
@@ -5891,8 +6684,43 @@ fn env_color(env: Environment, cx: &App) -> Option<Hsla> {
 /// Environment tag pill. Returns `None` for untagged connections so callers
 /// can drop it into trees with `.when_some(...)`. Colors come from theme
 /// tokens, so tags adapt to light/dark like everything else.
-fn env_tag(env: Environment, cx: &App) -> Option<AnyElement> {
-    let label = env.label()?;
+/// Check-list row (theme-list pattern) for settings pickers: label +
+/// optional detail + check, click runs apply. Shared by font, row-limit,
+/// and delimiter lists so they stay visually identical.
+fn settings_pick_row(
+    id: impl Into<ElementId>,
+    label: String,
+    detail: Option<String>,
+    selected: bool,
+    cx: &App,
+    apply: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let hover_bg = cx.theme().accent;
+    let muted = cx.theme().muted_foreground;
+    div()
+        .id(id)
+        .w_full()
+        .p_2()
+        .rounded_md()
+        .hover(move |this| this.bg(hover_bg))
+        .on_click(move |ev, window, cx| apply(ev, window, cx))
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    v_flex().flex_1().child(div().text_sm().child(label)).children(
+                        detail.map(|d| div().text_xs().text_color(muted).child(d)),
+                    ),
+                )
+                .when(selected, |this| {
+                    this.child(div().text_color(muted).child(KitIcon::Check))
+                }),
+        )
+        .into_any_element()
+}
+
+fn env_tag(env: Environment, cx: &App) -> Option<AnyElement> {    let label = env.label()?;
     let color = env_color(env, cx)?;
     Some(
         div()
@@ -5912,7 +6740,7 @@ fn env_tag(env: Environment, cx: &App) -> Option<AnyElement> {
     )
 }
 
-fn dialog_field(
+ fn dialog_field(
     label: impl Into<SharedString>,
     state: &Entity<InputState>,
     password: bool,
@@ -5927,6 +6755,49 @@ fn dialog_field(
         .gap_1()
         .child(div().text_xs().text_color(muted).child(label))
         .child(input)
+}
+
+/// Pill radio row for the connection dialog: one pill per option, the
+/// current one highlighted. `pick` syncs the dialog-local cell; callers
+/// also mirror it into the matching `pending_*` view field + notify.
+/// Ids are namespaced per row via `id_base`.
+fn dialog_pills<T: Copy + PartialEq + 'static>(
+    id_base: &'static str,
+    options: &[(T, &'static str)],
+    current: T,
+    pick: std::rc::Rc<dyn Fn(T, &mut App)>,
+    cx: &App,
+) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    let accent = cx.theme().accent;
+    h_flex().gap_1().children(options.iter().enumerate().map(
+        |(ix, (value, label))| {
+            let value = *value;
+            let selected = current == value;
+            let pick = pick.clone();
+            div()
+                .id((id_base, ix))
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .bg(if selected {
+                    accent.opacity(0.25)
+                } else {
+                    accent.opacity(0.0)
+                })
+                .text_xs()
+                .text_color(if selected {
+                    cx.theme().foreground
+                } else {
+                    muted
+                })
+                .hover(move |this| this.bg(accent.opacity(0.25)))
+                .on_click(move |_, _, cx| pick(value, cx))
+                .child(label.to_string())
+        },
+    ))
+    .into_any_element()
 }
 
 impl Render for SqlHighlandView {

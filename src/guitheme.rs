@@ -84,8 +84,23 @@ fn apply_config_by_name(name: &str, mode: ThemeMode, window: Option<&mut Window>
 }
 
 /// Apply saved preferences (convenience over [`apply_theme`]).
+/// User font overrides stamp over the active theme afterwards: editors
+/// keep their size across theme switches, family follows the theme
+/// unless explicitly chosen.
 pub fn apply_preferences(prefs: &Preferences, window: Option<&mut Window>, cx: &mut App) {
     apply_theme(&prefs.theme_name(), window, cx);
+    apply_font_prefs(prefs, cx);
+}
+
+/// Stamp user font choices over the active theme. Called on every apply
+/// (theme switches reset these fields, so the override must re-apply).
+pub fn apply_font_prefs(prefs: &Preferences, cx: &mut App) {
+    let theme = Theme::global_mut(cx);
+    if !prefs.font_family.is_empty() {
+        theme.mono_font_family = prefs.font_family.clone().into();
+    }
+    theme.mono_font_size = px(prefs.font_size as f32);
+    cx.refresh_windows();
 }
 
 /// Re-apply the saved selection for the OS appearance. Wired to the window's

@@ -358,6 +358,38 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   row context menus (Open description + Copy name; columns Copy name).
   Nesting bug fixed: tree rendered inside the row div shared its hitbox
   and fired both menus — now true siblings (verified in probe paths).
+- Scoped Format (2026-09-12): Format button/shortcut now formats only
+  the statement at the cursor (same scope as Run) via new
+  `statement_at_range` (shared selection logic, plus byte range);
+  surrounding whitespace preserved so statements never join, caret
+  tracked, already-formatted is a no-op. Viewer tabs guarded.
+- Settings UI round (2026-09-12): Cmd+, toggles (second press closes
+  the top dialog); search fixed — every item was `SettingItem::render`
+  with empty keywords so all filtered out, now all 7 carry keywords;
+  About reworded off Oracle-only; completion + system-schemas rows use
+  pill toggles (`setting_pill`, env_tag pattern) instead of checks.
+- Segmented Suggestions toggle (2026-09-12): Automatic/Manual now one
+  on-off pill row (active segment primary, other ghost) instead of two
+  rows — single click target, same prefs path.
+- Connection settings sextet (2026-09-12): Role pills (SYSDEFAULT/
+  SYSDBA/SYSOPER via driver `set_auth_mode`; XA has no driver auth mode
+  — open question), Service/SID toggle (colon EZCONNECT form), SSL
+  switch (`tcps://` scheme; wallet mTLS later), password modes
+  (File/Keychain via login keychain/Ask with session unlock map +
+  prompt dialog; keychain entries cleaned on mode-leave/delete),
+  Database row (Oracle, forward-compat), delete confirmation dialog.
+  Old files migrate via serde defaults. Clippy clean, 101 lib + 10
+  live green, release smoke ALIVE (`cmd_w` flake pre-existing).
+- Settings trio (2026-09-12): grid row-cap presets (10k–1M, default
+  100k, clamped, future runs; exports stay uncapped); CSV delimiter
+  presets (comma/semicolon/tab/pipe) + header toggle (new `csv_*_with`
+  plumbing, quoting follows the delimiter); editor font family presets
+  + size stepper (10–24, stamped over the theme so size survives theme
+  switches). New Results page + Editor Font group, all keyworded.
+- Native Switch toggles (2026-09-12): per kit Switch component docs —
+  Suggestions collapsed to one "Automatic suggestions" switch row and
+  system schemas to a Switch (custom pills/segments removed); same
+  prefs writes + cache invalidation, checked state follows live prefs.
 - Own-schema names go bare (2026-09-12): connected as SYSTEM, `FROM `
    suggests `EMPLOYEES` (not `SYSTEM.EMPLOYEES`) and inserts it bare —
   Oracle resolves unqualified names to the connected schema first, so the

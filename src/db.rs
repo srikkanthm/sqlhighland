@@ -305,8 +305,15 @@ impl Default for OracledbSession {
 
 impl DbClient for OracledbSession {
     fn connect(&mut self, cfg: &ConnectionConfig) -> Result<(), DbError> {
+        use crate::model::OracleRole;
+        let auth_mode = match cfg.role {
+            OracleRole::Default => oracledb::AUTH_MODE_DEFAULT,
+            OracleRole::Sysdba => oracledb::AUTH_MODE_SYSDBA,
+            OracleRole::Sysoper => oracledb::AUTH_MODE_SYSOPER,
+        };
         let ora_cfg = oracledb::Config::default()
             .set_credentials(&cfg.user, &cfg.password)
+            .set_auth_mode(auth_mode)
             .set_connect_string(&cfg.connect_string())
             .map_err(DbError::from)?;
         let conn = oracledb::connect(ora_cfg).map_err(DbError::from)?;

@@ -15,6 +15,10 @@ fn cfg() -> ConnectionConfig {
         password: std::env::var("ORACLE_PWD").unwrap_or_else(|_| "test".to_string()),
         environment: sqlhighland::model::Environment::Dev,
         engine: Default::default(),
+        role: Default::default(),
+        service_kind: Default::default(),
+        ssl: false,
+        password_mode: Default::default(),
     }
 }
 

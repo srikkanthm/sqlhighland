@@ -220,6 +220,22 @@ pub struct Preferences {
     /// Include SYS/SYSTEM/etc. objects in suggestions. Default hidden.
     #[serde(default)]
     pub show_system_schemas: bool,
+    /// Results-grid row cap (exports stay uncapped). Default 100k.
+    #[serde(default = "default_result_cap")]
+    pub result_cap: usize,
+    /// CSV delimiter for file exports ("," ";" tab "|" presets).
+    #[serde(default = "default_csv_delimiter")]
+    pub csv_delimiter: String,
+    /// Header row in CSV file exports. Default on.
+    #[serde(default = "default_true")]
+    pub csv_header: bool,
+    /// Editor font family. Empty = follow the active theme.
+    #[serde(default)]
+    pub font_family: String,
+    /// Editor font size in points. Explicit (editors keep size across
+    /// themes); stepper-clamped 10..24 in Settings.
+    #[serde(default = "default_font_size")]
+    pub font_size: u32,
     // --- Legacy family+mode matrix (pre-flat themes). Still parsed (via
     // the original key names) so old files migrate instead of resetting;
     // never written back. ---
@@ -237,6 +253,11 @@ impl Default for Preferences {
             theme: SYSTEM_THEME.to_string(),
             completion: CompleteMode::default(),
             show_system_schemas: false,
+            result_cap: default_result_cap(),
+            csv_delimiter: default_csv_delimiter(),
+            csv_header: default_true(),
+            font_family: String::new(),
+            font_size: default_font_size(),
             legacy_family: LegacyFamily::default(),
             legacy_mode: LegacyMode::default(),
             legacy_catppuccin_dark: LegacyCatppuccinDark::default(),
@@ -244,10 +265,25 @@ impl Default for Preferences {
     }
 }
 
+fn default_result_cap() -> usize {
+    100_000
+}
+
+fn default_csv_delimiter() -> String {
+    ",".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_font_size() -> u32 {
+    13
+}
+
 /// Suggestion popup behavior for the query editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum CompleteMode {
-    /// Popup automatically while typing (2+ chars, `.` forces columns).
+pub enum CompleteMode {    /// Popup automatically while typing (2+ chars, `.` forces columns).
     #[default]
     Auto,
     /// Popup only on the manual shortcut (ctrl-space).
@@ -346,8 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trip() {
-        let dir = std::env::temp_dir().join(format!("sqlhighland-test-{}", std::process::id()));
+    fn round_trip() {        let dir = std::env::temp_dir().join(format!("sqlhighland-test-{}", std::process::id()));
         let path = dir.join("connections.toml");
         let cfg = SavedConfig {
             connections: vec![ConnectionConfig::default()],
@@ -408,6 +443,46 @@ mod tests {
         assert_eq!(Preferences::load().theme_name(), SYSTEM_THEME);
 
         unsafe { std::env::remove_var("SQLHIGHLAND_CONFIG_DIR") };
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn new_pref_defaults() {        // Fresh defaults: 100k grid cap, comma CSVs with headers, theme
+        // font at 13pt. Missing keys in old files resolve the same way.
+        let p = Preferences::default();
+        assert_eq!(p.result_cap, 100_000);
+        assert_eq!(p.csv_delimiter, ",");
+        assert!(p.csv_header);
+        assert_eq!(p.font_family, "");
+        assert_eq!(p.font_size, 13);
+        let p: Preferences = toml::from_str("theme = \"Nord Dark\"\n").unwrap();
+        assert_eq!(p.result_cap, 100_000);
+        assert_eq!(p.csv_delimiter, ",");
+        assert!(p.csv_header);
+        assert_eq!(p.font_size, 13);
+    }
+
+    #[test]
+    fn old_connection_entries_default_new_options() {
+        // Pre-role/SSL/password-mode files load with safe defaults: plain
+        // login, service name, no TLS, legacy file password.
+        let dir =
+            std::env::temp_dir().join(format!("sqlhighland-oldconn-{}", std::process::id()));
+        let path = dir.join("connections.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            "[[connections]]\nid = \"c1\"\nname = \"old\"\nhost = \"h\"\nport = 1521\nservice_name = \"s\"\nuser = \"u\"\npassword = \"p\"\n",
+        )
+        .unwrap();
+        let loaded = SavedConfig::load(&path).unwrap();
+        let c = &loaded.connections[0];
+        assert_eq!(c.role, crate::model::OracleRole::Default);
+        assert_eq!(c.service_kind, crate::model::ServiceKind::ServiceName);
+        assert!(!c.ssl);
+        assert_eq!(c.password_mode, crate::model::PasswordMode::File);
+        assert_eq!(c.engine, crate::schema::DbEngine::Oracle);
         std::fs::remove_dir_all(&dir).ok();
     }
 

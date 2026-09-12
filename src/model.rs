@@ -2,6 +2,78 @@ use serde::{Deserialize, Serialize};
 
 use crate::schema::DbEngine;
 
+/// Oracle connect role (`CONNECT AS`). SYSDEFAULT is a plain login;
+/// SYSDBA/SYSOPER set the driver auth mode. (There is no XA auth mode
+/// in the driver — XA is a transaction protocol, not a login role.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum OracleRole {
+    #[default]
+    Default,
+    Sysdba,
+    Sysoper,
+}
+
+impl OracleRole {
+    pub const ALL: [OracleRole; 3] = [OracleRole::Default, OracleRole::Sysdba, OracleRole::Sysoper];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            OracleRole::Default => "SYSDEFAULT",
+            OracleRole::Sysdba => "SYSDBA",
+            OracleRole::Sysoper => "SYSOPER",
+        }
+    }
+}
+
+/// Whether `service_name` is a service name or a SID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ServiceKind {
+    #[default]
+    ServiceName,
+    Sid,
+}
+
+impl ServiceKind {
+    pub const ALL: [ServiceKind; 2] = [ServiceKind::ServiceName, ServiceKind::Sid];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ServiceKind::ServiceName => "Service",
+            ServiceKind::Sid => "SID",
+        }
+    }
+}
+
+/// Password handling per connection. `File` is today's behavior
+/// (plaintext in connections.toml); `Keychain` moves the secret to the
+/// macOS login keychain on save; `Ask` never stores and prompts per run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PasswordMode {
+    /// Legacy: plaintext in the config file.
+    #[default]
+    File,
+    /// macOS login keychain, keyed by connection id.
+    Keychain,
+    /// Prompt every time; never persisted.
+    Ask,
+}
+
+impl PasswordMode {
+    pub const ALL: [PasswordMode; 3] = [
+        PasswordMode::File,
+        PasswordMode::Keychain,
+        PasswordMode::Ask,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PasswordMode::File => "File",
+            PasswordMode::Keychain => "Keychain",
+            PasswordMode::Ask => "Ask every time",
+        }
+    }
+}
+
 /// Deployment environment tag for a connection. Purely visual (no behavior
 /// attached): callers map variants to theme colors at render time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -52,12 +124,36 @@ pub struct ConnectionConfig {
     /// session pool) is what it keys off — nothing else changes shape.
     #[serde(default)]
     pub engine: DbEngine,
+    /// Oracle connect role. Missing on older entries; plain login.
+    #[serde(default)]
+    pub role: OracleRole,
+    /// Whether `service_name` is a service name or a SID.
+    #[serde(default)]
+    pub service_kind: ServiceKind,
+    /// TLS via the `tcps://` EZCONNECT scheme. Wallet-based mTLS is a
+    /// later step; this toggles transport encryption only.
+    #[serde(default)]
+    pub ssl: bool,
+    /// Password handling. Missing on older entries; legacy file behavior.
+    #[serde(default)]
+    pub password_mode: PasswordMode,
 }
 
 impl ConnectionConfig {
-    /// EZCONNECT string: `host:port/service_name`.
+    /// EZCONNECT string: `host:port/service_name`, `host:port:SID` for
+    /// SID entries, `tcps://`-prefixed when SSL is on.
     pub fn connect_string(&self) -> String {
-        format!("{}:{}/{}", self.host, self.port, self.service_name)
+        let base = match self.service_kind {
+            ServiceKind::ServiceName => {
+                format!("{}:{}/{}", self.host, self.port, self.service_name)
+            }
+            ServiceKind::Sid => format!("{}:{}:{}", self.host, self.port, self.service_name),
+        };
+        if self.ssl {
+            format!("tcps://{base}")
+        } else {
+            base
+        }
     }
     /// Assign a fresh id unless one is already set. Returns whether it changed.
     pub fn ensure_id(&mut self) -> bool {
@@ -82,6 +178,10 @@ impl Default for ConnectionConfig {
             password: String::new(),
             environment: Environment::default(),
             engine: DbEngine::default(),
+            role: OracleRole::default(),
+            service_kind: ServiceKind::default(),
+            ssl: false,
+            password_mode: PasswordMode::default(),
         }
     }
 }
@@ -147,15 +247,23 @@ pub fn tab_name_from_sql(text: &str, fallback: &str) -> String {
 /// Takes borrowed text so both `String`- and `SharedString`-backed rows work
 /// without allocating.
 pub fn csv_row<'a>(cells: impl IntoIterator<Item = Option<&'a str>>) -> String {
-    cells
-        .into_iter()
-        .map(|c| csv_field(c.unwrap_or("")))
-        .collect::<Vec<_>>()
-        .join(",")
+    csv_row_with(cells, ',')
 }
 
-fn csv_field(value: &str) -> String {
-    if value.contains([',', '"', '\n', '\r'])
+/// Same as [`csv_row`] with an explicit delimiter (export settings).
+/// Quoting triggers on the delimiter, quotes, newlines, and padded
+/// whitespace — whichever delimiter is chosen.
+pub fn csv_row_with<'a>(cells: impl IntoIterator<Item = Option<&'a str>>, delim: char) -> String {
+    let sep: String = std::iter::once(delim).collect();
+    cells
+        .into_iter()
+        .map(|c| csv_field(c.unwrap_or(""), delim))
+        .collect::<Vec<_>>()
+        .join(&sep)
+}
+
+fn csv_field(value: &str, delim: char) -> String {
+    if value.contains([delim, '"', '\n', '\r'])
         || value.starts_with([' ', '\t'])
         || value.ends_with([' ', '\t'])
     {
@@ -212,6 +320,49 @@ mod tests {
         assert_eq!(csv_row(cells.iter().map(|c| c.as_deref())), "42,,plain");
         assert_eq!(csv_row([] as [Option<&str>; 0]), "");
         assert_eq!(csv_row([None]), "");
+    }
+
+    #[test]
+    fn connect_string_variants() {
+        let base = ConnectionConfig {
+            host: "db".to_string(),
+            port: 1521,
+            service_name: "orcl".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(base.connect_string(), "db:1521/orcl");
+        let sid = ConnectionConfig {
+            service_kind: ServiceKind::Sid,
+            ..base.clone()
+        };
+        assert_eq!(sid.connect_string(), "db:1521:orcl");
+        let ssl = ConnectionConfig {
+            ssl: true,
+            ..base.clone()
+        };
+        assert_eq!(ssl.connect_string(), "tcps://db:1521/orcl");
+        let both = ConnectionConfig {
+            service_kind: ServiceKind::Sid,
+            ssl: true,
+            ..base
+        };
+        assert_eq!(both.connect_string(), "tcps://db:1521:orcl");
+    }
+
+    #[test]
+    fn connection_option_labels() {
+        assert_eq!(
+            OracleRole::ALL.map(OracleRole::label),
+            ["SYSDEFAULT", "SYSDBA", "SYSOPER"]
+        );
+        assert_eq!(
+            ServiceKind::ALL.map(ServiceKind::label),
+            ["Service", "SID"]
+        );
+        assert_eq!(
+            PasswordMode::ALL.map(PasswordMode::label),
+            ["File", "Keychain", "Ask every time"]
+        );
     }
 
     #[test]

@@ -5,25 +5,53 @@
 //! (uncapped exports stay lean); XLSX uses a constant-memory worksheet so
 //! large exports don't balloon either.
 
-use crate::model::csv_row;
+use crate::model::csv_row_with;
+
+/// Parse the configured delimiter ("," ";" tab "|" presets). Anything
+/// else falls back to comma — presets make anything else unreachable.
+pub fn csv_delim(s: &str) -> char {
+    s.chars().next().unwrap_or(',')
+}
 
 /// CSV header line from column names.
 pub fn csv_header_line(headers: &[String]) -> String {
-    csv_row(headers.iter().map(|h| Some(h.as_str())))
+    csv_header_line_with(headers, ',')
+}
+
+/// CSV header line with an explicit delimiter (export settings).
+pub fn csv_header_line_with(headers: &[String], delim: char) -> String {
+    csv_row_with(headers.iter().map(|h| Some(h.as_str())), delim)
 }
 
 /// One CSV data line. `None` is SQL NULL (empty field).
 pub fn csv_line(cells: &[Option<String>]) -> String {
-    csv_row(cells.iter().map(|c| c.as_deref()))
+    csv_line_with(cells, ',')
+}
+
+/// One CSV data line with an explicit delimiter (export settings).
+pub fn csv_line_with(cells: &[Option<String>], delim: char) -> String {
+    csv_row_with(cells.iter().map(|c| c.as_deref()), delim)
 }
 
 /// Whole CSV document (convenience for tests and small results).
 pub fn csv_doc(headers: &[String], rows: &[Vec<Option<String>>]) -> String {
+    csv_doc_with(headers, rows, ',', true)
+}
+
+/// Whole CSV document with export settings: delimiter + header toggle.
+pub fn csv_doc_with(
+    headers: &[String],
+    rows: &[Vec<Option<String>>],
+    delim: char,
+    header: bool,
+) -> String {
     let mut out = String::new();
-    out.push_str(&csv_header_line(headers));
-    out.push('\n');
+    if header {
+        out.push_str(&csv_header_line_with(headers, delim));
+        out.push('\n');
+    }
     for row in rows {
-        out.push_str(&csv_line(row));
+        out.push_str(&csv_line_with(row, delim));
         out.push('\n');
     }
     out
@@ -129,6 +157,26 @@ mod tests {
             ],
         );
         assert_eq!(out, "A,\"B,C\"\n1,\n\"x\"\"y\",z\n");
+    }
+
+    #[test]
+    fn csv_doc_with_delimiter_and_no_header() {
+        // Semicolons split, commas don't force quotes; header off.
+        let out = csv_doc_with(
+            &["A".to_string(), "B".to_string()],
+            &[vec![Some("1;2".to_string()), Some("x,y".to_string())]],
+            ';',
+            false,
+        );
+        assert_eq!(out, "\"1;2\";x,y\n");
+        // Tab delimiter with header on.
+        let out = csv_doc_with(
+            &["A".to_string()],
+            &[vec![Some("v".to_string())]],
+            '\t',
+            true,
+        );
+        assert_eq!(out, "A\nv\n");
     }
 
     #[test]

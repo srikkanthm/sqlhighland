@@ -180,19 +180,29 @@ pub fn split_statements(sql: &str) -> Vec<Statement> {
 /// statement-free whitespace prefers the following statement, else the
 /// preceding one. Returns `None` when there is no statement at all.
 pub fn statement_at(sql: &str, offset: usize) -> Option<String> {
+    statement_at_range(sql, offset).map(|(text, _, _)| text)
+}
+
+/// Same statement resolution as [`statement_at`], plus the statement's byte
+/// range — for in-place rewrite (Format scopes to the cursor's statement
+/// instead of the whole buffer). Returns `(text, start, end)`.
+pub fn statement_at_range(sql: &str, offset: usize) -> Option<(String, usize, usize)> {
     let statements = split_statements(sql);
     if statements.is_empty() {
         return None;
     }
     if statements.len() == 1 {
-        return Some(statements.into_iter().next().unwrap().text);
+        return statements
+            .into_iter()
+            .next()
+            .map(|s| (s.text, s.start, s.end));
     }
     let offset = offset.min(sql.len());
     // Caret immediately after a terminator belongs to the statement just
     // ended — not the one starting there. (Contiguous spans share the
     // boundary, so this must precede the containment check.)
     if let Some(stmt) = statements.iter().find(|s| offset == s.end) {
-        return Some(stmt.text.clone());
+        return Some((stmt.text.clone(), stmt.start, stmt.end));
     }
     // Caret in trailing spaces/tabs on the terminator's own line also
     // belongs to the statement just ended (`SELECT 1;␣` with the caret at
@@ -202,7 +212,7 @@ pub fn statement_at(sql: &str, offset: usize) -> Option<String> {
     if let Some(prev) = statements.iter().rev().find(|s| s.end <= offset) {
         let gap = sql.get(prev.end..offset).unwrap_or("");
         if !gap.is_empty() && gap.chars().all(|c| c == ' ' || c == '\t') {
-            return Some(prev.text.clone());
+            return Some((prev.text.clone(), prev.start, prev.end));
         }
     }
     // Own segment.
@@ -210,14 +220,14 @@ pub fn statement_at(sql: &str, offset: usize) -> Option<String> {
         .iter()
         .find(|s| s.start <= offset && offset < s.end)
     {
-        return Some(stmt.text.clone());
+        return Some((stmt.text.clone(), stmt.start, stmt.end));
     }
     // Whitespace-only gap: prefer the next statement, else the previous.
     statements
         .iter()
         .find(|s| s.start >= offset)
         .or_else(|| statements.iter().rev().find(|s| s.end <= offset))
-        .map(|s| s.text.clone())
+        .map(|s| (s.text.clone(), s.start, s.end))
 }
 
 /// How a statement must be sent to Oracle: queries produce a result set
@@ -1056,6 +1066,31 @@ mod tests {
         assert_eq!(statement_at(sql, 2).as_deref(), Some("SELECT 1;"));
         assert_eq!(statement_at(sql, 12).as_deref(), Some("SELECT 2;"));
         assert_eq!(statement_at(sql, 22).as_deref(), Some("SELECT 3;"));
+    }
+
+    #[test]
+    fn statement_at_range_matches_splice() {
+        // Ranges cover the raw span (leading whitespace included); the
+        // text is trimmed. Format must splice on the range while keeping
+        // the surrounding whitespace so statements never join or drift.
+        let sql = "select 1;\nselect 2;";
+        let (text, start, end) = statement_at_range(sql, 12).unwrap();
+        assert_eq!(text, "select 2;");
+        let span = &sql[start..end];
+        assert_eq!(span, "\nselect 2;");
+        let lead = span.len() - span.trim_start().len();
+        let trail = span.len() - span.trim_end().len();
+        let formatted = format_sql(span.trim()).trim().to_string();
+        let rebuilt = format!(
+            "{}{}{}{}{}",
+            &sql[..start],
+            &span[..lead],
+            formatted,
+            &span[span.len() - trail..],
+            &sql[end..]
+        );
+        assert_eq!(rebuilt, format!("select 1;\n{formatted}"));
+        assert!(rebuilt.contains('\n'));
     }
 
     #[test]

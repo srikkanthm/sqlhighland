@@ -4,7 +4,7 @@
 #![recursion_limit = "256"]
 
 use gpui_kit::component::ThemeRegistry;
-use gpui_kit::{AppContext as _, TestAppContext};
+use gpui_kit::TestAppContext;
 
 const EXPECTED: &[&str] = &[
     "Nord Light",

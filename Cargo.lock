@@ -6701,6 +6701,7 @@ dependencies = [
  "lsp-types",
  "oracledb",
  "rust_xlsxwriter",
+ "security-framework",
  "serde",
  "sqlformat",
  "toml 0.8.23",
