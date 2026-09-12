@@ -6021,6 +6021,18 @@ impl SqlHighlandView {
                 .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
                     this.cycle_tab(-1, window, cx);
                 }))
+                // File commands live here too (same bubble-path reason as
+                // the tab actions above): with focus in the sidebar the
+                // main-area listeners never fire, so Cmd+S/O would die.
+                .on_action(cx.listener(|this, _: &OpenSql, window, cx| {
+                    this.open_sql_file(window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &SaveSql, window, cx| {
+                    this.save_active_tab(window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &SaveSqlAs, window, cx| {
+                    this.save_active_tab_as(window, cx);
+                }))
                 // Quit/Settings stay app-global (main.rs): a second,
                 // element-level registration double-fires the action.
                 .items_center()
@@ -6079,6 +6091,18 @@ impl SqlHighlandView {
             }))
             .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
                 this.cycle_tab(-1, window, cx);
+            }))
+            // File commands live here too (same bubble-path reason as
+            // the tab actions above): with focus in the sidebar the
+            // main-area listeners never fire, so Cmd+S/O would die.
+            .on_action(cx.listener(|this, _: &OpenSql, window, cx| {
+                this.open_sql_file(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SaveSql, window, cx| {
+                this.save_active_tab(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SaveSqlAs, window, cx| {
+                this.save_active_tab_as(window, cx);
             }))
             // Quit/Settings stay app-global (main.rs): a second,
             // element-level registration double-fires the action.
@@ -6314,7 +6338,12 @@ impl SqlHighlandView {
             .border_b_1()
             .border_color(cx.theme().border)
             .on_action(cx.listener(|this, _: &RunQuery, window, cx| {
-                this.run_at_cursor(window, cx);
+                // Focus-gated like its siblings: without this, Cmd+Enter
+                // in any kit input (dialog fields, picker search) runs
+                // the active tab's query behind the dialog.
+                if this.editor_focused(window, cx) {
+                    this.run_at_cursor(window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &FormatQuery, window, cx| {
                 if this.editor_focused(window, cx) {

@@ -557,3 +557,16 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   alongside the scroll rewind. Click picks directly as before.
 - Verified headless (hover + Enter opens exactly one tab), clean
   `clippy`, 101 lib + picker suite green (two known flakes excluded).
+
+## Shortcut review fixes (2026-09-12)
+
+- Full audit of all 17 registered shortcuts (native/kit conflicts,
+  context scoping, handler placement, menu coverage). Two fixes:
+  (a) RunQuery handler gains the siblings' `editor_focused` guard —
+  Cmd+Enter in dialog fields/picker search no longer runs the active
+  tab's query behind the dialog; (b) Open/Save/SaveAs listeners
+  duplicated onto both sidebar roots (bubble-path pattern) so Cmd+S/O
+  work with sidebar focused.
+- Verified headless (dialog Cmd+Enter ignored, sidebar-focus save
+  writes the file; serial threads — config-dir env is process-global),
+  clean `clippy`, 101 lib + menus/themes/browser_tree green.
