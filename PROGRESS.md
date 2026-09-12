@@ -536,3 +536,15 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - Solution preserved in SCHEMA_TREE_AUTOREVEAL.md (final code,
   variants tried, kit facts) for possible restoration.
 - Verified: clean `clippy`, 101 lib + browser_tree green.
+
+## Cmd+K connection picker -> new bound tab (2026-09-12)
+
+- Cmd+K (`PickConnection`, context-free, root-div listener so it fires
+  with any focus) opens the same picker as unbound runs. `PendingPick`
+  gains `new_tab`: picking opens a fresh blank tab bound to the pick,
+  selects + focuses it, and connects eagerly (same session/password/
+  failure paths as sidebar Connect) — never runs anything. Classic
+  bind-and-run flow untouched; both pick sites (click, Enter) branch.
+  No-op while a pick is pending; cancel/Esc refocuses as before.
+- Verified headless (picker, single new tab, picker gone), clean
+  `clippy`, 101 lib + themes + browser_tree green.
