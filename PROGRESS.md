@@ -511,3 +511,17 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   horizontal row body where it stretches to full row height — probed
   3x24px visible.
 - Verified: clean `clippy`, 101 lib + themes + browser_tree green.
+
+## App-global New/Close Tab (2026-09-12, uncommitted)
+
+- Cmd+T/W had element-level listeners only (sidebar roots + main),
+  dead with any dialog focused. Now single app-global deferred
+  handlers in main.rs (`new_tab_command` /
+  `close_active_tab_command` pub entry points; active tab snapshotted
+  at execution); six element listeners removed (double-fire hazard).
+- Caught by probe: main.rs `view.update` takes a 2-arg closure
+  (window comes from the outer handle.update) — plus a reminder that
+  `grep "^a|^b"` without -E matches nothing (earlier "clean" checks).
+- Verified headless: baseline single-tab creation, dialog-focus
+  Cmd+T (once) + Cmd+W closes newest. Clean `clippy`, 101 lib +
+  themes + browser_tree green.

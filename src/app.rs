@@ -2219,6 +2219,23 @@ impl SqlHighlandView {
         self.open_connection_dialog(&title, window, cx);
     }
 
+    /// App-global entry points (main.rs): the deferred bodies behind
+    /// Cmd+T / Cmd+W. Same calls the removed element listeners made;
+    /// public only for main.rs.
+    pub fn new_tab_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tab_id = self.add_tab(None, String::new(), window, cx);
+        if let Some(ix) = self.tab_index(&tab_id) {
+            self.select_tab(ix, window, cx);
+        }
+    }
+
+    /// App-global entry for Cmd+W: closes whatever is active when the
+    /// deferred body runs (not when the key was pressed).
+    pub fn close_active_tab_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tab_id = self.active_tab().id.clone();
+        self.request_close_tab(&tab_id, window, cx);
+    }
+
     /// Settings dialog: theme family + appearance mode. Selections apply
     /// live, persist to preferences.toml, and close the dialog (menu-like).
     /// Owns the Cmd+, toggle bookkeeping (direct field access: this runs
@@ -5913,16 +5930,9 @@ impl SqlHighlandView {
                 .w(px(44.))
                 .h_full()
                 .bg(cx.theme().sidebar)
-                .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
-                    let tab_id = this.active_tab().id.clone();
-                    this.request_close_tab(&tab_id, window, cx);
-                }))
-                .on_action(cx.listener(|this, _: &NewTab, window, cx| {
-                    let tab_id = this.add_tab(None, String::new(), window, cx);
-                    if let Some(ix) = this.tab_index(&tab_id) {
-                        this.select_tab(ix, window, cx);
-                    }
-                }))
+                // NewTab/CloseTab stay app-global (main.rs): element-level
+                // duplicates double-fire, and dialogs sit outside these
+                // roots so they never see dialog-focused keypresses.
                 .on_action(cx.listener(|this, _: &NextTab, window, cx| {
                     this.cycle_tab(1, window, cx);
                 }))
@@ -5980,16 +5990,9 @@ impl SqlHighlandView {
         v_flex()
             .size_full()
             .bg(cx.theme().sidebar)
-            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
-                let tab_id = this.active_tab().id.clone();
-                this.request_close_tab(&tab_id, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &NewTab, window, cx| {
-                let tab_id = this.add_tab(None, String::new(), window, cx);
-                if let Some(ix) = this.tab_index(&tab_id) {
-                    this.select_tab(ix, window, cx);
-                }
-            }))
+            // NewTab/CloseTab stay app-global (main.rs): element-level
+            // duplicates double-fire, and dialogs sit outside these
+            // roots so they never see dialog-focused keypresses.
             .on_action(cx.listener(|this, _: &NextTab, window, cx| {
                 this.cycle_tab(1, window, cx);
             }))
@@ -6719,16 +6722,9 @@ impl SqlHighlandView {
             .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
                 this.cycle_tab(-1, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
-                let tab_id = this.active_tab().id.clone();
-                this.request_close_tab(&tab_id, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &NewTab, window, cx| {
-                let tab_id = this.add_tab(None, String::new(), window, cx);
-                if let Some(ix) = this.tab_index(&tab_id) {
-                    this.select_tab(ix, window, cx);
-                }
-            }))
+            // NewTab/CloseTab stay app-global (main.rs): element-level
+            // duplicates double-fire, and dialogs sit outside this
+            // root so they never see dialog-focused keypresses.
             .on_action(cx.listener(|this, _: &OpenSql, window, cx| {
                 this.open_sql_file(window, cx);
             }))

@@ -47,6 +47,37 @@ fn main() {
         // editor/input key context is focused.
         cx.bind_keys([KeyBinding::new("cmd-,", app::OpenSettings, None)]);
         cx.bind_keys([KeyBinding::new("cmd-q", app::Quit, None)]);
+        // Tab commands live here too (same single-path + defer design as
+        // above): element-level duplicates are gone, and dialogs render
+        // outside the sidebar/main roots, so element handlers never see
+        // dialog-focused keypresses. Active-tab snapshot happens at
+        // execution time, after the take is released.
+        cx.on_action(|_: &app::NewTab, cx: &mut App| {
+            cx.defer(|cx| {
+                if let Some(handle) = cx.windows().into_iter().next() {
+                    let _ = handle.update(cx, |_, window, cx| {
+                        if let Some(view) = app::app_view(cx) {
+                            view.update(cx, |this, cx| {
+                                this.new_tab_command(window, cx);
+                            });
+                        }
+                    });
+                }
+            });
+        });
+        cx.on_action(|_: &app::CloseTab, cx: &mut App| {
+            cx.defer(|cx| {
+                if let Some(handle) = cx.windows().into_iter().next() {
+                    let _ = handle.update(cx, |_, window, cx| {
+                        if let Some(view) = app::app_view(cx) {
+                            view.update(cx, |this, cx| {
+                                this.close_active_tab_command(window, cx);
+                            });
+                        }
+                    });
+                }
+            });
+        });
         cx.on_action(|_: &app::Quit, cx: &mut App| {
             // Deferred for the same window-take reason as above.
             cx.defer(|cx| {
