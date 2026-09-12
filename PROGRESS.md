@@ -494,3 +494,20 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   `form_config`. Pills gained `.test_support()` for layout assertions.
 - Verified headless (Oracle pill visible in Add dialog), clean `clippy`,
   101 lib + themes + browser_tree green.
+
+## Sidebar rail, editor env ring, live-row signal (2026-09-12)
+
+- Collapsed rail is expand + settings only: rail-add and the per-icon
+  connection list (with its menus) removed; connections/adding live in
+  the expanded pane. Probed headless (collapse hides rail entries).
+- Query editor wears a subtle 1px rounded ring in the bound
+  connection's environment color (45% opacity, same hue as its badge);
+  none when untagged/unbound. `tab_environment` helper shared with the
+  connection picker badge.
+- Live connection no longer washes the whole row green: the Database
+  icon tints success + the 3px status bar goes green (muted icon +
+  border-tone bar when idle). The status bar had in fact never painted
+  (row-level child of a vertical div = zero height); moved into the
+  horizontal row body where it stretches to full row height — probed
+  3x24px visible.
+- Verified: clean `clippy`, 101 lib + themes + browser_tree green.

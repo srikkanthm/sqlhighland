@@ -5752,6 +5752,16 @@ impl SqlHighlandView {
                     .items_stretch()
                     .px_2()
                     .py_1()
+                    // Status bar: the live indicator — success green when
+                    // connected, faint border tone when idle. First child
+                    // of the horizontal body so items_stretch gives it
+                    // full row height (as a row-level child it collapsed
+                    // to zero height and never painted).
+                    .child(div().id(("conn-status", ix)).test_support().w(px(3.)).rounded_full().bg(if is_live {
+                        cx.theme().success
+                    } else {
+                        cx.theme().border
+                    }))
                     // Schema-browser disclosure: per-connection tree below.
                     .child(
                         Button::new(("conn-expand", ix))
@@ -5772,7 +5782,13 @@ impl SqlHighlandView {
                             .icon(KitIcon::Database)
                             .ghost()
                             .with_size(px(24.))
-                            .text_color(cx.theme().muted_foreground),
+                            // Live state reads from the icon + the 3px
+                            // status bar, not a full-row wash.
+                            .text_color(if is_live {
+                                cx.theme().success
+                            } else {
+                                cx.theme().muted_foreground
+                            }),
                     )
                     .child(
                         v_flex()
@@ -5803,9 +5819,6 @@ impl SqlHighlandView {
             .id(("conn-row", ix))
             .w_full()
             .rounded_md()
-            // Live rows get a success-tinted background so the active
-            // connection reads at a glance, not just via the status bar.
-            .when(is_live, |this| this.bg(cx.theme().success.opacity(0.12)))
             .hover(|this| this.bg(cx.theme().accent.opacity(0.5)))
             .context_menu(move |menu, _, _| {
                 let connect_label = if is_live { "Disconnect" } else { "Connect" };
@@ -5842,14 +5855,7 @@ impl SqlHighlandView {
                     ConnMenuOp::Delete,
                 ))
             })
-            .child(row_body)
-                    // Status bar: the live indicator — success green when
-                    // connected, faint border tone when idle.
-                    .child(div().w(px(3.)).rounded_full().bg(if is_live {
-                        cx.theme().success
-                    } else {
-                        cx.theme().border
-                    }));
+            .child(row_body);
         // NOTE: the tree is a SIBLING of the row div, never a child — the
         // row div owns the connection context menu, and anything nested
         // inside it (visually below or not) shares its hitbox and fires
@@ -5900,9 +5906,9 @@ impl SqlHighlandView {
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         if self.sidebar_collapsed {
-            // Slim rail: connections stay visible (and status-readable) even
-            // with the pane closed. Clicking anything here expands; all
-            // connection actions live in the full pane's context menu.
+            // Slim rail: just expand + settings. Connections (and adding)
+            // live only in the expanded pane — the rail stays a narrow
+            // launcher, not a second connection list.
             return v_flex()
                 .w(px(44.))
                 .h_full()
@@ -5944,100 +5950,7 @@ impl SqlHighlandView {
                                 .on_click(cx.listener(Self::toggle_sidebar)),
                         ),
                 )
-                .child(
-                    div()
-                        .w_full()
-                        .h(px(36.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            Button::new("rail-add")
-                                .icon(KitIcon::Plus)
-                                .ghost()
-                                .small()
-                                .tooltip("Add connection")
-                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                    this.start_add(window, cx);
-                                })),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .w_full()
-                        .min_h_0()
-                        .overflow_y_scrollbar()
-                        .child(v_flex().w_full().items_center().gap_1().children(
-                            self.connections.iter().enumerate().map(|(ix, cfg)| {
-                                let is_live = self.live.contains(&cfg.id);
-                                let view = cx.entity().downgrade();
-                                let conn_id = cfg.id.clone();
-                                div()
-                                    .id(("conn-rail-wrap", ix))
-                                    .context_menu(move |menu, _, _| {
-                                        let connect_label =
-                                            if is_live { "Disconnect" } else { "Connect" };
-                                        let connect_icon = if is_live {
-                                            KitIcon::Unplug
-                                        } else {
-                                            KitIcon::Plug
-                                        };
-                                        let connect_op = if is_live {
-                                            ConnMenuOp::Disconnect
-                                        } else {
-                                            ConnMenuOp::Connect
-                                        };
-                                        menu.item(conn_menu_item(
-                                            connect_label,
-                                            connect_icon,
-                                            view.clone(),
-                                            conn_id.clone(),
-                                            connect_op,
-                                        ))
-                                        .item(conn_menu_item(
-                                            "Edit…",
-                                            KitIcon::SquarePen,
-                                            view.clone(),
-                                            conn_id.clone(),
-                                            ConnMenuOp::Edit,
-                                        ))
-                                        .separator()
-                                        .item(
-                                            conn_menu_item(
-                                                "Delete",
-                                                KitIcon::X,
-                                                view.clone(),
-                                                conn_id.clone(),
-                                                ConnMenuOp::Delete,
-                                            ),
-                                        )
-                                    })
-                                    .child(
-                                        Button::new(("conn-rail", ix))
-                                            .icon(KitIcon::Database)
-                                            .ghost()
-                                            .with_size(px(24.))
-                                            .tooltip(format!(
-                                                "{}{} — {}@{}/{}{}",
-                                                cfg.environment
-                                                    .label()
-                                                    .map(|e| format!("[{e}] "))
-                                                    .unwrap_or_default(),
-                                                cfg.name,
-                                                cfg.user,
-                                                cfg.host,
-                                                cfg.service_name,
-                                                if is_live { " (connected)" } else { "" }
-                                            ))
-                                            .when(is_live, |b| {
-                                                b.bg(cx.theme().success.opacity(0.15))
-                                            })
-                                            .on_click(cx.listener(Self::toggle_sidebar)),
-                                    )
-                            }),
-                        )),
-                )
+                .child(div().flex_1())
                 .child(
                     div()
                         .w_full()
@@ -6234,12 +6147,7 @@ impl SqlHighlandView {
             .as_deref()
             .map(|cid| self.live.contains(cid))
             .unwrap_or(false);
-        let tab_env = tab
-            .connection_id
-            .as_deref()
-            .and_then(|cid| self.connections.iter().find(|c| c.id == cid))
-            .map(|c| c.environment)
-            .unwrap_or(Environment::Untagged);
+        let tab_env = self.tab_environment(tab);
         let view = cx.entity().downgrade();
         let tab_id = tab.id.clone();
         let current_conn = tab.connection_id.clone();
@@ -6296,10 +6204,23 @@ impl SqlHighlandView {
             .when_some(env_tag(tab_env, cx), |this, tag| this.child(tag))
     }
 
+    /// The bound connection's environment (Untagged when unbound): drives
+    /// the env badge in the picker and the editor's tint ring.
+    fn tab_environment(&self, tab: &QueryTab) -> Environment {
+        tab.connection_id
+            .as_deref()
+            .and_then(|cid| self.connections.iter().find(|c| c.id == cid))
+            .map(|c| c.environment)
+            .unwrap_or(Environment::Untagged)
+    }
+
     fn render_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = self.active_tab();
         let editor = tab.editor.clone();
         let pending = tab.pending_txn;
+        // Subtle ring in the bound connection's environment color (same
+        // hue as its badge): none when untagged.
+        let ring = env_color(self.tab_environment(tab), cx).map(|c| c.opacity(0.45));
         v_flex()
             .id("query-section")
             .size_full()
@@ -6425,9 +6346,16 @@ impl SqlHighlandView {
                     .child(self.render_connection_picker(cx)),
             )
             .child(
-                div().min_h_0().flex_1().id("sql-editor").child(
-                    Editor::new(&editor).size_full(),
-                ),
+                div()
+                    .min_h_0()
+                    .flex_1()
+                    .id("sql-editor")
+                    .when_some(ring, |this, ring| {
+                        this.border_1().border_color(ring).rounded_md()
+                    })
+                    .child(
+                        Editor::new(&editor).size_full(),
+                    ),
             )
     }
 
