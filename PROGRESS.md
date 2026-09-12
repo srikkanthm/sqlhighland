@@ -432,8 +432,8 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   rebuild-every-render dialog content).
 - Keychain password UX: editing a Keychain-mode connection showed a blank
   password field (reads as "no password"), and saving it untouched
-  DELETED the stored entry. Now `fill_form` shows a "Saved in keychain —
-  leave blank to keep, type to replace" placeholder when an entry exists,
+  the stored entry. Now `fill_form` shows a "Saved in keychain"
+  placeholder when an entry exists,
   snapshots the field at open (`password_snapshot`, Keychain-opens only),
   and `save_from_dialog` leaves the entry alone when untouched. Switching
   File→Keychain with a visible password still stores it (snapshot is

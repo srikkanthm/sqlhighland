@@ -2128,7 +2128,7 @@ impl SqlHighlandView {
             && !cfg.id.is_empty()
             && crate::keychain::get(&cfg.id).ok().flatten().is_some_and(|s| !s.is_empty())
         {
-            "Saved in keychain — leave blank to keep, type to replace".into()
+            "Saved in keychain".into()
         } else {
             "password".into()
         };
@@ -2858,6 +2858,10 @@ impl SqlHighlandView {
                             v_flex()
                                 .gap_2()
                                 .w_full()
+                                // Gutter for the overlaid scrollbar thumb
+                                // (8px): without it the thumb sits on top
+                                // of the full-width inputs.
+                                .pr_3()
                                 .child(dialog_field("Name", &name, false, muted))
                         .child(dialog_field("Host", &host, false, muted))
                         .child(
@@ -3637,7 +3641,9 @@ impl SqlHighlandView {
                 .track_scroll(&scroll_handle)
                 .flex()
                 .flex_col()
-                .gap_1();
+                .gap_1()
+                // Gutter for the overlaid scrollbar thumb (see dialog).
+                .pr_3();
             for (rix, r) in shown.iter().enumerate() {
                 let pick_view = view.clone();
                 let pick_tab = tab_id.clone();
