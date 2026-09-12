@@ -50,3 +50,8 @@ gpui-kit = { version = "=0.6.1", features = ["test-support", "tree-sitter-sql"] 
 name = "ui_picker"
 path = "tests/ui_picker.rs"
 required-features = ["gui"]
+
+[[test]]
+name = "menus"
+path = "tests/menus.rs"
+required-features = ["gui"]

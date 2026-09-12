@@ -1352,6 +1352,12 @@ impl SqlHighlandView {
             TriggerComplete,
             Some("Input"),
         )]);
+        // Refresh the native menu now that every binding exists: AppKit
+        // resolves key equivalents from the keymap snapshot at set_menus
+        // time, and main.rs runs before these bindings are registered
+        // (leaving menu items without shown shortcuts). Idempotent rebuild;
+        // re-call here if bindings are ever registered later than this.
+        cx.set_menus(app_menus());
 
         let prefs = Preferences::load();
         let mut this = Self {
@@ -6922,6 +6928,61 @@ fn env_tag(env: Environment, cx: &App) -> Option<AnyElement> {    let label = en
 /// current one highlighted. `pick` syncs the dialog-local cell; callers
 /// also mirror it into the matching `pending_*` view field + notify.
 /// Ids are namespaced per row via `id_base`.
+/// Native application menu: every command with a shortcut is listed
+/// (except CopySelection: its ⌘C is grid-scoped, and a menu item would
+/// route AppKit's Cmd+C through global dispatch, breaking normal copy
+/// in the editor). Key equivalents render from the keymap. Menu dispatch
+/// reaches the same handlers as the keypresses; focus-gated items grey
+/// out via is_action_available. Defined here (not main.rs) so tests can
+/// assert coverage when shortcuts are added.
+pub fn app_menus() -> Vec<Menu> {
+    vec![
+        Menu {
+            name: "SQLHighland".into(),
+            items: vec![
+                MenuItem::action("Preferences…", OpenSettings),
+                MenuItem::Separator,
+                MenuItem::action("Quit", Quit),
+            ],
+            disabled: false,
+        },
+        Menu {
+            name: "File".into(),
+            items: vec![
+                MenuItem::action("New Tab", NewTab),
+                MenuItem::action("New Tab with Connection…", PickConnection),
+                MenuItem::action("Close Tab", CloseTab),
+                MenuItem::Separator,
+                MenuItem::action("Open SQL File…", OpenSql),
+                MenuItem::action("Save", SaveSql),
+                MenuItem::action("Save As…", SaveSqlAs),
+            ],
+            disabled: false,
+        },
+        Menu {
+            name: "Query".into(),
+            items: vec![
+                MenuItem::action("Run Query", RunQuery),
+                MenuItem::action("Format Query", FormatQuery),
+                MenuItem::Separator,
+                MenuItem::action("Commit Transaction", CommitTxn),
+                MenuItem::action("Rollback Transaction", RollbackTxn),
+                MenuItem::Separator,
+                MenuItem::action("Trigger Completion", TriggerComplete),
+            ],
+            disabled: false,
+        },
+        Menu {
+            name: "View".into(),
+            items: vec![
+                MenuItem::action("Next Tab", NextTab),
+                MenuItem::action("Previous Tab", PrevTab),
+            ],
+            disabled: false,
+        },
+    ]
+}
+
 fn dialog_pills<T: Copy + PartialEq + 'static>(
     id_base: &'static str,
     options: &[(T, &'static str)],
