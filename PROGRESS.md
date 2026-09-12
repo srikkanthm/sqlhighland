@@ -484,3 +484,13 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   untoggle-keeps-picker, quit dispatch with dialog open. Clean `clippy`,
   101 lib + themes + browser_tree + ui_picker green except
   pre-existing `cmd_w` flake (fails on clean tree).
+
+## Database type row in connection dialog (2026-09-12)
+
+- The dialog now shows Database type as its first row: a single selected
+  Oracle pill (only engine today). `DbEngine::label()` carries the text;
+  a second engine adds one pill next to Oracle's. `pending_engine`
+  (dialog-owned, like role/kind) replaces the preserve-stored hack in
+  `form_config`. Pills gained `.test_support()` for layout assertions.
+- Verified headless (Oracle pill visible in Add dialog), clean `clippy`,
+  101 lib + themes + browser_tree green.

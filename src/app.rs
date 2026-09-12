@@ -35,7 +35,7 @@ use crate::model::{
     csv_row, tab_name_from_sql, ColumnInfo, ConnectionConfig, Environment, OracleRole, PasswordMode,
     ServiceKind,
 };
-use crate::schema::{OracleProvider, SchemaProvider as _};
+use crate::schema::{DbEngine, OracleProvider, SchemaProvider as _};
 use crate::session::SessionPool;
 use crate::sql::{
     apply_substitutions, exec_summary, find_bind_vars, find_substitution_vars, format_sql, is_dml,
@@ -1113,6 +1113,10 @@ pub struct SqlHighlandView {
     pending_service_kind: ServiceKind,
     pending_ssl: bool,
     pending_password_mode: PasswordMode,
+    /// Pending database engine for the open connection dialog. Only
+    /// Oracle exists today, so the row is display-only — but the dialog
+    /// owns the value like role/kind, ready for a second pill.
+    pending_engine: DbEngine,
     /// Dialog open counter + the counter value when Settings opened.
     /// Cmd+, toggles Settings off only when no other dialog opened since
     /// (top must be Settings); otherwise Settings stacks on top instead
@@ -1325,6 +1329,7 @@ impl SqlHighlandView {
             pending_service_kind: ServiceKind::default(),
             pending_ssl: false,
             pending_password_mode: PasswordMode::default(),
+            pending_engine: DbEngine::default(),
             dialog_seq: std::cell::Cell::new(0),
             settings_seq: std::cell::Cell::new(None),
             password_snapshot: None,
@@ -2099,9 +2104,7 @@ impl SqlHighlandView {
         // Preserve the edited entry's id so live sessions keep matching.
         let edited = self.editing.and_then(|ix| self.connections.get(ix));
         let id = edited.map(|c| c.id.clone()).unwrap_or_default();
-        // No engine picker in the dialog yet: every connection is Oracle.
-        // Preserve the stored engine when editing (forward-compat).
-        let engine = edited.map(|c| c.engine).unwrap_or_default();
+        // The dialog owns the engine like role/kind (today always Oracle).
         // Keychain/Ask modes never persist the typed secret in the file —
         // save_from_dialog routes it to the keychain (or drops it).
         let password = match self.pending_password_mode {
@@ -2117,7 +2120,7 @@ impl SqlHighlandView {
             user: self.user.read(cx).value().to_string(),
             password,
             environment: self.pending_env,
-            engine,
+            engine: self.pending_engine,
             role: self.pending_role,
             service_kind: self.pending_service_kind,
             ssl: self.pending_ssl,
@@ -2182,6 +2185,7 @@ impl SqlHighlandView {
         self.pending_service_kind = ServiceKind::default();
         self.pending_ssl = false;
         self.pending_password_mode = PasswordMode::default();
+        self.pending_engine = DbEngine::default();
         // Blank form: text fields empty, standard Oracle port kept.
         self.fill_form(
             &ConnectionConfig {
@@ -2210,6 +2214,7 @@ impl SqlHighlandView {
         self.pending_service_kind = cfg.service_kind;
         self.pending_ssl = cfg.ssl;
         self.pending_password_mode = cfg.password_mode;
+        self.pending_engine = cfg.engine;
         self.fill_form(&cfg, window, cx);
         self.open_connection_dialog(&title, window, cx);
     }
@@ -2877,6 +2882,9 @@ impl SqlHighlandView {
         let ssl_cell: Rc<RefCell<bool>> = Rc::new(RefCell::new(self.pending_ssl));
         let pwmode_cell: Rc<RefCell<PasswordMode>> =
             Rc::new(RefCell::new(self.pending_password_mode));
+        // Same pattern for the engine row (today a single Oracle pill).
+        let engine_cell: Rc<RefCell<DbEngine>> =
+            Rc::new(RefCell::new(self.pending_engine));
         // Owned scroll handle: the form now spans role/service/SSL/password
         // rows, so small windows overflow. Explicit handle + overflow_y_scroll
         // (NOT the Scrollable wrapper, whose caller-id keying misbehaves for
@@ -2918,6 +2926,31 @@ impl SqlHighlandView {
                                 // (16px): without it the thumb sits on top
                                 // of the full-width inputs.
                                 .pr_5()
+                                .child(
+                                    v_flex()
+                                        .gap_1()
+                                        .child(div().text_xs().text_color(muted).child("Database type"))
+                                        .child({
+                                            let cell = engine_cell.clone();
+                                            let current = *cell.borrow();
+                                            let row_view = view.clone();
+                                            dialog_pills(
+                                                "conn-engine",
+                                                &[(DbEngine::Oracle, DbEngine::Oracle.label())],
+                                                current,
+                                                Rc::new(move |e, cx: &mut App| {
+                                                    *cell.borrow_mut() = e;
+                                                    row_view
+                                                        .update(cx, |this, cx| {
+                                                            this.pending_engine = e;
+                                                            cx.notify();
+                                                        })
+                                                        .ok();
+                                                }),
+                                                cx
+                                            )
+                                        })
+                                )
                                 .child(dialog_field("Name", &name, false, muted))
                         .child(dialog_field("Host", &host, false, muted))
                         .child(
@@ -6906,6 +6939,7 @@ fn dialog_pills<T: Copy + PartialEq + 'static>(
             let pick = pick.clone();
             div()
                 .id((id_base, ix))
+                .test_support()
                 .px_2()
                 .py_1()
                 .rounded_md()

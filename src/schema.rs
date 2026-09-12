@@ -21,6 +21,16 @@ pub enum DbEngine {
     Oracle,
 }
 
+impl DbEngine {
+    /// Display label for the connection dialog's Database type row.
+    /// New variants add their label here (and a pill next to Oracle's).
+    pub fn label(self) -> &'static str {
+        match self {
+            DbEngine::Oracle => "Oracle",
+        }
+    }
+}
+
 /// One schema (owner) with its objects grouped for the tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaGroup {
