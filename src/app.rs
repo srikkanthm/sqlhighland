@@ -38,9 +38,9 @@ use crate::model::{
 use crate::schema::{DbEngine, OracleProvider, SchemaProvider as _};
 use crate::session::SessionPool;
 use crate::sql::{
-    apply_substitutions, exec_summary, expand_script_file, find_bind_vars, find_substitution_vars,
-    format_sql, is_dml, line_at, parse_at_directive, split_statements, statement_at,
-    statement_at_range, statement_kind, txn_end, StatementKind, SubVar,
+    apply_substitutions, exec_summary, expand_at_directives, expand_script_file, find_bind_vars,
+    find_substitution_vars, format_sql, is_dml, line_at, parse_at_directive, split_statements,
+    statement_at, statement_at_range, statement_kind, txn_end, StatementKind, SubVar,
 };
 use gpui_kit::base::SelectableText;
 use gpui_kit::base::TestSupportExt as _;
@@ -90,6 +90,7 @@ gpui_kit::actions!(
         NewTab,
         PickConnection,
         RebindConnection,
+        RunScript,
         OpenSql,
         SaveSql,
         SaveSqlAs,
@@ -990,6 +991,9 @@ enum PickAfter {
     NewTab,
     /// Shift+Cmd+K mode: rebind the ACTIVE tab to the pick (no run).
     Rebind,
+    /// Whole-buffer script mode: bind the tab and run its buffer as a
+    /// script (fresh buffer text is re-read on resume, never stored).
+    ScriptBuffer,
 }
 
 #[derive(Debug, Clone)]
@@ -1000,10 +1004,23 @@ struct PendingPick {
 }
 
 /// Password prompt in flight: which connection, and the run to resume
-/// afterwards (`None` = plain connect from the sidebar/tree).
+/// afterwards (`None` = plain connect from the sidebar/tree). The resume
+/// carries how to re-enter: a stored statement re-runs, a buffer script
+/// re-reads the live editor text.
 struct PendingPassword {
     conn_id: String,
-    run: Option<(String, String)>,
+    run: Option<(String, String, PickAfter)>,
+}
+
+/// How a script run resumes after the connection picker or password
+/// prompt. File entries re-expand the directive line; buffer runs
+/// re-read the live editor text.
+#[derive(Debug, Clone)]
+enum ScriptResume {
+    /// File entry: the raw `@…` line, re-expanded on resume.
+    File(String),
+    /// Whole buffer: re-read from the editor on resume.
+    Buffer,
 }
 
 /// One row in the variables dialog: `&name` substitution or `:name` bind.
@@ -1144,6 +1161,31 @@ fn pick_connection_for_rebind(
     .ok();
     // Outside the update above: reading the leased view here would panic.
     focus_tab_editor(view, tab_id, window, cx);
+}
+
+/// Bind the tab to the picked connection and run its whole buffer as a
+/// script (Run Script flow on an unbound tab): closes the picker, binds,
+/// then re-reads the live editor text and enters the shared script
+/// gates (variables dialog next, if needed).
+fn pick_connection_and_resume_buffer(
+    view: &WeakEntity<SqlHighlandView>,
+    tab_id: &str,
+    conn_id: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    // Close the picker first so a variables dialog opened below lands on a
+    // clean dialog stack.
+    window.close_dialog(cx);
+    view.update(cx, |this, cx| {
+        if let Some(t) = this.tab_by_id(tab_id) {
+            t.connection_id = Some(conn_id.to_string());
+        }
+        this.pending_pick = None;
+        this.persist_tabs();
+        this.run_buffer_as_script(tab_id, window, cx);
+    })
+    .ok();
 }
 
 /// Return keyboard focus to the tab's editor so the next Cmd+Enter works
@@ -1398,6 +1440,10 @@ impl SqlHighlandView {
             TriggerComplete,
             Some("Input"),
         )]);
+        // Whole buffer as a script (SQL Developer F5 equivalent, friendlier
+        // chord): paired with Cmd+Enter (statement) as Shift+Cmd+Enter
+        // (buffer). No kit Input binding uses it (checked), editor-only.
+        cx.bind_keys([KeyBinding::new("shift-cmd-enter", RunScript, Some("Input"))]);
         // Refresh the native menu now that every binding exists: AppKit
         // resolves key equivalents from the keymap snapshot at set_menus
         // time, and main.rs runs before these bindings are registered
@@ -3495,7 +3541,7 @@ impl SqlHighlandView {
     fn with_password(
         &mut self,
         mut cfg: ConnectionConfig,
-        run: Option<(String, String)>,
+        run: Option<(String, String, PickAfter)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<ConnectionConfig> {
@@ -3579,7 +3625,10 @@ impl SqlHighlandView {
         self.unlocked.insert(pending.conn_id.clone(), pw);
         window.close_dialog(cx);
         match pending.run {
-            Some((tab_id, sql)) => self.start_run(&tab_id, sql, window, cx),
+            Some((tab_id, _, PickAfter::ScriptBuffer)) => {
+                self.run_buffer_as_script(&tab_id, window, cx)
+            }
+            Some((tab_id, sql, _)) => self.start_run(&tab_id, sql, window, cx),
             None => self.connect_connection(&pending.conn_id, window, cx),
         }
     }
@@ -3756,7 +3805,7 @@ impl SqlHighlandView {
             .find(|c| c.id == conn_id)
             .cloned()
             .map(|cfg| {
-                let run = Some((tab_id.to_string(), sql.clone()));
+                let run = Some((tab_id.to_string(), sql.clone(), PickAfter::Run));
                 self.with_password(cfg, run, window, cx).is_some()
             })
             .unwrap_or(false);
@@ -3803,10 +3852,9 @@ impl SqlHighlandView {
     }
 
     /// Entry point for an `@` / `@@` / `START` script run: expands nested
-    /// includes, then follows the same gates as [`Self::start_run`]
-    /// (connection → password → one variables dialog for the whole
-    /// script) before the sequential runner. `directive_line` is the raw
-    /// `@…` line (caret line or resumed picker/password text).
+    /// includes, then follows the shared script gates below.
+    /// `directive_line` is the raw `@…` line (caret line or resumed
+    /// picker/password text).
     fn start_script_run(
         &mut self,
         tab_id: &str,
@@ -3831,33 +3879,89 @@ impl SqlHighlandView {
                 return;
             }
         };
-        let script_name = expanded
+        let name = expanded
             .files
             .first()
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| directive.path.clone());
-        let statements: Vec<String> = split_statements(&expanded.text)
+        self.start_script_common(
+            tab_id,
+            format!("@{name}"),
+            expanded.text,
+            ScriptResume::File(directive_line),
+            window,
+            cx,
+        );
+    }
+
+    /// "Run Script" (whole buffer, SQL Developer F5): expands `@` lines
+    /// and plain SQL together, then follows the shared script gates. The
+    /// buffer is re-read on every resume, so edits made while a picker
+    /// or password prompt is open are picked up.
+    fn run_buffer_as_script(&mut self, tab_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.tab_index(tab_id) else {
+            return;
+        };
+        let text = self.tabs[ix].editor.read(cx).value().to_string();
+        if text.trim().is_empty() {
+            self.tabs[ix].output = Some(Output::info("Buffer is empty — nothing to run"));
+            cx.notify();
+            return;
+        }
+        let base = self.script_base_dir(&tab_id);
+        let expanded = match expand_at_directives(&text, &base) {
+            Ok(e) => e,
+            Err(msg) => {
+                self.tabs[ix].output = Some(Output::error(msg));
+                cx.notify();
+                return;
+            }
+        };
+        let display = self.tabs[ix].name.to_string();
+        self.start_script_common(tab_id, display, expanded.text, ScriptResume::Buffer, window, cx);
+    }
+
+    /// Shared script gates: split → connection → password → one
+    /// variables dialog for the whole script → sequential runner.
+    /// `display` names the run verbatim in summaries (`@seed.sql` for
+    /// files, the tab name for buffers).
+    fn start_script_common(
+        &mut self,
+        tab_id: &str,
+        display: String,
+        expanded_text: String,
+        resume: ScriptResume,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let statements: Vec<String> = split_statements(&expanded_text)
             .into_iter()
             .map(|s| s.text)
             .collect();
+        let Some(ix) = self.tab_index(tab_id) else {
+            return;
+        };
         if statements.is_empty() {
             self.tabs[ix].output = Some(Output::info(format!(
-                "Script {script_name} is empty — nothing to run"
+                "{display} is empty — nothing to run"
             )));
             cx.notify();
             return;
         }
         // Connection check (same as start_run): unbound tabs get the
-        // picker carrying the directive line, and resume re-enters here
-        // via start_run's detection.
+        // picker, and resume re-enters via the `after` mode below.
+        let (resume_sql, resume_after) = match &resume {
+            ScriptResume::File(line) => (line.clone(), PickAfter::Run),
+            ScriptResume::Buffer => (String::new(), PickAfter::ScriptBuffer),
+        };
         let conn_id = match self.tabs[ix].connection_id.clone() {
             Some(id) if self.connections.iter().any(|c| c.id == id) => id,
             _ => {
                 self.pending_pick = Some(PendingPick {
                     tab_id: tab_id.to_string(),
-                    sql: directive_line,
-                    after: PickAfter::Run,
+                    sql: resume_sql,
+                    after: resume_after,
                 });
                 self.open_conn_pick_dialog(window, cx);
                 return;
@@ -3873,7 +3977,7 @@ impl SqlHighlandView {
             .find(|c| c.id == conn_id)
             .cloned()
             .map(|cfg| {
-                let run = Some((tab_id.to_string(), directive_line.clone()));
+                let run = Some((tab_id.to_string(), resume_sql.clone(), resume_after));
                 self.with_password(cfg, run, window, cx).is_some()
             })
             .unwrap_or(false);
@@ -3881,8 +3985,8 @@ impl SqlHighlandView {
             return;
         }
         // One variables dialog for the whole expanded script.
-        let sub_vars = find_substitution_vars(&expanded.text);
-        let bind_names = find_bind_vars(&expanded.text);
+        let sub_vars = find_substitution_vars(&expanded_text);
+        let bind_names = find_bind_vars(&expanded_text);
         let defined: std::collections::HashMap<String, String> =
             self.defines.get(&conn_id).cloned().unwrap_or_default();
         let subs_needed: Vec<SubVar> = sub_vars
@@ -3890,20 +3994,20 @@ impl SqlHighlandView {
             .filter(|v| !defined.contains_key(&v.name))
             .collect();
         if subs_needed.is_empty() && bind_names.is_empty() {
-            let final_sql = apply_substitutions(&expanded.text, &defined);
+            let final_sql = apply_substitutions(&expanded_text, &defined);
             let final_statements: Vec<String> = split_statements(&final_sql)
                 .into_iter()
                 .map(|s| s.text)
                 .collect();
-            self.run_script(tab_id, script_name, final_statements, Vec::new(), cx);
+            self.run_script(tab_id, display, final_statements, Vec::new(), cx);
             return;
         }
         self.pending_bind = Some(PendingBind {
             tab_id: tab_id.to_string(),
-            sql: expanded.text,
+            sql: expanded_text,
             subs: subs_needed,
             binds: bind_names,
-            script: Some(script_name),
+            script: Some(display),
         });
         self.open_bind_dialog(window, cx);
     }
@@ -4040,7 +4144,7 @@ impl SqlHighlandView {
                         .text_color(muted)
                         .child(match pick_mode {
                             PickAfter::Run => "No connections yet — add one to run this statement.",
-                            PickAfter::NewTab | PickAfter::Rebind => {
+                            PickAfter::NewTab | PickAfter::Rebind | PickAfter::ScriptBuffer => {
                                 "No connections yet — add one to get started."
                             }
                         }),
@@ -4064,6 +4168,9 @@ impl SqlHighlandView {
                             }
                             PickAfter::Rebind => {
                                 "Type to filter, Enter rebinds the active tab to the highlighted match."
+                            }
+                            PickAfter::ScriptBuffer => {
+                                "Type to filter, Enter runs the buffer script on the highlighted match."
                             }
                         }),
                 );
@@ -4146,6 +4253,11 @@ impl SqlHighlandView {
                                 }
                                 PickAfter::Rebind => {
                                     pick_connection_for_rebind(
+                                        &pick_view, &pick_tab, &conn_id, window, cx,
+                                    );
+                                }
+                                PickAfter::ScriptBuffer => {
+                                    pick_connection_and_resume_buffer(
                                         &pick_view, &pick_tab, &conn_id, window, cx,
                                     );
                                 }
@@ -4263,6 +4375,11 @@ impl SqlHighlandView {
                                         &ok_view, &ok_tab, &row.id, window, cx,
                                     );
                                 }
+                                PickAfter::ScriptBuffer => {
+                                    pick_connection_and_resume_buffer(
+                                        &ok_view, &ok_tab, &row.id, window, cx,
+                                    );
+                                }
                             }
                             false
                         }
@@ -4318,11 +4435,11 @@ impl SqlHighlandView {
             });
         }
         // Short single-line preview so users know what they're feeding.
-        // Scripts show their name + statement count instead of raw text.
+        // Scripts show their display name + statement count instead.
         let preview: SharedString = match &pending.script {
-            Some(name) => {
+            Some(display) => {
                 let n = split_statements(&pending.sql).len();
-                format!("@{name} · {n} statements").into()
+                format!("{display} · {n} statements").into()
             }
             None => {
                 let flat: String = pending.sql.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -4795,7 +4912,7 @@ impl SqlHighlandView {
     fn run_script(
         &mut self,
         tab_id: &str,
-        script_name: String,
+        display: String,
         statements: Vec<String>,
         binds: Vec<BindParam>,
         cx: &mut Context<Self>,
@@ -4834,7 +4951,7 @@ impl SqlHighlandView {
         self.tabs[ix].run_token = self.tabs[ix].run_token.wrapping_add(1);
         self.tabs[ix].run_started = Some(std::time::Instant::now());
         let run_token = self.tabs[ix].run_token;
-        self.tabs[ix].last_sql = format!("@{script_name}");
+        self.tabs[ix].last_sql = display.clone();
         for stmt in &statements {
             self.bump_usage(&conn_id, stmt);
         }
@@ -4988,7 +5105,7 @@ impl SqlHighlandView {
                 this.tabs[ix].run_started = None;
                 let summary = |errors: usize| {
                     format!(
-                        "@{script_name}: {total} statements, {errors} error{} · {total_ms} ms",
+                        "{display}: {total} statements, {errors} error{} · {total_ms} ms",
                         if errors == 1 { "" } else { "s" }
                     )
                 };
@@ -6919,6 +7036,14 @@ impl SqlHighlandView {
                     this.run_at_cursor(window, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &RunScript, window, cx| {
+                // Same focus gate: the Input-scoped binding must not fire
+                // from dialog fields or the picker search.
+                if this.editor_focused(window, cx) {
+                    let tab_id = this.active_tab().id.clone();
+                    this.run_buffer_as_script(&tab_id, window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &FormatQuery, window, cx| {
                 if this.editor_focused(window, cx) {
                     this.format_now(window, cx);
@@ -6966,6 +7091,20 @@ impl SqlHighlandView {
                             .loading(tab.busy)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.run_at_cursor(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("run-script")
+                            .secondary()
+                            .small()
+                            .w(px(ACTION_BUTTON_W))
+                            .icon(KitIcon::FileTerminal)
+                            .label("Script")
+                            .tooltip("Run buffer as script (⇧⌘↵)")
+                            .loading(tab.busy)
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                let tab_id = this.active_tab().id.clone();
+                                this.run_buffer_as_script(&tab_id, window, cx);
                             })),
                     )
                     .child(
@@ -7563,11 +7702,12 @@ pub fn app_menus() -> Vec<Menu> {
             ],
             disabled: false,
         },
-        Menu {
-            name: "Query".into(),
-            items: vec![
-                MenuItem::action("Run Query", RunQuery),
-                MenuItem::action("Format Query", FormatQuery),
+            Menu {
+                name: "Query".into(),
+                items: vec![
+                    MenuItem::action("Run Query", RunQuery),
+                    MenuItem::action("Run as Script", RunScript),
+                    MenuItem::action("Format Query", FormatQuery),
                 MenuItem::Separator,
                 MenuItem::action("Commit Transaction", CommitTxn),
                 MenuItem::action("Rollback Transaction", RollbackTxn),

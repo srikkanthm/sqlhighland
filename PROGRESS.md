@@ -627,3 +627,16 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   -> trail + `✗ #2/3 — ORA-00942`, asserted from the pane via
   clipboard. Clean `clippy`, 108 lib, 11 live, menus/themes/
   browser_tree green, GUI builds.
+
+## Run Script button + Shift+Cmd+Enter (2026-09-12)
+
+- Whole buffer through the script pipeline (SQL Developer F5): new
+  "Script" header button (FileTerminal icon) + `RunScript` action on
+  shift-cmd-enter (Input-scoped, editor-gated) + Query-menu item
+  ("Run as Script", menus test updated). `PickAfter::ScriptBuffer`
+  re-enters via live buffer re-read on picker/password resume;
+  summaries use the display verbatim (`@file` vs tab name).
+- Verified live (probe since removed): button click on a plain buffer
+  ran 3 DDL/DML statements via real picker pick — trail + `seed.sql:
+  3 statements, 0 errors`. Clean `clippy`, 108 lib, 11 live,
+  menus/themes/browser_tree green, GUI builds.

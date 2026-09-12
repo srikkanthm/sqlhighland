@@ -30,6 +30,7 @@ async fn menu_coverage(_cx: &mut TestAppContext) {
         "SaveSql",
         "SaveSqlAs",
         "RunQuery",
+        "RunScript",
         "FormatQuery",
         "CommitTxn",
         "RollbackTxn",
