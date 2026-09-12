@@ -593,3 +593,23 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - Verified live against local Oracle: 10s sleep trips at staged 2s
   with friendly message, next query succeeds. Clean `clippy`, 101
   lib, 11 live, menus/themes/browser_tree green, GUI builds.
+
+## @-script execution (2026-09-12)
+
+- Run `@path` / `@@path` / `START path` from the caret's line: expands
+  nested includes then executes sequentially. `@@` resolves against the
+  includer's dir (CWD-independent nesting); `@` against the tab file's
+  dir else CWD (SQL Developer worksheet-first parity); absolute
+  verbatim, `~` → HOME, `+.sql` fallback, quoted paths, full-line
+  directives only (comments left alone), depth cap 10 + cycle errors.
+- One variables dialog for the whole expanded script; sequential
+  runner under the run_token umbrella (Cancel aborts between
+  statements); per-statement bind partitioning; last SELECT lands in
+  the grid, otherwise a summary (`@seed: N statements, 0 errors · T
+  ms`); first error stops with `name: statement i/N failed`.
+  Resumes (picker/password) funnel through start_run detection.
+- Verified: 7 new sql.rs unit tests; live headless UI probe (since
+  removed) ran a real 4-statement DDL/DML script + a failing script
+  against local Oracle via real picker clicks — summary and
+  `statement 2/3 failed: ORA-00942` asserted from the output pane.
+  Clean `clippy`, 108 lib, 11 live, menus/themes/browser_tree green.

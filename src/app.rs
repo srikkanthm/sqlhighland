@@ -38,8 +38,9 @@ use crate::model::{
 use crate::schema::{DbEngine, OracleProvider, SchemaProvider as _};
 use crate::session::SessionPool;
 use crate::sql::{
-    apply_substitutions, exec_summary, find_bind_vars, find_substitution_vars, format_sql, is_dml,
-    statement_at, statement_at_range, statement_kind, txn_end, StatementKind, SubVar,
+    apply_substitutions, exec_summary, expand_script_file, find_bind_vars, find_substitution_vars,
+    format_sql, is_dml, line_at, parse_at_directive, split_statements, statement_at,
+    statement_at_range, statement_kind, txn_end, StatementKind, SubVar,
 };
 use gpui_kit::base::SelectableText;
 use gpui_kit::base::TestSupportExt as _;
@@ -972,6 +973,10 @@ struct PendingBind {
     sql: String,
     subs: Vec<SubVar>,
     binds: Vec<String>,
+    /// Script display name (`seed.sql`) when this run is an `@`-script:
+    /// `sql` holds the fully expanded text, and submit re-splits it into
+    /// statements for the sequential runner instead of a single `run_sql`.
+    script: Option<String>,
 }
 
 /// A run deferred for connection choice: the statement waits while the user
@@ -3681,6 +3686,16 @@ impl SqlHighlandView {
         }
         let text = self.active_tab().editor.read(cx).value().to_string();
         let cursor = self.active_tab().editor.read(cx).cursor();
+        // `@`-directive lines run the script file named on the caret's
+        // own line (a bare `@file` has no terminator, so statement
+        // splitting would merge it with whatever follows — line
+        // semantics instead). Everything else runs as one statement.
+        if parse_at_directive(&line_at(&text, cursor)).is_some() {
+            let tab_id = self.active_tab().id.clone();
+            let line = line_at(&text, cursor);
+            self.start_script_run(&tab_id, line, window, cx);
+            return;
+        }
         match statement_at(&text, cursor) {
             Some(sql) => {
                 let tab_id = self.active_tab().id.clone();
@@ -3705,6 +3720,12 @@ impl SqlHighlandView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // `@`-directive resumes (picker/password carrying the directive
+        // line) route to the script path — same as a direct caret run.
+        if parse_at_directive(sql.trim()).is_some() {
+            self.start_script_run(tab_id, sql, window, cx);
+            return;
+        }
         let Some(ix) = self.tab_index(tab_id) else {
             return;
         };
@@ -3762,6 +3783,127 @@ impl SqlHighlandView {
             sql,
             subs: subs_needed,
             binds: bind_names,
+            script: None,
+        });
+        self.open_bind_dialog(window, cx);
+    }
+
+    /// Base directory for resolving a top-level `@` path: the tab file's
+    /// directory when file-backed (SQL Developer's worksheet-dir-first),
+    /// else the process working directory.
+    fn script_base_dir(&self, tab_id: &str) -> std::path::PathBuf {
+        self.tabs
+            .iter()
+            .find(|t| t.id == tab_id)
+            .and_then(|t| t.path.clone())
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            })
+    }
+
+    /// Entry point for an `@` / `@@` / `START` script run: expands nested
+    /// includes, then follows the same gates as [`Self::start_run`]
+    /// (connection → password → one variables dialog for the whole
+    /// script) before the sequential runner. `directive_line` is the raw
+    /// `@…` line (caret line or resumed picker/password text).
+    fn start_script_run(
+        &mut self,
+        tab_id: &str,
+        directive_line: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.tab_index(tab_id) else {
+            return;
+        };
+        let Some(directive) = parse_at_directive(directive_line.trim()) else {
+            return;
+        };
+        // Expand first: a typo'd path fails fast without needing a
+        // connection, and expansion is pure local I/O.
+        let base = self.script_base_dir(tab_id);
+        let expanded = match expand_script_file(&directive.path, &base) {
+            Ok(e) => e,
+            Err(msg) => {
+                self.tabs[ix].output = Some(Output::error(msg));
+                cx.notify();
+                return;
+            }
+        };
+        let script_name = expanded
+            .files
+            .first()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| directive.path.clone());
+        let statements: Vec<String> = split_statements(&expanded.text)
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        if statements.is_empty() {
+            self.tabs[ix].output = Some(Output::info(format!(
+                "Script {script_name} is empty — nothing to run"
+            )));
+            cx.notify();
+            return;
+        }
+        // Connection check (same as start_run): unbound tabs get the
+        // picker carrying the directive line, and resume re-enters here
+        // via start_run's detection.
+        let conn_id = match self.tabs[ix].connection_id.clone() {
+            Some(id) if self.connections.iter().any(|c| c.id == id) => id,
+            _ => {
+                self.pending_pick = Some(PendingPick {
+                    tab_id: tab_id.to_string(),
+                    sql: directive_line,
+                    after: PickAfter::Run,
+                });
+                self.open_conn_pick_dialog(window, cx);
+                return;
+            }
+        };
+        if self.tabs[ix].busy {
+            return;
+        }
+        // Password gate before variables (same resume shape as start_run).
+        let ready = self
+            .connections
+            .iter()
+            .find(|c| c.id == conn_id)
+            .cloned()
+            .map(|cfg| {
+                let run = Some((tab_id.to_string(), directive_line.clone()));
+                self.with_password(cfg, run, window, cx).is_some()
+            })
+            .unwrap_or(false);
+        if !ready {
+            return;
+        }
+        // One variables dialog for the whole expanded script.
+        let sub_vars = find_substitution_vars(&expanded.text);
+        let bind_names = find_bind_vars(&expanded.text);
+        let defined: std::collections::HashMap<String, String> =
+            self.defines.get(&conn_id).cloned().unwrap_or_default();
+        let subs_needed: Vec<SubVar> = sub_vars
+            .into_iter()
+            .filter(|v| !defined.contains_key(&v.name))
+            .collect();
+        if subs_needed.is_empty() && bind_names.is_empty() {
+            let final_sql = apply_substitutions(&expanded.text, &defined);
+            let final_statements: Vec<String> = split_statements(&final_sql)
+                .into_iter()
+                .map(|s| s.text)
+                .collect();
+            self.run_script(tab_id, script_name, final_statements, Vec::new(), cx);
+            return;
+        }
+        self.pending_bind = Some(PendingBind {
+            tab_id: tab_id.to_string(),
+            sql: expanded.text,
+            subs: subs_needed,
+            binds: bind_names,
+            script: Some(script_name),
         });
         self.open_bind_dialog(window, cx);
     }
@@ -4176,13 +4318,20 @@ impl SqlHighlandView {
             });
         }
         // Short single-line preview so users know what they're feeding.
-        let preview: SharedString = {
-            let flat: String = pending.sql.split_whitespace().collect::<Vec<_>>().join(" ");
-            const CAP: usize = 200;
-            if flat.len() > CAP {
-                format!("{}…", flat.chars().take(CAP).collect::<String>()).into()
-            } else {
-                flat.into()
+        // Scripts show their name + statement count instead of raw text.
+        let preview: SharedString = match &pending.script {
+            Some(name) => {
+                let n = split_statements(&pending.sql).len();
+                format!("@{name} · {n} statements").into()
+            }
+            None => {
+                let flat: String = pending.sql.split_whitespace().collect::<Vec<_>>().join(" ");
+                const CAP: usize = 200;
+                if flat.len() > CAP {
+                    format!("{}…", flat.chars().take(CAP).collect::<String>()).into()
+                } else {
+                    flat.into()
+                }
             }
         };
         let view = cx.entity().downgrade();
@@ -4354,7 +4503,18 @@ impl SqlHighlandView {
                 full.insert(k.clone(), v.clone());
             }
             let final_sql = apply_substitutions(&pending.sql, &full);
-            self.run_sql(&pending.tab_id, final_sql, bind_values, cx);
+            match pending.script {
+                Some(name) => {
+                    // Substitute first, split second: values are literals
+                    // that must not disturb statement boundaries.
+                    let statements: Vec<String> = split_statements(&final_sql)
+                        .into_iter()
+                        .map(|s| s.text)
+                        .collect();
+                    self.run_script(&pending.tab_id, name, statements, bind_values, cx);
+                }
+                None => self.run_sql(&pending.tab_id, final_sql, bind_values, cx),
+            }
         }
     }
 
@@ -4610,6 +4770,309 @@ impl SqlHighlandView {
                         // Stamp the failure over the previous run's summary —
                         // otherwise the status line keeps reporting stale success.
                         this.tabs[ix].result_meta = format!("Failed · {elapsed_ms} ms").into();
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Sequential `@`-script runner: executes each statement in order on
+    /// the tab's session, then presents the last SELECT in the grid (or a
+    /// summary when no query ran). Stops at the first error; Cancel rides
+    /// the same `run_token` umbrella as `run_sql` and aborts between
+    /// statements. Per-statement binds are partitioned from the shared
+    /// list so unused names never reach the driver (Oracle errors on
+    /// unbound extras). The per-round-trip call timeout applies per
+    /// statement, unchanged.
+    fn run_script(
+        &mut self,
+        tab_id: &str,
+        script_name: String,
+        statements: Vec<String>,
+        binds: Vec<BindParam>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.tab_index(tab_id) else {
+            return;
+        };
+        if self.tabs[ix].busy {
+            return;
+        }
+        if self.tabs[ix].exporting {
+            self.tabs[ix].output = Some(Output::error(
+                "Export in progress — cancel it before running",
+            ));
+            cx.notify();
+            return;
+        }
+        let conn_id = match self.tabs[ix].connection_id.clone() {
+            Some(id) => id,
+            None => {
+                self.tabs[ix].output = Some(Output::error("Select a connection for this tab"));
+                cx.notify();
+                return;
+            }
+        };
+        let Some(mut cfg) = self.connections.iter().find(|c| c.id == conn_id).cloned() else {
+            self.tabs[ix].output = Some(Output::error("Connection not found — pick another"));
+            cx.notify();
+            return;
+        };
+        if let Some(pw) = self.effective_password(&cfg) {
+            cfg.password = pw;
+        }
+        self.tabs[ix].busy = true;
+        self.tabs[ix].output = None;
+        self.tabs[ix].run_token = self.tabs[ix].run_token.wrapping_add(1);
+        self.tabs[ix].run_started = Some(std::time::Instant::now());
+        let run_token = self.tabs[ix].run_token;
+        self.tabs[ix].last_sql = format!("@{script_name}");
+        for stmt in &statements {
+            self.bump_usage(&conn_id, stmt);
+        }
+        self.ensure_meta(&conn_id, cx);
+        // Drop stale results NOW (same flash-avoidance as run_sql).
+        self.tabs[ix].fetch = None;
+        self.tabs[ix].copy_sel = None;
+        self.tabs[ix].table.update(cx, |table, cx| {
+            table.delegate_mut().set_fetch(None);
+            table.clear_selection(cx);
+            table.refresh(cx);
+        });
+        cx.notify();
+
+        let session = self.pool.get_or_create(&conn_id);
+        let bg = cx.background_executor().clone();
+        let tab_id = tab_id.to_string();
+        let conn_id_bg = conn_id.clone();
+        let cap = Preferences::load().result_cap.clamp(1_000, 5_000_000);
+        // Same live `Running… Ns` ticker as run_sql.
+        {
+            let view = cx.entity().downgrade();
+            let tab_id_tick = tab_id.clone();
+            let bg_tick = bg.clone();
+            cx.spawn(async move |_, cx| loop {
+                bg_tick.timer(Duration::from_millis(500)).await;
+                let cont = view
+                    .update(cx, |this, cx| {
+                        let Some(t) = this.tab_by_id(&tab_id_tick) else {
+                            return false;
+                        };
+                        if !t.busy || t.run_token != run_token {
+                            return false;
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !cont {
+                    break;
+                }
+            })
+            .detach();
+        }
+        cx.spawn(async move |view, cx| {
+            enum StmtOutcome {
+                Rows(Vec<ColumnInfo>, FetchPage, u64, u128),
+                Done(u64, u64),
+            }
+            let total = statements.len();
+            let mut total_ms: u128 = 0;
+            let mut total_affected: u64 = 0;
+            let mut executed: usize = 0;
+            let mut last_qid: u64 = 0;
+            let mut failed: Option<(usize, String)> = None;
+            let mut last_query: Option<(Vec<ColumnInfo>, FetchPage, u64, u128, String)> = None;
+            for (i, stmt) in statements.iter().enumerate() {
+                // Cancel/close checkpoint between statements.
+                let cont = view
+                    .update(cx, |this, _| {
+                        let Some(t) = this.tab_by_id(&tab_id) else {
+                            return false;
+                        };
+                        t.busy && t.run_token == run_token
+                    })
+                    .unwrap_or(false);
+                if !cont {
+                    break;
+                }
+                let kind = statement_kind(stmt);
+                let want = find_bind_vars(stmt);
+                let b: Vec<BindParam> = binds
+                    .iter()
+                    .filter(|x| want.contains(&x.name))
+                    .cloned()
+                    .collect();
+                let stmt_c = stmt.clone();
+                let cfg_c = cfg.clone();
+                let session_bg = session.clone();
+                let bg_c = bg.clone();
+                let (result, ms) = bg_c
+                    .spawn(async move {
+                        let started = std::time::Instant::now();
+                        let mut session = session_bg.lock().expect("session lock");
+                        let result: Result<StmtOutcome, String> = (|| {
+                            if !session.is_connected() {
+                                session.connect(&cfg_c).map_err(|e| e.to_string())?;
+                            }
+                            match kind {
+                                StatementKind::Query => {
+                                    let inner = std::time::Instant::now();
+                                    session
+                                        .start_query(&stmt_c, FETCH_CHUNK, &b)
+                                        .map(|(columns, page, id)| {
+                                            StmtOutcome::Rows(
+                                                columns,
+                                                page,
+                                                id,
+                                                inner.elapsed().as_millis(),
+                                            )
+                                        })
+                                        .map_err(|e| e.to_string())
+                                }
+                                StatementKind::Execute => session
+                                    .exec(&stmt_c, &b)
+                                    .map(|(affected, _)| {
+                                        let qid = session.query_id();
+                                        StmtOutcome::Done(affected, qid)
+                                    })
+                                    .map_err(|e| e.to_string()),
+                            }
+                        })();
+                        (result, started.elapsed().as_millis())
+                    })
+                    .await;
+                total_ms += ms;
+                executed = i + 1;
+                match result {
+                    Ok(StmtOutcome::Rows(columns, page, id, elapsed)) => {
+                        last_qid = id;
+                        last_query = Some((columns, page, id, elapsed, stmt.clone()));
+                    }
+                    Ok(StmtOutcome::Done(affected, qid)) => {
+                        last_qid = qid;
+                        total_affected += affected;
+                    }
+                    Err(msg) => {
+                        failed = Some((i, msg));
+                        break;
+                    }
+                }
+            }
+            view.update(cx, |this, cx| {
+                let Some(ix) = this.tab_index(&tab_id) else {
+                    return; // Tab closed while running.
+                };
+                if this.tabs[ix].run_token != run_token {
+                    return; // Cancelled or superseded: discard.
+                }
+                this.tabs[ix].busy = false;
+                this.tabs[ix].run_started = None;
+                let summary = |errors: usize| {
+                    format!(
+                        "@{script_name}: {total} statements, {errors} error{} · {total_ms} ms",
+                        if errors == 1 { "" } else { "s" }
+                    )
+                };
+                if let Some((i, msg)) = failed {
+                    this.tabs[ix].output = Some(Output::error(format!(
+                        "{}: statement {}/{} failed: {}",
+                        script_name,
+                        i + 1,
+                        total,
+                        msg
+                    )));
+                    this.tabs[ix].result_meta = format!("Failed · {total_ms} ms").into();
+                    cx.notify();
+                    return;
+                }
+                // Transaction flags, replayed in order over what ran.
+                let mut pending = false;
+                let mut saw_txn_end = false;
+                for stmt in statements.iter().take(executed) {
+                    if txn_end(stmt).is_some() {
+                        pending = false;
+                        saw_txn_end = true;
+                    } else if is_dml(stmt) {
+                        pending = true;
+                    }
+                }
+                this.tabs[ix].pending_txn = pending;
+                if saw_txn_end {
+                    this.clear_pending(&conn_id_bg);
+                }
+                match last_query {
+                    Some((columns, page, query_id, elapsed_ms, label)) => {
+                        this.tabs[ix].last_sql = label.clone();
+                        let fetch = Arc::new(FetchState {
+                            session: session.clone(),
+                            query_id,
+                            chunk: FETCH_CHUNK,
+                            cap,
+                            data: Mutex::new(ResultData {
+                                columns,
+                                rows: to_shared(page.rows),
+                                elapsed_ms,
+                                exhausted: page.exhausted,
+                                loading: false,
+                                capped: false,
+                            }),
+                            view: view.clone(),
+                            tab_id: tab_id.clone(),
+                        });
+                        this.tabs[ix].fetch = Some(fetch.clone());
+                        this.mark_siblings_exhausted(&tab_id, &session);
+                        this.live.insert(conn_id_bg.clone());
+                        this.ensure_meta(&conn_id_bg, cx);
+                        this.tabs[ix].result_meta =
+                            format!("{} · {}", describe_fetch(&fetch), summary(0)).into();
+                        this.tabs[ix].has_result = true;
+                        this.tabs[ix].table.update(cx, |table, cx| {
+                            table.delegate_mut().set_fetch(Some(fetch));
+                            table.clear_selection(cx);
+                            table.refresh(cx);
+                        });
+                    }
+                    None => {
+                        let fetch = Arc::new(FetchState {
+                            session: session.clone(),
+                            query_id: last_qid,
+                            chunk: FETCH_CHUNK,
+                            cap,
+                            data: Mutex::new(ResultData {
+                                columns: Vec::new(),
+                                rows: Vec::new(),
+                                elapsed_ms: total_ms,
+                                exhausted: true,
+                                loading: false,
+                                capped: false,
+                            }),
+                            view: view.clone(),
+                            tab_id: tab_id.clone(),
+                        });
+                        this.tabs[ix].fetch = Some(fetch.clone());
+                        this.mark_siblings_exhausted(&tab_id, &session);
+                        this.live.insert(conn_id_bg.clone());
+                        this.ensure_meta(&conn_id_bg, cx);
+                        let meta = if total_affected > 0 {
+                            format!(
+                                "{summary} · {total_affected} rows affected",
+                                summary = summary(0)
+                            )
+                        } else {
+                            summary(0)
+                        };
+                        this.tabs[ix].result_meta = meta.clone().into();
+                        this.tabs[ix].output = Some(Output::info(meta));
+                        this.tabs[ix].has_result = true;
+                        this.tabs[ix].table.update(cx, |table, cx| {
+                            table.delegate_mut().set_fetch(Some(fetch));
+                            table.clear_selection(cx);
+                            table.refresh(cx);
+                        });
                     }
                 }
                 cx.notify();
