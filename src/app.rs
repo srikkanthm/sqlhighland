@@ -5890,9 +5890,8 @@ impl SqlHighlandView {
                 .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
                     this.cycle_tab(-1, window, cx);
                 }))
-                .on_action(cx.listener(|this, _: &Quit, window, cx| {
-                    this.request_quit(window, cx);
-                }))
+                // Quit/Settings stay app-global (main.rs): a second,
+                // element-level registration double-fires the action.
                 .border_color(cx.theme().border)
                 .items_center()
                 .gap_1()
@@ -6051,9 +6050,8 @@ impl SqlHighlandView {
             .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
                 this.cycle_tab(-1, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &Quit, window, cx| {
-                this.request_quit(window, cx);
-            }))
+            // Quit/Settings stay app-global (main.rs): a second,
+            // element-level registration double-fires the action.
             .child(
                 h_flex()
                     .h(px(36.))
@@ -6779,9 +6777,8 @@ impl SqlHighlandView {
             .on_action(cx.listener(|this, _: &SaveSqlAs, window, cx| {
                 this.save_active_tab_as(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &Quit, window, cx| {
-                this.request_quit(window, cx);
-            }))
+            // Quit/Settings stay app-global (main.rs): a second,
+            // element-level registration double-fires the action.
             .child(self.render_tab_bar(cx))
             .child(content)
             .child(self.render_status_bar(cx))
@@ -6960,9 +6957,8 @@ impl Render for SqlHighlandView {
             // background was why grid colors changed while transparent
             // sidebar/status regions stayed white until restart.
             .bg(cx.theme().background)
-            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
-                this.open_settings(window, cx);
-            }))
+            // Quit/Settings stay app-global (main.rs): a second,
+            // element-level registration double-fires the action.
             .child(
                 v_flex()
                     .size_full()

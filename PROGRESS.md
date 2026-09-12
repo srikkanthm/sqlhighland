@@ -464,3 +464,23 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   probes: baseline open/toggle, stack-over-picker, untoggle-keeps-picker.
 - Verified: clean `clippy`, 101 lib + themes + browser_tree + ui_picker
   green except pre-existing `cmd_w` flake (fails on clean tree too).
+
+## Single-path Quit/Settings + deferred global handlers (2026-09-12)
+
+- Root cause of dead Cmd+Q/Cmd+, found by probe: app-global handlers
+  called `handle.update()` while event dispatch holds the window take
+  (`update_window_id` takes the window out of the map), so the nested
+  re-take failed and `let _ =` swallowed it — silently doing nothing.
+  Editor-focused worked only because view-level listeners (handed
+  `&mut Window` directly) fired there. Headless `window.press`
+  dispatches without the take, which is why probes passed while
+  production died; nesting press inside `update_window` reproduces it.
+- Fix: Quit/Settings live ONLY in main.rs (removed 3 view-level Quit
+  listeners + root OpenSettings listener — the duplication also
+  double-fired), and both global bodies run inside `cx.defer`, i.e.
+  after the event batch releases the take. Also fixed a real toggle
+  bug the probe caught: main.rs never closed Settings on toggle-off.
+- Verified headless: baseline open/toggle, stack-over-picker +
+  untoggle-keeps-picker, quit dispatch with dialog open. Clean `clippy`,
+  101 lib + themes + browser_tree + ui_picker green except
+  pre-existing `cmd_w` flake (fails on clean tree).
