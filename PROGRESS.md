@@ -525,3 +525,14 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - Verified headless: baseline single-tab creation, dialog-focus
   Cmd+T (once) + Cmd+W closes newest. Clean `clippy`, 101 lib +
   themes + browser_tree green.
+
+## Revert schema-tree auto-reveal (2026-09-12)
+
+- Removed the scroll-on-expand (deferred strict Top-pin); expansion
+  leaves scroll alone. Kept expansion-state tracking + repaint.
+  Reason: any scroll between double-click presses moves the row,
+  press #2 lands elsewhere, viewer never opens — timing-dependent,
+  unfixable by reducing movement alone.
+- Solution preserved in SCHEMA_TREE_AUTOREVEAL.md (final code,
+  variants tried, kit facts) for possible restoration.
+- Verified: clean `clippy`, 101 lib + browser_tree green.

@@ -5507,63 +5507,23 @@ impl SqlHighlandView {
         let state = cx.new(|cx| TreeState::new(cx).items(items));
         let sub_conn = conn_id.to_string();
         let sub = cx.subscribe(&state, move |this: &mut Self, _, event: &TreeEvent, cx| {
-            // Auto-reveal target: only expands scroll (collapses never do).
-            let scrolled: Option<SharedString> = match event {
+            // Expansion state only — no auto-scroll. (An auto-reveal that
+            // pinned expanded nodes to the top used to live here; it moved
+            // rows under the cursor mid-gesture and broke double-click
+            // opens, so expansion leaves the scroll alone now.)
+            match event {
                 TreeEvent::Expanded(id) => {
                     this.browser_expanded
                         .entry(sub_conn.clone())
                         .or_default()
                         .insert(id.to_string());
-                    Some(id.clone())
                 }
                 TreeEvent::Collapsed(id) => {
                     if let Some(set) = this.browser_expanded.get_mut(&sub_conn) {
                         set.remove(id.as_ref());
                     }
-                    None
                 }
             };
-            // When the tree is capped (320px), fresh children land below
-            // the fold — pin the expanded node to the top so they show
-            // without manual scrolling. Fitted trees already show
-            // everything: never jump.
-            // NOTE: the kit emits Expanded BEFORE rebuilding its entries,
-            // so scrolling synchronously here clamps against stale bounds.
-            // Defer past the rebuild: by the time this runs, entries are
-            // fresh, so both the overflow test and the index are exact.
-            if let Some(id) = scrolled {
-                let conn = sub_conn.clone();
-                cx.spawn(async move |view, cx| {
-                    view.update(cx, |this, cx| {
-                        let Some(tree) = this.browser_trees.get(&conn).cloned() else {
-                            return;
-                        };
-                        let (overflow, at) = tree.read_with(cx, |t, _| {
-                            let mut rows: usize = 0;
-                            while t.entry(rows).is_some() {
-                                rows += 1;
-                            }
-                            let at = t.index_of(&id);
-                            (rows as f32 * 30.0 + 44.0 >= 320.0, at)
-                        });
-                        if overflow {
-                            tree.update(cx, |t, _| {
-                                if let Some(ix) = at {
-                                    // Strict: the node itself is usually
-                                    // already visible (it's what was just
-                                    // clicked) — only its children are below
-                                    // the fold, and non-strict scrolling
-                                    // no-ops on visible nodes.
-                                    t.scroll_handle()
-                                        .scroll_to_item_strict(ix, gpui_kit::ScrollStrategy::Top);
-                                }
-                            });
-                        }
-                    })
-                    .ok();
-                })
-                .detach();
-            }
             // Container height derives from visible rows (read at render),
             // so toggles must repaint the view, not just the tree.
             cx.notify();
