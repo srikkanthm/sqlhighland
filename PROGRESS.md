@@ -548,3 +548,12 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   No-op while a pick is pending; cancel/Esc refocuses as before.
 - Verified headless (picker, single new tab, picker gone), clean
   `clippy`, 101 lib + themes + browser_tree green.
+
+## Picker hover-follows-selection (2026-09-12)
+
+- First-match wash now follows the mouse: hover drives an active index
+  into the filtered list (repaint only on change), Enter confirms the
+  highlighted row in both Cmd+K and run modes, typing resets to the top
+  alongside the scroll rewind. Click picks directly as before.
+- Verified headless (hover + Enter opens exactly one tab), clean
+  `clippy`, 101 lib + picker suite green (two known flakes excluded).

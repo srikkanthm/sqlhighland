@@ -3737,10 +3737,16 @@ impl SqlHighlandView {
         // input's own change notification already repaints every keystroke).
         let last_filter: Rc<std::cell::RefCell<String>> =
             Rc::new(std::cell::RefCell::new(String::new()));
-        // Keyboard flow: search takes focus on open; Enter confirms the first
-        // match. The builder re-runs every render, so focusing happens
-        // one-shot on the first build (a pre-mount focus call alone may not
-        // stick).
+        // Active row (index into the filtered list below): hover drives it,
+        // Enter confirms it. Reset on filter change like the scroll offset.
+        let active: Rc<std::cell::RefCell<usize>> = Rc::new(std::cell::RefCell::new(0));
+        // Filtered ids per render, for Enter (which runs outside the build).
+        let shown_ids: Rc<std::cell::RefCell<Vec<String>>> =
+            Rc::new(std::cell::RefCell::new(Vec::new()));
+        // Keyboard flow: search takes focus on open; Enter confirms the
+        // highlighted match. The builder re-runs every render, so focusing
+        // happens one-shot on the first build (a pre-mount focus call
+        // alone may not stick).
         let search_focus = search.read(cx).focus_handle(cx);
         let focused_once: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
         let search_in = search.clone();
@@ -3753,10 +3759,15 @@ impl SqlHighlandView {
                 window.focus(&search.read(cx).focus_handle(cx), cx);
             }
             let muted = cx.theme().muted_foreground;
+            // Highlighted-match wash (same selected language as the
+            // dialog pills): the row Enter will take, live with hover
+            // and the filter.
+            let first_bg = cx.theme().accent.opacity(0.25);
             let filter = search.read(cx).value().to_string();
             if *last_filter.borrow() != filter {
                 *last_filter.borrow_mut() = filter.clone();
                 scroll_handle.set_offset(gpui_kit::point(px(0.), px(0.)));
+                *active.borrow_mut() = 0;
             }
             let needle = filter.to_lowercase();
             let shown: Vec<&PickRow> = if needle.trim().is_empty() {
@@ -3797,12 +3808,14 @@ impl SqlHighlandView {
                         .text_xs()
                         .text_color(muted)
                         .child(if new_tab {
-                            "Type to filter, Enter opens a new tab on the first match."
+                            "Type to filter, Enter opens a new tab on the highlighted match."
                         } else {
-                            "Type to filter, Enter runs on the first match."
+                            "Type to filter, Enter runs on the highlighted match."
                         }),
                 );
             }
+            // Enter works off this snapshot (it runs outside the build).
+            *shown_ids.borrow_mut() = shown.iter().map(|r| r.id.clone()).collect();
             // Cap + scroll: long connection lists overflow the dialog.
             // Explicit handle + overflow_y_scroll (NOT the Scrollable
             // wrapper, whose caller-id keying misbehaves for content that
@@ -3821,12 +3834,17 @@ impl SqlHighlandView {
                 .flex_col()
                 .gap_1()
                 // Gutter for the overlaid scrollbar track (see dialog).
+                // NOTE: this used to live inside each row so the
+                // first-match wash spanned full width, but per-row
+                // restyle made hover laggy — container-level stays.
                 .pr_5();
             for (rix, r) in shown.iter().enumerate() {
                 let pick_view = view.clone();
                 let pick_tab = tab_id.clone();
                 let pick_sql = sql.clone();
                 let pick_new = new_tab;
+                let hover_view = view.clone();
+                let hover_active = active.clone();
                 let conn_id = r.id.clone();
                 let mut line = h_flex()
                     .gap_2()
@@ -3852,7 +3870,16 @@ impl SqlHighlandView {
                         .test_support()
                         .flex_shrink_0()
                         .w_full()
+                        // Highlighted row is the Enter target: hover moves
+                        // the highlight here (repaint only when it changes).
+                        .when(rix == *active.borrow(), |this| this.bg(first_bg))
                         .child(line)
+                        .on_hover(move |hovered, _, cx| {
+                            if *hovered && *hover_active.borrow() != rix {
+                                *hover_active.borrow_mut() = rix;
+                                hover_view.update(cx, |_, cx| cx.notify()).ok();
+                            }
+                        })
                         .on_click(move |_, window, cx: &mut App| {
                             if pick_new {
                                 pick_connection_for_new_tab(&pick_view, &conn_id, window, cx);
@@ -3885,7 +3912,8 @@ impl SqlHighlandView {
             );
             let ok_view = view.clone();
             let ok_rows = rows.clone();
-            let ok_search = search_in.clone();
+            let ok_active = active.clone();
+            let ok_shown = shown_ids.clone();
             let ok_tab = tab_id.clone();
             let ok_sql = sql.clone();
             let ok_new = new_tab;
@@ -3936,15 +3964,18 @@ impl SqlHighlandView {
                 .w(px(400.))
                 .close_button(false)
                 .child(body)
-                // Enter runs on the first filtered match. False keeps the
-                // dialog open (no matches); the close is manual so a
-                // variables dialog opened below lands on a clean stack.
+                // Enter confirms the highlighted match (hover or, by
+                // default/reset, the first). False keeps the dialog open
+                // (no matches); the close is manual so a variables dialog
+                // opened below lands on a clean stack.
                 .on_ok(move |_, window, cx: &mut App| {
-                    let needle = ok_search.read(cx).value().to_string().to_lowercase();
-                    let pick = ok_rows.iter().find(|r| {
-                        needle.trim().is_empty()
-                            || r.name.to_lowercase().contains(&needle)
-                            || r.detail.to_lowercase().contains(&needle)
+                    let ids = ok_shown.borrow();
+                    let pick = (!ids.is_empty()).then(|| {
+                        let ix = (*ok_active.borrow()).min(ids.len() - 1);
+                        ids[ix].clone()
+                    });
+                    let pick = pick.as_deref().and_then(|id| {
+                        ok_rows.iter().find(|r| r.id == id)
                     });
                     match pick {
                         Some(row) => {
