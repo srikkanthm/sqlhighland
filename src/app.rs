@@ -53,6 +53,7 @@ use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
 use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::setting::{
     RenderOptions, SettingGroup, SettingItem, SettingPage, Settings,
 };
@@ -1112,6 +1113,10 @@ pub struct SqlHighlandView {
     pending_service_kind: ServiceKind,
     pending_ssl: bool,
     pending_password_mode: PasswordMode,
+    /// Password field value when a Keychain-mode dialog opened (None
+    /// otherwise). Keychain mode saves only *typed* changes: an untouched
+    /// blank field keeps the stored entry instead of deleting it.
+    password_snapshot: Option<String>,
     // Dialog form fields (entities persist across dialog open/close).
     name: Entity<InputState>,
     host: Entity<InputState>,
@@ -1302,6 +1307,7 @@ impl SqlHighlandView {
             pending_service_kind: ServiceKind::default(),
             pending_ssl: false,
             pending_password_mode: PasswordMode::default(),
+            password_snapshot: None,
             name,
             host,
             port,
@@ -2097,7 +2103,7 @@ impl SqlHighlandView {
         }
     }
 
-    fn fill_form(&self, cfg: &ConnectionConfig, window: &mut Window, cx: &mut Context<Self>) {
+    fn fill_form(&mut self, cfg: &ConnectionConfig, window: &mut Window, cx: &mut Context<Self>) {
         self.name
             .update(cx, |s, cx| s.set_value(cfg.name.clone(), window, cx));
         self.host
@@ -2115,8 +2121,25 @@ impl SqlHighlandView {
             PasswordMode::File => cfg.password.clone(),
             PasswordMode::Keychain | PasswordMode::Ask => String::new(),
         };
-        self.password
-            .update(cx, |s, cx| s.set_value(shown_password, window, cx));
+        // Keychain mode with a stored entry says so: a blank field
+        // otherwise reads as "no password". Saving it untouched keeps
+        // the entry (see save_from_dialog); typing replaces it.
+        let pw_hint: SharedString = if cfg.password_mode == PasswordMode::Keychain
+            && !cfg.id.is_empty()
+            && crate::keychain::get(&cfg.id).ok().flatten().is_some_and(|s| !s.is_empty())
+        {
+            "Saved in keychain — leave blank to keep, type to replace".into()
+        } else {
+            "password".into()
+        };
+        self.password_snapshot = match cfg.password_mode {
+            PasswordMode::Keychain => Some(shown_password.clone()),
+            _ => None,
+        };
+        self.password.update(cx, |s, cx| {
+            s.set_value(shown_password, &mut *window, cx);
+            s.set_placeholder(pw_hint, &mut *window, cx);
+        });
     }
 
     fn persist(&self) {
@@ -2811,6 +2834,9 @@ impl SqlHighlandView {
             let save_view = view.clone();
             let pending = pending_cell.clone();
             let muted = cx.theme().muted_foreground;
+            // Plain clone for the scrollbar overlay (same handle the
+            // scroll area tracks, so the thumb stays in sync).
+            let scroll_sb = (*scroll_handle).clone();
             // Fresh each rebuild so the picked pill highlights live.
             let current_env = *pending.borrow();
             dialog
@@ -2818,12 +2844,17 @@ impl SqlHighlandView {
                 .w(px(400.))
                 .child(
                     div()
-                        .id("conn-dialog-scroll")
                         .w_full()
                         .max_h(px(480.))
-                        .overflow_y_scroll()
-                        .track_scroll(&scroll_handle)
+                        .relative()
                         .child(
+                            div()
+                                .id("conn-dialog-scroll")
+                                .w_full()
+                                .max_h(px(480.))
+                                .overflow_y_scroll()
+                                .track_scroll(&scroll_handle)
+                                .child(
                             v_flex()
                                 .gap_2()
                                 .w_full()
@@ -3022,6 +3053,19 @@ impl SqlHighlandView {
                                 )),
                         )
                         )
+                        // Visible scrollbar: the kit default only shows on
+                        // hover, which hides overflow in a short dialog.
+                        // Overlay bound to the same owned handle, so it
+                        // tracks without the caller-id Scrollable wrapper.
+                        .child(
+                            div().absolute().inset_0().child(
+                                Scrollbar::vertical(&scroll_sb)
+                                    .id("conn-dialog-scrollbar")
+                                    .mode(ScrollbarMode::Always)
+                                    .viewport_from_layout(),
+                            ),
+                        )
+                        )
                 )
                 .footer(
                     h_flex()
@@ -3055,12 +3099,16 @@ impl SqlHighlandView {
         if cfg.name.trim().is_empty() {
             cfg.name = "Untitled".to_string();
         }
-        // Keychain mode: the typed secret goes to the login keychain (or
-        // is cleared there when blank), never to the file.
+        // Keychain mode: a newly typed secret goes to the login keychain
+        // (or is cleared there when blanked); an untouched field keeps
+        // the stored entry — blank means "keep", not "delete". The file
+        // never holds the secret.
         if cfg.password_mode == PasswordMode::Keychain {
             cfg.ensure_id();
             let typed = self.password.read(cx).value().to_string();
-            if typed.is_empty() {
+            if self.password_snapshot.as_deref() == Some(typed.as_str()) {
+                // Untouched since the dialog opened: leave the entry alone.
+            } else if typed.is_empty() {
                 crate::keychain::delete(&cfg.id);
             } else if let Err(e) = crate::keychain::set(&cfg.id, &typed) {
                 self.status = format!("Keychain store failed: {e}").into();
@@ -3627,7 +3675,24 @@ impl SqlHighlandView {
                         }),
                 );
             }
-            body = body.child(scroll_body);
+            // Same always-visible scrollbar overlay as the connection
+            // dialog: the kit default (hover-only) hides picker overflow.
+            let pick_sb = (*scroll_handle).clone();
+            body = body.child(
+                div()
+                    .w_full()
+                    .max_h(px(400.))
+                    .relative()
+                    .child(scroll_body)
+                    .child(
+                        div().absolute().inset_0().child(
+                            Scrollbar::vertical(&pick_sb)
+                                .id("conn-pick-scrollbar")
+                                .mode(ScrollbarMode::Always)
+                                .viewport_from_layout(),
+                        ),
+                    ),
+            );
             let ok_view = view.clone();
             let ok_rows = rows.clone();
             let ok_search = search_in.clone();

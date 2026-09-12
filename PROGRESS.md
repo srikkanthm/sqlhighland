@@ -421,3 +421,22 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - Verified: clean `clippy`, 72 lib + 10 live (incl. dictionary + composite
   FK smoke) + 3 UI tests, release smoke. Live probe as SYSTEM: 9779→146
   tables, columns complete, `SYSTEM.EMPLOYEES` #1 for `emp`.
+
+## Dialog scrollbars + keychain password UX (2026-09-12)
+
+- Visible scrollbars: the kit theme default is hover-only, which hides
+  overflow in short dialogs. Connection dialog + connection picker now
+  overlay `Scrollbar::vertical` (mode Always) bound to the same owned
+  `ScrollHandle` the scroll area tracks — no caller-id `Scrollable`
+  wrapper (see "Picker scroll" above for why that misbehaves on
+  rebuild-every-render dialog content).
+- Keychain password UX: editing a Keychain-mode connection showed a blank
+  password field (reads as "no password"), and saving it untouched
+  DELETED the stored entry. Now `fill_form` shows a "Saved in keychain —
+  leave blank to keep, type to replace" placeholder when an entry exists,
+  snapshots the field at open (`password_snapshot`, Keychain-opens only),
+  and `save_from_dialog` leaves the entry alone when untouched. Switching
+  File→Keychain with a visible password still stores it (snapshot is
+  None outside Keychain opens).
+- Verified: clean `clippy`, 101 lib + themes + browser_tree green,
+  debug GUI build.
