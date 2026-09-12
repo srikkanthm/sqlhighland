@@ -22,7 +22,15 @@ fn main() {
             if let Some(handle) = cx.windows().into_iter().next() {
                 let _ = handle.update(cx, |_, window, cx| {
                     if let Some(view) = app::app_view(cx) {
-                        app::SqlHighlandView::open_settings_dialog(&view, window, cx);
+                        // Same toggle as the view-level entry, inside
+                        // view.update (safe here: nothing leases the view).
+                        let active = window.has_active_dialog(cx);
+                        let toggle_off = view.update(cx, |this, _| {
+                            this.note_dialog_open_for_settings(active)
+                        });
+                        if !toggle_off {
+                            app::SqlHighlandView::open_settings_dialog(&view, window, cx);
+                        }
                     }
                 });
             }

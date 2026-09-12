@@ -440,3 +440,27 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   None outside Keychain opens).
 - Verified: clean `clippy`, 101 lib + themes + browser_tree green,
   debug GUI build.
+
+## Dialog scrollbars, Cmd+Q, Cmd+, (2026-09-12)
+
+- Scrollbar thumb now driven by the tracked scroll handle's own viewport
+  (`viewport_from_layout` dropped — it tied thumb math to the overlay's
+  auto-layout box instead of the exact scroll area). Headless geometry
+  probe confirmed the overlay box == scroll-area box and stable across a
+  3000px scroll. Scroll areas/wraps carry `.test_support()` (as picker
+  rows already do) for future layout assertions.
+- Cmd+Q with a popup open: verified every link headless — the Quit action
+  dispatches with a modal focused, the unsaved-changes alert stacks visibly
+  over the picker, its buttons work, and Cancel returns to the popup.
+  Clean tabs quit via unconditional `platform.quit()`. No code change
+  needed; production symptom unreproduced — exact user flow still open.
+- Cmd+, with another popup open used to CLOSE that popup (the toggle
+  guard only knew *whether* a dialog was open). Now a `dialog_seq` /
+  `settings_seq` pair (Cell, every view-level open site bumps it) detects
+  Settings-on-top: second press dismisses just Settings, otherwise
+  Settings stacks above the popup. View-level entry mutates directly
+  (it runs under the action listener's lease — Entity::update there
+  panics); the main.rs global mirrors it inside view.update. Headless
+  probes: baseline open/toggle, stack-over-picker, untoggle-keeps-picker.
+- Verified: clean `clippy`, 101 lib + themes + browser_tree + ui_picker
+  green except pre-existing `cmd_w` flake (fails on clean tree too).

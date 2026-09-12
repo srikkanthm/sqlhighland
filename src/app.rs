@@ -1113,6 +1113,13 @@ pub struct SqlHighlandView {
     pending_service_kind: ServiceKind,
     pending_ssl: bool,
     pending_password_mode: PasswordMode,
+    /// Dialog open counter + the counter value when Settings opened.
+    /// Cmd+, toggles Settings off only when no other dialog opened since
+    /// (top must be Settings); otherwise Settings stacks on top instead
+    /// of closing whatever is showing. Cells: every open site has only
+    /// &self in some cases (dialog builders re-run every render).
+    dialog_seq: std::cell::Cell<u64>,
+    settings_seq: std::cell::Cell<Option<u64>>,
     /// Password field value when a Keychain-mode dialog opened (None
     /// otherwise). Keychain mode saves only *typed* changes: an untouched
     /// blank field keeps the stored entry instead of deleting it.
@@ -1172,6 +1179,16 @@ pub struct SqlHighlandView {
 }
 
 impl SqlHighlandView {
+    /// Every view-level dialog/alert open funnels through here so Cmd+,
+    /// can tell whether Settings is the top dialog (toggle off) or
+    /// something else opened since (stack Settings on top). Cells: several
+    /// open sites only hold &self. (The async connect-failed alert has no
+    /// view borrow and skips it — worst case there is the old toggle
+    /// behavior for that one transient popup.)
+    fn note_dialog_open(&self) {
+        self.dialog_seq.set(self.dialog_seq.get() + 1);
+    }
+
     pub fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dirty = self.tabs.iter().any(|tab| tab.dirty && tab.path.is_some());
         if !dirty {
@@ -1179,6 +1196,7 @@ impl SqlHighlandView {
             return;
         }
         let view = cx.entity().downgrade();
+        self.note_dialog_open();
         window.open_alert_dialog(cx, move |alert, _, _| {
             let save_view = view.clone();
             alert
@@ -1307,6 +1325,8 @@ impl SqlHighlandView {
             pending_service_kind: ServiceKind::default(),
             pending_ssl: false,
             pending_password_mode: PasswordMode::default(),
+            dialog_seq: std::cell::Cell::new(0),
+            settings_seq: std::cell::Cell::new(None),
             password_snapshot: None,
             name,
             host,
@@ -1687,6 +1707,7 @@ impl SqlHighlandView {
         let view = cx.entity().downgrade();
         let tab_id_save = tab_id.to_string();
         let tab_id_discard = tab_id.to_string();
+        self.note_dialog_open();
         window.open_alert_dialog(cx, move |alert, _, _| {
             let discard_view = view.clone();
             let save_view = view.clone();
@@ -1779,6 +1800,7 @@ impl SqlHighlandView {
 
         let tab_id = self.tabs[ix].id.clone();
         let view = cx.entity().downgrade();
+        self.note_dialog_open();
         window.open_alert_dialog(cx, move |alert, _, _| {
             let keep_view = view.clone();
             let reload_view = view.clone();
@@ -2194,22 +2216,52 @@ impl SqlHighlandView {
 
     /// Settings dialog: theme family + appearance mode. Selections apply
     /// live, persist to preferences.toml, and close the dialog (menu-like).
+    /// Owns the Cmd+, toggle bookkeeping (direct field access: this runs
+    /// under the action listener's lease, so Entity::update would panic).
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.take_settings_toggle(window, cx) {
+            return;
+        }
         Self::open_settings_dialog(&cx.entity(), window, cx);
+    }
+
+    /// Cmd+, toggle decision shared by the view-level entry (above) and the
+    /// global App::on_action entry in main.rs (which mirrors it inside a
+    /// view.update — safe there, no outer lease). Returns true when Settings
+    /// is the top dialog and has just been dismissed: the caller opens
+    /// nothing. Otherwise records the new opening and the caller stacks
+    /// Settings on top, so the key always opens it instead of killing
+    /// another popup. Needs &mut Window only for has_active_dialog; the
+    /// App borrow is unused (kept for call-site symmetry).
+    fn take_settings_toggle(&mut self, window: &mut Window, cx: &mut App) -> bool {
+        let top = self.note_dialog_open_for_settings(window.has_active_dialog(cx));
+        if top {
+            window.close_dialog(cx);
+        }
+        top
+    }
+
+    /// Core toggle step for the global entry point (main.rs), which cannot
+    /// use take_settings_toggle for lack of &mut self. Same contract.
+    /// Public only for main.rs; not part of the app's UI surface.
+    pub fn note_dialog_open_for_settings(&mut self, active: bool) -> bool {
+        let top_is_settings =
+            self.settings_seq.get() == Some(self.dialog_seq.get()) && active;
+        self.dialog_seq.set(self.dialog_seq.get() + 1);
+        if top_is_settings {
+            self.settings_seq.set(None);
+        } else {
+            self.settings_seq.set(Some(self.dialog_seq.get()));
+        }
+        top_is_settings
     }
 
     /// Settings dialog as an associated function so the global App::on_action
     /// handler (which has a window but no view handle) can open it too.
+    /// Pure open: toggle bookkeeping lives with the callers (see above).
     /// Rows apply, notify the view for a full re-render (GPUI only repaints
     /// dirty views — window refreshes alone reuse cached ones), then close.
     pub fn open_settings_dialog(view: &Entity<SqlHighlandView>, window: &mut Window, cx: &mut App) {
-        // Cmd+, toggles: a second press dismisses the top dialog. The kit
-        // only reports *whether* a dialog is open, not which one, so this
-        // closes whatever is showing (same call the Cancel buttons use).
-        if window.has_active_dialog(cx) {
-            window.close_dialog(cx);
-            return;
-        }
         // Owned for the 'static dialog builder below.
         let view = view.clone();
         window.open_dialog(cx, move |dialog, _, cx| {
@@ -2830,6 +2882,7 @@ impl SqlHighlandView {
         // (NOT the Scrollable wrapper, whose caller-id keying misbehaves for
         // dialog content that rebuilds every render).
         let scroll_handle = Rc::new(ScrollHandle::new());
+        self.note_dialog_open();
         window.open_dialog(cx, move |dialog, _, cx| {
             let save_view = view.clone();
             let pending = pending_cell.clone();
@@ -2844,12 +2897,15 @@ impl SqlHighlandView {
                 .w(px(400.))
                 .child(
                     div()
+                        .id("conn-dialog-scroll-wrap")
+                        .test_support()
                         .w_full()
                         .max_h(px(480.))
                         .relative()
                         .child(
                             div()
                                 .id("conn-dialog-scroll")
+                                .test_support()
                                 .w_full()
                                 .max_h(px(480.))
                                 .overflow_y_scroll()
@@ -3065,8 +3121,7 @@ impl SqlHighlandView {
                             div().absolute().inset_0().child(
                                 Scrollbar::vertical(&scroll_sb)
                                     .id("conn-dialog-scrollbar")
-                                    .mode(ScrollbarMode::Always)
-                                    .viewport_from_layout(),
+                                    .mode(ScrollbarMode::Always),
                             ),
                         )
                         )
@@ -3156,6 +3211,7 @@ impl SqlHighlandView {
         let view = cx.entity().downgrade();
         let conn_id = cfg.id.clone();
         let name: SharedString = format!("Delete “{}”?", cfg.name).into();
+        self.note_dialog_open();
         window.open_alert_dialog(cx, move |alert, _, _| {
             let delete_view = view.clone();
             alert
@@ -3273,6 +3329,7 @@ impl SqlHighlandView {
                 let name = cfg.name.clone();
                 let pwd = self.pwd_prompt.clone();
                 let view = cx.entity().downgrade();
+                self.note_dialog_open();
                 window.open_dialog(cx, move |dialog, _, cx| {
                     let submit = view.clone();
                     let pwd_in = pwd.clone();
@@ -3576,6 +3633,7 @@ impl SqlHighlandView {
         let search_focus = search.read(cx).focus_handle(cx);
         let focused_once: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
         let search_in = search.clone();
+        self.note_dialog_open();
         window.open_dialog(cx, move |dialog, window, cx| {
             let rows = rows.clone();
             let search = search_in.clone();
@@ -3635,6 +3693,7 @@ impl SqlHighlandView {
             let scroll_handle = scroll_handle.clone();
             let mut scroll_body = div()
                 .id("conn-pick-scroll")
+                .test_support()
                 .w_full()
                 .max_h(px(400.))
                 .overflow_y_scroll()
@@ -3686,6 +3745,8 @@ impl SqlHighlandView {
             let pick_sb = (*scroll_handle).clone();
             body = body.child(
                 div()
+                    .id("conn-pick-scroll-wrap")
+                    .test_support()
                     .w_full()
                     .max_h(px(400.))
                     .relative()
@@ -3694,8 +3755,7 @@ impl SqlHighlandView {
                         div().absolute().inset_0().child(
                             Scrollbar::vertical(&pick_sb)
                                 .id("conn-pick-scrollbar")
-                                .mode(ScrollbarMode::Always)
-                                .viewport_from_layout(),
+                                .mode(ScrollbarMode::Always),
                         ),
                     ),
             );
@@ -3858,6 +3918,7 @@ impl SqlHighlandView {
         // element mounts is fine — GPUI resolves it on render.)
         let first_input = fields.first().map(|f| f.input.clone());
         let tab_id = pending.tab_id.clone();
+        self.note_dialog_open();
         window.open_dialog(cx, move |dialog, _, cx| {
             let fields = fields.clone();
             let submit_error = submit_error.clone();
