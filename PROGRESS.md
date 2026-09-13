@@ -752,3 +752,12 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   keyword tables) already lived in complete.rs — no move needed.
 - Verified: clean clippy --all-targets, 112 lib +
   menus/themes/browser_tree green, GUI builds, live serial 11/11.
+
+## Refactor Phase 3b — schema browser extracted (2026-09-13, uncommitted)
+
+- browser.rs (~237 lines): browser_tree_items, browser_group_items,
+  refresh_browser, toggle_browser (mechanical move). app.rs 4,331 →
+  4,110. render_browser_tree stays (render code). ConnCache struct
+  introduction deferred to Phase 3d (touches field layout + all users).
+- Verified: clean clippy --all-targets, 112 lib +
+  menus/themes/browser_tree green, GUI builds, live serial 11/11.
