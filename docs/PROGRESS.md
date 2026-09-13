@@ -854,11 +854,17 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - `.github/workflows/release.yml`: on pushed `v*` tags (and manual
   `workflow_dispatch`, which only uploads a workflow artifact), a `macos-15`
   **arm64** runner verifies the tag matches `Cargo.toml`, installs
-  cargo-packager (`--locked --version 0.11`) + the Metal toolchain, runs
+  cargo-packager (`--locked --version '^0.11'`) and ensures the Metal compiler
+  (present on the runner; downloads it only if missing), runs
   `cargo packager --release`, writes `dist/SHA256SUMS.txt`, and attaches the
   DMG + checksums to the GitHub Release via `softprops/action-gh-release`
   (auto-generated notes; no secrets, uses `GITHUB_TOKEN`).
 - `ci.yml` GUI job bumped `macos-14` → `macos-15` (arm64; `macos-14` is
   deprecated, retires 2026-11, and the `-intel`/`-large` labels are x86_64).
-- Docs: `PACKAGING.md` §8 (release flow) + README pointer. Not yet exercised on
-  CI — needs a pushed tag or a manual run.
+- First release **v0.1.0** published: run green in ~9 min, assets
+  `SQLHighland_0.1.0_aarch64.dmg` + `SHA256SUMS.txt`; checksum verified by
+  re-download. Two CI-only fixes en route: `cargo install --version` needs a
+  range qualifier (`^0.11`), and the image's default `xcodebuild` rejects
+  `-downloadComponent` while `metal` is already installed (an Xcode probe
+  workflow confirmed it; the step is now conditional).
+- Docs: `PACKAGING.md` §8 (release flow) + README pointer.

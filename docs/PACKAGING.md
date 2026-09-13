@@ -160,9 +160,10 @@ uploads a workflow artifact, no release — handy for testing the pipeline).
 The job:
 1. verifies the tag matches `Cargo.toml`'s `version`
    (`v0.1.0` ⇔ `version = "0.1.0"`);
-2. installs `cargo-packager` (`--locked --version 0.11`) and the Metal toolchain
-   (`xcodebuild -downloadComponent MetalToolchain`, ~700 MB, needed by GPUI's
-   shader build);
+2. installs `cargo-packager` (`--locked --version '^0.11'`) and ensures the
+   Metal compiler GPUI's shader build needs — the macOS runner already ships
+   it, so it only selects the newest Xcode and runs
+   `xcodebuild -downloadComponent MetalToolchain` when `metal` is missing;
 3. runs `cargo packager --release`;
 4. writes `dist/SHA256SUMS.txt` and uploads `dist/*.dmg` + `SHA256SUMS.txt` to
    the GitHub Release with auto-generated notes.
