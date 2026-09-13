@@ -62,10 +62,7 @@ impl ResultsDelegate {
 
     pub(crate) fn with_data<R>(&self, f: impl FnOnce(&ResultData) -> R, default: R) -> R {
         match &self.fetch {
-            Some(fetch) => match fetch.data.lock() {
-                Ok(data) => f(&data),
-                Err(_) => default,
-            },
+            Some(fetch) => f(&lock(&fetch.data)),
             None => default,
         }
     }
@@ -211,10 +208,7 @@ impl TableDelegate for ResultsDelegate {
             return;
         };
         {
-            let mut data = match fetch.data.lock() {
-                Ok(data) => data,
-                Err(_) => return,
-            };
+            let mut data = lock(&fetch.data);
             if data.loading || data.exhausted {
                 return;
             }

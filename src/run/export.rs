@@ -91,16 +91,11 @@ fn export_drain_blocking(
     let mut rows: u64 = 0;
     // Rows already buffered by scrolling are exported first, then the cursor
     // is paged. The grid keeps everything (uncapped by design here).
-    let buffered: Vec<Vec<Option<String>>> = fetch
-        .data
-        .lock()
-        .map(|d| {
-            d.rows
-                .iter()
-                .map(|r| r.iter().map(|c| c.as_deref().map(str::to_string)).collect())
-                .collect()
-        })
-        .unwrap_or_default();
+    let buffered: Vec<Vec<Option<String>>> = lock(&fetch.data)
+        .rows
+        .iter()
+        .map(|r| r.iter().map(|c| c.as_deref().map(str::to_string)).collect())
+        .collect();
     // Write buffered rows through the same path (counts + file).
     let mut write_row = |row: &Vec<Option<String>>| -> Result<(), String> {
         match fmt {
@@ -130,7 +125,7 @@ fn export_drain_blocking(
     }
     // Mark grid buffer state: buffered rows are now "consumed" for export
     // purposes but stay visible; further pages append below.
-    let exhausted_already = fetch.data.lock().map(|d| d.exhausted).unwrap_or(true);
+    let exhausted_already = lock(&fetch.data).exhausted;
     if !exhausted_already {
         loop {
             if cancel.load(Ordering::Relaxed) {
@@ -158,9 +153,7 @@ fn export_drain_blocking(
                 None
             } else {
                 // Append to the grid buffer (uncapped) and the file.
-                if let Ok(mut data) = fetch.data.lock() {
-                    data.rows.extend(to_shared(page.rows.clone()));
-                }
+                lock(&fetch.data).rows.extend(to_shared(page.rows.clone()));
                 let mut err = None;
                 for row in &page.rows {
                     if let Err(e) = write_row(row) {
@@ -180,7 +173,8 @@ fn export_drain_blocking(
             }
         }
     }
-    if let Ok(mut data) = fetch.data.lock() {
+    {
+        let mut data = lock(&fetch.data);
         data.exhausted = true;
         data.loading = false;
     }
@@ -259,11 +253,11 @@ impl SqlHighlandView {
         };
         // Snapshot everything the background drain needs; the tab may be
         // edited or closed while it runs.
-        let columns: Vec<String> = fetch
-            .data
-            .lock()
-            .map(|d| d.columns.iter().map(|c| c.name.clone()).collect())
-            .unwrap_or_default();
+        let columns: Vec<String> = lock(&fetch.data)
+            .columns
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
         let query_id = fetch.query_id;
         let session = fetch.session.clone();
         let sql = self.tabs[ix].last_sql.clone();
@@ -330,9 +324,7 @@ impl SqlHighlandView {
         self.tabs[ix].export_rows = 0;
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.tabs[ix].export_cancel = Some(cancel.clone());
-        if let Ok(mut data) = fetch.data.lock() {
-            data.loading = true;
-        }
+        lock(&fetch.data).loading = true;
         cx.notify();
         // Live `Exporting… N rows` ticker, same pattern as runs.
         {
@@ -401,9 +393,7 @@ impl SqlHighlandView {
         // Re-fetch the tab's live fetch: a newer run replaces it, in which
         // case the drain already aborted as superseded.
         if let Some(fetch) = self.tabs[ix].fetch.clone() {
-            if let Ok(mut data) = fetch.data.lock() {
-                data.loading = false;
-            }
+            lock(&fetch.data).loading = false;
         }
         self.tabs[ix].exporting = false;
         self.tabs[ix].export_cancel = None;

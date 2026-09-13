@@ -32,6 +32,17 @@ jobs:
       - name: Test
         run: cargo test --lib
 
+  # Guards the `rust-version` claim in Cargo.toml: the GUI-free core must keep
+  # compiling on the declared MSRV. `+1.89.0` overrides rust-toolchain.toml.
+  msrv:
+    name: MSRV (1.89)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.89.0 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +1.89.0 check --all-targets
+
   # macOS-only: the GPUI snapshot compiles Metal shaders from its build script,
   # so this needs the Metal toolchain. Non-blocking until the runner image is
   # confirmed; flip `continue-on-error` off once it is green.

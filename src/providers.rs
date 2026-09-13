@@ -56,10 +56,7 @@ impl SqlHighlandView {
         // Missing/stale cache kicks a background refresh; this request
         // completes from keywords + whatever is cached.
         let cache = conn_id.as_deref().and_then(|id| self.meta.get(id)).cloned();
-        let stale = cache
-            .as_ref()
-            .map(|c| c.lock().map(|c| c.is_stale()).unwrap_or(true))
-            .unwrap_or(true);
+        let stale = cache.as_ref().map(|c| lock(c).is_stale()).unwrap_or(true);
         if stale && conn_id.is_some() {
             // Bound tab with a cold cache: a refresh is possible (runs,
             // connects, and the manual trigger all call ensure_meta), so
@@ -75,7 +72,7 @@ impl SqlHighlandView {
         if let Some((right_alias, right)) = detect_join_on(&text[..head_end], &aliases) {
             let fks: Vec<ForeignKey> = cache
                 .as_ref()
-                .and_then(|c| c.lock().ok().map(|c| c.fks.clone()))
+                .map(|c| lock(c).fks.clone())
                 .unwrap_or_default();
             let cands = join_condition_candidates(&right_alias, &right, &aliases, &fks);
             if !cands.is_empty() {
@@ -88,11 +85,7 @@ impl SqlHighlandView {
             // No FK links the pair: fall through to Predicate (columns for a
             // hand-written condition) instead of an empty popup.
         }
-        let is_seq = |n: &str| {
-            cache
-                .as_ref()
-                .is_some_and(|c| c.lock().map(|c| c.is_sequence(n)).unwrap_or(false))
-        };
+        let is_seq = |n: &str| cache.as_ref().is_some_and(|c| lock(c).is_sequence(n));
         let ctx = classify_context(text, offset, &is_seq);
         let show_system = self.show_system;
         let mut cands: Vec<Candidate> = Vec::new();

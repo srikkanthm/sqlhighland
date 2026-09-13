@@ -389,9 +389,7 @@ impl SqlHighlandView {
             }
             if let Some(f) = &t.fetch {
                 if Arc::ptr_eq(&f.session, session) {
-                    if let Ok(mut d) = f.data.lock() {
-                        d.exhausted = true;
-                    }
+                    lock(&f.data).exhausted = true;
                 }
             }
         }

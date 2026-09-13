@@ -51,8 +51,7 @@ impl SessionPool {
     pub fn is_live(&self, connection_id: &str) -> bool {
         self.sessions
             .get(connection_id)
-            .and_then(|s| s.lock().ok())
-            .map(|s| s.is_connected())
+            .map(|s| lock(s).is_connected())
             .unwrap_or(false)
     }
 

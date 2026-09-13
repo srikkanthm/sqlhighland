@@ -32,9 +32,7 @@ impl SqlHighlandView {
         let Some(cache) = self.meta.get(conn_id) else {
             return loading_item("Loading schema…");
         };
-        let Ok(cache) = cache.lock() else {
-            return loading_item("Loading schema…");
-        };
+        let cache = lock(cache);
         if cache.loading
             && cache.tables.is_empty()
             && cache.columns.is_empty()
@@ -258,10 +256,10 @@ impl SqlHighlandView {
             .entry(conn_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(MetadataCache::default())))
             .clone();
-        let stale = cache
-            .lock()
-            .map(|c| c.is_stale() && !c.loading)
-            .unwrap_or(false);
+        let stale = {
+            let c = lock(&cache);
+            c.is_stale() && !c.loading
+        };
         if !stale {
             return;
         }
@@ -273,9 +271,7 @@ impl SqlHighlandView {
         if let Some(pw) = self.effective_password(&cfg) {
             cfg.password = pw;
         }
-        if let Ok(mut c) = cache.lock() {
-            c.loading = true;
-        }
+        lock(&cache).loading = true;
         self.status = "Loading suggestions…".into();
         cx.notify();
         let session = self.pool.get_or_create(conn_id);
@@ -332,7 +328,8 @@ impl SqlHighlandView {
                     cx.notify();
                     return;
                 };
-                if let Ok(mut c) = cache.lock() {
+                {
+                    let mut c = lock(&cache);
                     c.loading = false;
                     // Install each dictionary independently; anything that
                     // failed keeps its previous content (possibly empty).

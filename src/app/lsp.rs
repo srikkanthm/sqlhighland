@@ -48,7 +48,7 @@ impl DefinitionProvider for OracleDefiner {
                 .as_deref()
                 .and_then(|id| this.meta.get(id))
                 .cloned()?;
-            let cache = cache.lock().ok()?;
+            let cache = lock(&cache);
             let tgt = describe_target(
                 &word,
                 qualifier.as_deref(),
@@ -135,7 +135,7 @@ impl HoverProvider for OracleHover {
                 .and_then(|id| this.meta.get(id))
                 .cloned()?;
             let md = {
-                let c = cache.lock().ok()?;
+                let c = lock(&cache);
                 hover_markdown(
                     &word,
                     qualifier.as_deref(),
