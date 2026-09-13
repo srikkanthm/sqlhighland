@@ -43,6 +43,50 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo +1.89.0 check --all-targets
 
+  # Port feedback: gpui-pre ships a Linux backend (gpui-pre-linux), so a check
+  # here catches port breakage without a manual port. Provisional — the apt set
+  # and the kit's Linux support are unproven, so it is non-blocking until green.
+  linux-gui:
+    name: GUI (Linux check)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: System deps (GPUI Linux backend)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake clang pkg-config libssl-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev \
+            libxcb-composite0-dev libxcb-damage0-dev libxcb-randr0-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxcb-present-dev libxcb-xkb-dev libvulkan-dev
+      - name: Check
+        run: cargo check --features gui
+
+  # The portable core must build on Windows too. `oracledb` → rustls pulls
+  # `aws-lc-sys`, whose build needs NASM on Windows. Provisional: non-blocking
+  # until confirmed green.
+  windows-core:
+    name: Core (Windows check)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Install NASM (aws-lc-sys build dependency)
+        run: choco install nasm -y --no-progress
+      - name: Check
+        shell: bash
+        run: |
+          export PATH="/c/Program Files/NASM:$PATH"
+          cargo check --lib
+
   # macOS-only: the GPUI snapshot compiles Metal shaders from its build script,
   # so this needs the Metal toolchain. Non-blocking until the runner image is
   # confirmed; flip `continue-on-error` off once it is green.

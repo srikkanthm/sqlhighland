@@ -12,8 +12,9 @@ Update (follow-up change sets): the organization findings in §2 and the stale
 docs in §4.3 are fixed, the Tier 1 hygiene items (§3 formatting, §4.1, §4.2,
 §4.4), the Tier 2 security items (new-connection default, in-memory
 zeroization, tab-id path safety), the Tier 3 remainder (§3 lock policy and
-logging, plus an MSRV CI job), and cross-platform P0 (§6.1 home-dir resolution)
-are fixed — see the change sets at the end. §6 tracks the remaining
+logging, plus an MSRV CI job), cross-platform P0 (§6.1 home-dir resolution),
+and port hardening P1/P2 (§6.2 Windows ACLs, §6.4 Linux/Windows check jobs) are
+fixed — see the change sets at the end. §6 tracks any remaining
 cross-platform / second-engine work.
 
 ## 1. Security
@@ -174,23 +175,28 @@ the export / save-as default dirs assumed `HOME` too. All four now use
 config dir uses `%APPDATA%\sqlhighland` on Windows. Precedence is unit-tested
 (`fsutil::tests::home_dir_precedence_is_cross_platform`).
 
-### 6.2 Secret-file ACLs on Windows — open (P1)
-`fsutil`'s owner-only `0600`/`0700` tightening is `#[cfg(unix)]`; on Windows the
-legacy plaintext `File` password mode gets inherited ACLs. The Keychain path
-can't be selected there (stub returns "unsupported") until a backend exists, so
-the real fix is a Windows ACL or excluding `File` on Windows.
+### 6.2 Secret-file ACLs on Windows — **FIXED (P1)**
+`fsutil::restrict` now has a Windows implementation: it drops inherited ACEs
+and grants the current user via `icacls`, re-applied to the temp file with the
+handle closed so the renamed target is owner-only. Best-effort (failures are
+ignored, as on Unix); verified by cross-compiling the module for
+`x86_64-pc-windows-msvc` (`rustc --emit=metadata`), not by a runtime ACL test.
+The Keychain path still can't be selected there (stub returns "unsupported")
+until a backend exists — see §6.3.
 
 ### 6.3 Keychain backends — open
 macOS only; Windows Credential Manager and Linux Secret Service are stubs.
 `PasswordMode::default_for_new()` returns `Ask` off Apple, so this degrades
 safely (prompt per run) rather than failing.
 
-### 6.4 Port CI — open (P2)
-The GUI CI job is macOS-only. Add a Linux `cargo check --features gui` job
-(gpui-pre-linux) to catch port breakage early. Note: a Windows build is not a
-plain `cargo check` — `oracledb` → rustls pulls `aws-lc-sys`, which needs a
-native C toolchain (MSVC/CMake/NASM); a local `--target x86_64-pc-windows-msvc`
-check failed in that build script on macOS, not in our code.
+### 6.4 Port CI — **PARTIALLY FIXED (P2)**
+Added two non-blocking jobs to `.github/workflows/ci.yml`: `linux-gui`
+(`cargo check --features gui`, installing the GPUI Linux system deps) and
+`windows-core` (`cargo check --lib`, with NASM installed for `aws-lc-sys`).
+Both are `continue-on-error` until confirmed green on the runners — the apt set
+and the kit's Linux/Windows support are unproven. Flip them blocking once
+verified. Windows still isn't a plain `cargo check`: `oracledb` → rustls pulls
+`aws-lc-sys`, which needs a native C toolchain (MSVC/CMake/NASM).
 
 ### 6.5 Second-engine plumbing — open
 `DbClient` / `SchemaProvider` / `DbEngine` are real seams, but the session layer
@@ -274,3 +280,13 @@ grouping is the main maintainability cost for new features.
 - `src/sql/script.rs`, `src/run/export.rs`, `src/app/tabs.rs`: `~` expansion and
   dialog default dirs use `home_dir()`.
 - Fixes §6.1; 119 lib tests green, clippy clean (macOS).
+
+## Change set — port hardening (P1 + P2)
+
+- `src/fsutil.rs`: platform `restrict` impls — Unix permission bits, Windows
+  `icacls` owner-only, no-op elsewhere; `write_atomic` re-applies after close
+  so the renamed file is restricted on Windows.
+- `.github/workflows/ci.yml`: `linux-gui` (`cargo check --features gui` with
+  GPUI Linux deps) and `windows-core` (`cargo check --lib` with NASM), both
+  non-blocking/provisional.
+- Fixes §6.2 and partially §6.4.
