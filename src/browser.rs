@@ -29,7 +29,7 @@ impl SqlHighlandView {
     pub(crate) fn browser_tree_items(&self, conn_id: &str, filter: &str) -> Vec<TreeItem> {
         let loading_item =
             |label: &str| vec![TreeItem::new(format!("b:note:{label}"), label).disabled(true)];
-        let Some(cache) = self.meta.get(conn_id) else {
+        let Some(cache) = self.browser.meta.get(conn_id) else {
             return loading_item("Loading schema…");
         };
         let cache = lock(cache);
@@ -57,7 +57,8 @@ impl SqlHighlandView {
             return loading_item(label);
         }
         let expanded = self
-            .browser_expanded
+            .browser
+            .expanded
             .get(conn_id)
             .cloned()
             .unwrap_or_default();
@@ -155,14 +156,15 @@ impl SqlHighlandView {
     /// Rebuild one open browser tree from cache (filter + expansion kept).
     /// No-op for closed or untracked connections.
     pub(crate) fn refresh_browser(&mut self, conn_id: &str, cx: &mut Context<Self>) {
-        if !self.browser_open.contains(conn_id) {
+        if !self.browser.open.contains(conn_id) {
             return;
         }
-        let Some(tree) = self.browser_trees.get(conn_id).cloned() else {
+        let Some(tree) = self.browser.trees.get(conn_id).cloned() else {
             return;
         };
         let filter = self
-            .browser_filters
+            .browser
+            .filters
             .get(conn_id)
             .map(|f| f.read(cx).value().to_string())
             .unwrap_or_default();
@@ -179,15 +181,15 @@ impl SqlHighlandView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.browser_open.contains(conn_id) {
-            self.browser_open.remove(conn_id);
-            self.browser_trees.remove(conn_id);
-            self.browser_expanded.remove(conn_id);
-            self.browser_filters.remove(conn_id);
+        if self.browser.open.contains(conn_id) {
+            self.browser.open.remove(conn_id);
+            self.browser.trees.remove(conn_id);
+            self.browser.expanded.remove(conn_id);
+            self.browser.filters.remove(conn_id);
             cx.notify();
             return;
         }
-        self.browser_open.insert(conn_id.to_string());
+        self.browser.open.insert(conn_id.to_string());
         if !self.live.contains(conn_id) {
             self.connect_connection(conn_id, window, cx);
         }
@@ -209,9 +211,10 @@ impl SqlHighlandView {
             },
         );
         self._subs.push(filter_sub);
-        self.browser_filters.insert(conn_id.to_string(), filter);
+        self.browser.filters.insert(conn_id.to_string(), filter);
         let filter = self
-            .browser_filters
+            .browser
+            .filters
             .get(conn_id)
             .map(|f| f.read(cx).value().to_string())
             .unwrap_or_default();
@@ -225,13 +228,14 @@ impl SqlHighlandView {
             // opens, so expansion leaves the scroll alone now.)
             match event {
                 TreeEvent::Expanded(id) => {
-                    this.browser_expanded
+                    this.browser
+                        .expanded
                         .entry(sub_conn.clone())
                         .or_default()
                         .insert(id.to_string());
                 }
                 TreeEvent::Collapsed(id) => {
-                    if let Some(set) = this.browser_expanded.get_mut(&sub_conn) {
+                    if let Some(set) = this.browser.expanded.get_mut(&sub_conn) {
                         set.remove(id.as_ref());
                     }
                 }
@@ -241,7 +245,7 @@ impl SqlHighlandView {
             cx.notify();
         });
         self._subs.push(sub);
-        self.browser_trees.insert(conn_id.to_string(), state);
+        self.browser.trees.insert(conn_id.to_string(), state);
         cx.notify();
     }
 }
@@ -252,6 +256,7 @@ impl SqlHighlandView {
     /// call from any run/connect completion or the manual trigger.
     pub(crate) fn ensure_meta(&mut self, conn_id: &str, cx: &mut Context<Self>) {
         let cache = self
+            .browser
             .meta
             .entry(conn_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(MetadataCache::default())))
@@ -321,7 +326,7 @@ impl SqlHighlandView {
                 })
                 .await;
             view.update(cx, |this, cx| {
-                let Some(cache) = this.meta.get(&conn_bg).cloned() else {
+                let Some(cache) = this.browser.meta.get(&conn_bg).cloned() else {
                     // Entry vanished mid-flight (connection deleted):
                     // never leave the loading notice up.
                     this.status = "".into();

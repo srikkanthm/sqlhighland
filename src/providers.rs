@@ -55,7 +55,10 @@ impl SqlHighlandView {
         // Snapshot the cache (clone the Arc; never lock the session here).
         // Missing/stale cache kicks a background refresh; this request
         // completes from keywords + whatever is cached.
-        let cache = conn_id.as_deref().and_then(|id| self.meta.get(id)).cloned();
+        let cache = conn_id
+            .as_deref()
+            .and_then(|id| self.browser.meta.get(id))
+            .cloned();
         let stale = cache.as_ref().map(|c| lock(c).is_stale()).unwrap_or(true);
         if stale && conn_id.is_some() {
             // Bound tab with a cold cache: a refresh is possible (runs,
@@ -92,7 +95,8 @@ impl SqlHighlandView {
         let usage_of = |conn: &Option<String>, label: &str| {
             conn.as_ref()
                 .and_then(|id| {
-                    self.usage
+                    self.browser
+                        .usage
                         .get(&(id.clone(), label.to_ascii_uppercase()))
                         .copied()
                 })
@@ -419,10 +423,10 @@ impl SqlHighlandView {
         }
         for tref in map.values() {
             let key = (conn_id.to_string(), tref.name.to_ascii_uppercase());
-            *self.usage.entry(key).or_insert(0) += 1;
+            *self.browser.usage.entry(key).or_insert(0) += 1;
         }
-        if self.usage.len() > 5000 {
-            self.usage.clear();
+        if self.browser.usage.len() > 5000 {
+            self.browser.usage.clear();
         }
     }
 }

@@ -28,7 +28,7 @@ impl SqlHighlandView {
         let is_live = self.live.contains(&cfg.id);
         let view = cx.entity().downgrade();
         let conn_id = cfg.id.clone();
-        let browser_open = self.browser_open.contains(&cfg.id);
+        let browser_open = self.browser.open.contains(&cfg.id);
         let toggle_id = conn_id.clone();
         let tree_conn = conn_id.clone();
         // NOTE: the row div and the tree are siblings under this wrapper.
@@ -154,7 +154,7 @@ impl SqlHighlandView {
         // inside it (visually below or not) shares its hitbox and fires
         // both menus on right-click (one menu slot, last opener wins).
         v_flex().w_full().child(row).when(browser_open, |this| {
-            let filter_row = self.browser_filters.get(&tree_conn).map(|f| {
+            let filter_row = self.browser.filters.get(&tree_conn).map(|f| {
                 div()
                     .w_full()
                     .pt_1()
@@ -167,7 +167,7 @@ impl SqlHighlandView {
             // as intentional padding. Capped: beyond it the tree owns
             // its scroll and the bar is legitimate.
             let mut rows = 0;
-            if let Some(state) = self.browser_trees.get(&tree_conn) {
+            if let Some(state) = self.browser.trees.get(&tree_conn) {
                 let state = state.read(cx);
                 while state.entry(rows).is_some() {
                     rows += 1;

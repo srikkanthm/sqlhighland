@@ -84,7 +84,7 @@ fn submit_bind_fields(
 
 impl SqlHighlandView {
     pub(crate) fn open_bind_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pending) = self.pending_bind.clone() else {
+        let Some(pending) = self.pending.bind.clone() else {
             return;
         };
         let mut fields: Vec<BindField> = Vec::new();
@@ -217,7 +217,7 @@ impl SqlHighlandView {
                 .on_cancel(move |_, window, cx: &mut App| {
                     cancel_view_ok
                         .update(cx, |this, cx| {
-                            this.pending_bind = None;
+                            this.pending.bind = None;
                             cx.notify();
                         })
                         .ok();
@@ -232,7 +232,7 @@ impl SqlHighlandView {
                             move |_, window, cx: &mut App| {
                                 cancel_view_btn
                                     .update(cx, |this, cx| {
-                                        this.pending_bind = None;
+                                        this.pending.bind = None;
                                         cx.notify();
                                     })
                                     .ok();
@@ -264,7 +264,7 @@ impl SqlHighlandView {
         bind_values: Vec<BindParam>,
         cx: &mut Context<Self>,
     ) {
-        let Some(pending) = self.pending_bind.take() else {
+        let Some(pending) = self.pending.bind.take() else {
             return;
         };
         let Some(ix) = self.tab_index(&pending.tab_id) else {

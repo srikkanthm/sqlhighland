@@ -31,7 +31,7 @@ impl SqlHighlandView {
         let conn_id = match self.tabs[ix].connection_id.clone() {
             Some(id) if self.connections.iter().any(|c| c.id == id) => id,
             _ => {
-                self.pending_pick = Some(PendingPick {
+                self.pending.pick = Some(PendingPick {
                     tab_id: tab_id.to_string(),
                     sql,
                     after: PickAfter::Run,
@@ -74,7 +74,7 @@ impl SqlHighlandView {
             self.run_sql(tab_id, final_sql, Vec::new(), cx);
             return;
         }
-        self.pending_bind = Some(PendingBind {
+        self.pending.bind = Some(PendingBind {
             tab_id: tab_id.to_string(),
             sql,
             subs: subs_needed,

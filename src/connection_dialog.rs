@@ -26,43 +26,47 @@ use crate::schema::DbEngine;
 impl SqlHighlandView {
     fn form_config(&self, cx: &App) -> ConnectionConfig {
         // Preserve the edited entry's id so live sessions keep matching.
-        let edited = self.editing.and_then(|ix| self.connections.get(ix));
+        let edited = self.dialog.editing.and_then(|ix| self.connections.get(ix));
         let id = edited.map(|c| c.id.clone()).unwrap_or_default();
         // The dialog owns the engine like role/kind (today always Oracle).
         // Keychain/Ask modes never persist the typed secret in the file —
         // save_from_dialog routes it to the keychain (or drops it).
-        let password = match self.pending_password_mode {
-            PasswordMode::File => self.password.read(cx).value().to_string(),
+        let password = match self.dialog.pending_password_mode {
+            PasswordMode::File => self.dialog.password.read(cx).value().to_string(),
             PasswordMode::Keychain | PasswordMode::Ask => String::new(),
         };
         ConnectionConfig {
             id,
-            name: self.name.read(cx).value().to_string(),
-            host: self.host.read(cx).value().to_string(),
-            port: self.port.read(cx).value().parse().unwrap_or(1521),
-            service_name: self.service.read(cx).value().to_string(),
-            user: self.user.read(cx).value().to_string(),
+            name: self.dialog.name.read(cx).value().to_string(),
+            host: self.dialog.host.read(cx).value().to_string(),
+            port: self.dialog.port.read(cx).value().parse().unwrap_or(1521),
+            service_name: self.dialog.service.read(cx).value().to_string(),
+            user: self.dialog.user.read(cx).value().to_string(),
             password: password.into(),
-            environment: self.pending_env,
-            engine: self.pending_engine,
-            role: self.pending_role,
-            service_kind: self.pending_service_kind,
-            ssl: self.pending_ssl,
-            password_mode: self.pending_password_mode,
+            environment: self.dialog.pending_env,
+            engine: self.dialog.pending_engine,
+            role: self.dialog.pending_role,
+            service_kind: self.dialog.pending_service_kind,
+            ssl: self.dialog.pending_ssl,
+            password_mode: self.dialog.pending_password_mode,
         }
     }
 
     fn fill_form(&mut self, cfg: &ConnectionConfig, window: &mut Window, cx: &mut Context<Self>) {
-        self.name
+        self.dialog
+            .name
             .update(cx, |s, cx| s.set_value(cfg.name.clone(), window, cx));
-        self.host
+        self.dialog
+            .host
             .update(cx, |s, cx| s.set_value(cfg.host.clone(), window, cx));
-        self.port
+        self.dialog
+            .port
             .update(cx, |s, cx| s.set_value(cfg.port.to_string(), window, cx));
-        self.service.update(cx, |s, cx| {
+        self.dialog.service.update(cx, |s, cx| {
             s.set_value(cfg.service_name.clone(), window, cx)
         });
-        self.user
+        self.dialog
+            .user
             .update(cx, |s, cx| s.set_value(cfg.user.clone(), window, cx));
         // Never fill stored secrets back into the form: File mode shows
         // its (legacy) value; Keychain/Ask always start blank.
@@ -84,11 +88,11 @@ impl SqlHighlandView {
         } else {
             "password".into()
         };
-        self.password_snapshot = match cfg.password_mode {
+        self.dialog.password_snapshot = match cfg.password_mode {
             PasswordMode::Keychain => Some(shown_password.clone()),
             _ => None,
         };
-        self.password.update(cx, |s, cx| {
+        self.dialog.password.update(cx, |s, cx| {
             s.set_value(shown_password, &mut *window, cx);
             s.set_placeholder(pw_hint, &mut *window, cx);
         });
@@ -109,13 +113,13 @@ impl SqlHighlandView {
     // -- Connection CRUD + dialog ------------------------------------------
 
     pub(crate) fn start_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.editing = None;
-        self.pending_env = Environment::Untagged;
-        self.pending_role = OracleRole::default();
-        self.pending_service_kind = ServiceKind::default();
-        self.pending_ssl = false;
-        self.pending_password_mode = PasswordMode::default_for_new();
-        self.pending_engine = DbEngine::default();
+        self.dialog.editing = None;
+        self.dialog.pending_env = Environment::Untagged;
+        self.dialog.pending_role = OracleRole::default();
+        self.dialog.pending_service_kind = ServiceKind::default();
+        self.dialog.pending_ssl = false;
+        self.dialog.pending_password_mode = PasswordMode::default_for_new();
+        self.dialog.pending_engine = DbEngine::default();
         // Blank form: text fields empty, standard Oracle port kept.
         self.fill_form(
             &ConnectionConfig {
@@ -124,7 +128,7 @@ impl SqlHighlandView {
                 port: 1521,
                 service_name: String::new(),
                 user: String::new(),
-                password_mode: self.pending_password_mode,
+                password_mode: self.dialog.pending_password_mode,
                 ..Default::default()
             },
             window,
@@ -138,14 +142,14 @@ impl SqlHighlandView {
             return;
         }
         let title = format!("Edit {}", self.connections[ix].name);
-        self.editing = Some(ix);
+        self.dialog.editing = Some(ix);
         let cfg = self.connections[ix].clone();
-        self.pending_env = cfg.environment;
-        self.pending_role = cfg.role;
-        self.pending_service_kind = cfg.service_kind;
-        self.pending_ssl = cfg.ssl;
-        self.pending_password_mode = cfg.password_mode;
-        self.pending_engine = cfg.engine;
+        self.dialog.pending_env = cfg.environment;
+        self.dialog.pending_role = cfg.role;
+        self.dialog.pending_service_kind = cfg.service_kind;
+        self.dialog.pending_ssl = cfg.ssl;
+        self.dialog.pending_password_mode = cfg.password_mode;
+        self.dialog.pending_engine = cfg.engine;
         self.fill_form(&cfg, window, cx);
         self.open_connection_dialog(&title, window, cx);
     }
@@ -156,26 +160,27 @@ impl SqlHighlandView {
         let title: SharedString = title.to_string().into();
         let view = cx.entity().downgrade();
         let (name, host, port, service, user, password) = (
-            self.name.clone(),
-            self.host.clone(),
-            self.port.clone(),
-            self.service.clone(),
-            self.user.clone(),
-            self.password.clone(),
+            self.dialog.name.clone(),
+            self.dialog.host.clone(),
+            self.dialog.port.clone(),
+            self.dialog.service.clone(),
+            self.dialog.user.clone(),
+            self.dialog.password.clone(),
         );
         // Dialog-local copy of the env tag. The dialog builder re-runs on every
         // render, so it must NOT touch the view entity here (that double-leases
         // and aborts). Click handlers (safe, outside render) sync the cell back
         // to `pending_env` and notify to rebuild with the new highlight.
-        let pending_cell: Rc<RefCell<Environment>> = Rc::new(RefCell::new(self.pending_env));
+        let pending_cell: Rc<RefCell<Environment>> = Rc::new(RefCell::new(self.dialog.pending_env));
         // Same pattern for role / service-kind / SSL / password-mode rows.
-        let role_cell: Rc<RefCell<OracleRole>> = Rc::new(RefCell::new(self.pending_role));
-        let kind_cell: Rc<RefCell<ServiceKind>> = Rc::new(RefCell::new(self.pending_service_kind));
-        let ssl_cell: Rc<RefCell<bool>> = Rc::new(RefCell::new(self.pending_ssl));
+        let role_cell: Rc<RefCell<OracleRole>> = Rc::new(RefCell::new(self.dialog.pending_role));
+        let kind_cell: Rc<RefCell<ServiceKind>> =
+            Rc::new(RefCell::new(self.dialog.pending_service_kind));
+        let ssl_cell: Rc<RefCell<bool>> = Rc::new(RefCell::new(self.dialog.pending_ssl));
         let pwmode_cell: Rc<RefCell<PasswordMode>> =
-            Rc::new(RefCell::new(self.pending_password_mode));
+            Rc::new(RefCell::new(self.dialog.pending_password_mode));
         // Same pattern for the engine row (today a single Oracle pill).
-        let engine_cell: Rc<RefCell<DbEngine>> = Rc::new(RefCell::new(self.pending_engine));
+        let engine_cell: Rc<RefCell<DbEngine>> = Rc::new(RefCell::new(self.dialog.pending_engine));
         // Owned scroll handle: the form now spans role/service/SSL/password
         // rows, so small windows overflow. Explicit handle + overflow_y_scroll
         // (NOT the Scrollable wrapper, whose caller-id keying misbehaves for
@@ -241,7 +246,7 @@ impl SqlHighlandView {
                                                             *cell.borrow_mut() = e;
                                                             row_view
                                                                 .update(cx, |this, cx| {
-                                                                    this.pending_engine = e;
+                                                                    this.dialog.pending_engine = e;
                                                                     cx.notify();
                                                                 })
                                                                 .ok();
@@ -293,7 +298,7 @@ impl SqlHighlandView {
                                                             *cell.borrow_mut() = r;
                                                             row_view
                                                                 .update(cx, |this, cx| {
-                                                                    this.pending_role = r;
+                                                                    this.dialog.pending_role = r;
                                                                     cx.notify();
                                                                 })
                                                                 .ok();
@@ -326,7 +331,8 @@ impl SqlHighlandView {
                                                             *cell.borrow_mut() = k;
                                                             row_view
                                                                 .update(cx, |this, cx| {
-                                                                    this.pending_service_kind = k;
+                                                                    this.dialog
+                                                                        .pending_service_kind = k;
                                                                     cx.notify();
                                                                 })
                                                                 .ok();
@@ -356,7 +362,8 @@ impl SqlHighlandView {
                                                             *cell.borrow_mut() = *checked;
                                                             row_view
                                                                 .update(cx, |this, cx| {
-                                                                    this.pending_ssl = *checked;
+                                                                    this.dialog.pending_ssl =
+                                                                        *checked;
                                                                     cx.notify();
                                                                 })
                                                                 .ok();
@@ -388,7 +395,8 @@ impl SqlHighlandView {
                                                             *cell.borrow_mut() = m;
                                                             row_view
                                                                 .update(cx, |this, cx| {
-                                                                    this.pending_password_mode = m;
+                                                                    this.dialog
+                                                                        .pending_password_mode = m;
                                                                     cx.notify();
                                                                 })
                                                                 .ok();
@@ -452,7 +460,7 @@ impl SqlHighlandView {
                                                 *pending_click.borrow_mut() = *env;
                                                 row_view
                                                     .update(cx, |this, cx| {
-                                                        this.pending_env = *env;
+                                                        this.dialog.pending_env = *env;
                                                         cx.notify();
                                                     })
                                                     .ok();
@@ -507,8 +515,8 @@ impl SqlHighlandView {
         // never holds the secret.
         if cfg.password_mode == PasswordMode::Keychain {
             cfg.ensure_id();
-            let typed = self.password.read(cx).value().to_string();
-            if self.password_snapshot.as_deref() == Some(typed.as_str()) {
+            let typed = self.dialog.password.read(cx).value().to_string();
+            if self.dialog.password_snapshot.as_deref() == Some(typed.as_str()) {
                 // Untouched since the dialog opened: leave the entry alone.
             } else if typed.is_empty() {
                 crate::keychain::delete(&cfg.id);
@@ -518,13 +526,13 @@ impl SqlHighlandView {
         }
         // Leaving Keychain mode orphans nothing: drop the entry.
         if cfg.password_mode != PasswordMode::Keychain {
-            if let Some(old) = self.editing.and_then(|ix| self.connections.get(ix)) {
+            if let Some(old) = self.dialog.editing.and_then(|ix| self.connections.get(ix)) {
                 if old.password_mode == PasswordMode::Keychain && old.id == cfg.id {
                     crate::keychain::delete(&cfg.id);
                 }
             }
         }
-        if let Some(ix) = self.editing {
+        if let Some(ix) = self.dialog.editing {
             if ix < self.connections.len() {
                 cfg.ensure_id();
                 self.connections[ix] = cfg.clone();
@@ -539,7 +547,7 @@ impl SqlHighlandView {
             cfg.ensure_id();
             self.connections.push(cfg.clone());
         }
-        self.editing = None;
+        self.dialog.editing = None;
         self.persist(cx);
         self.status = format!("Saved {}", cfg.name).into();
         cx.notify();
@@ -641,7 +649,7 @@ impl SqlHighlandView {
                 Some(cfg)
             }
             None => {
-                self.pending_password = Some(PendingPassword {
+                self.pending.password = Some(PendingPassword {
                     conn_id: cfg.id.clone(),
                     run,
                 });
@@ -686,7 +694,7 @@ impl SqlHighlandView {
     /// keychain when that mode is missing its entry), close the prompt,
     /// then resume the pending connect or run.
     fn submit_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pending) = self.pending_password.take() else {
+        let Some(pending) = self.pending.password.take() else {
             return;
         };
         let pw = self.pwd_prompt.read(cx).value().to_string();

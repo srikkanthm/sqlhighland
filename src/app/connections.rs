@@ -80,11 +80,12 @@ impl SqlHighlandView {
         crate::keychain::delete(&removed.id);
         self.unlocked.remove(&removed.id);
         if self
-            .pending_password
+            .pending
+            .password
             .as_ref()
             .is_some_and(|p| p.conn_id == removed.id)
         {
-            self.pending_password = None;
+            self.pending.password = None;
         }
         self.pool.remove(&removed.id);
         self.live.remove(&removed.id);

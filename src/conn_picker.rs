@@ -63,7 +63,7 @@ fn pick_connection_resume(
                     if let Some(t) = this.tab_by_id(tab_id) {
                         t.connection_id = Some(conn_id.to_string());
                     }
-                    this.pending_pick = None;
+                    this.pending.pick = None;
                     this.persist_tabs(cx);
                     this.start_run(tab_id, sql.to_string(), window, cx);
                     // No focus call: the run manages it (variables dialog
@@ -75,7 +75,7 @@ fn pick_connection_resume(
                     if let Some(ix) = this.tab_index(&new_id) {
                         this.select_tab(ix, window, cx);
                     }
-                    this.pending_pick = None;
+                    this.pending.pick = None;
                     this.persist_tabs(cx);
                     // Establish the session now so the tab is live before the
                     // first run (failures surface through the standard
@@ -87,7 +87,7 @@ fn pick_connection_resume(
                     if let Some(t) = this.tab_by_id(tab_id) {
                         t.connection_id = Some(conn_id.to_string());
                     }
-                    this.pending_pick = None;
+                    this.pending.pick = None;
                     this.persist_tabs(cx);
                     // Same eager session as a fresh Cmd+K tab (failures surface
                     // through the standard connect-failed path).
@@ -98,7 +98,7 @@ fn pick_connection_resume(
                     if let Some(t) = this.tab_by_id(tab_id) {
                         t.connection_id = Some(conn_id.to_string());
                     }
-                    this.pending_pick = None;
+                    this.pending.pick = None;
                     this.persist_tabs(cx);
                     this.run_buffer_as_script(tab_id, window, cx);
                     None
@@ -140,11 +140,11 @@ impl SqlHighlandView {
     /// (picker open) so the deferred run it carries is never clobbered.
     /// The active tab id is kept only to refocus it on cancel/Esc.
     pub(crate) fn open_pick_for_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending_pick.is_some() {
+        if self.pending.pick.is_some() {
             return;
         }
         let tab_id = self.active_tab().id.clone();
-        self.pending_pick = Some(PendingPick {
+        self.pending.pick = Some(PendingPick {
             tab_id,
             sql: String::new(),
             after: PickAfter::NewTab,
@@ -156,11 +156,11 @@ impl SqlHighlandView {
     /// ACTIVE tab to the pick and connects (no new tab, no run). Same
     /// already-pending guard as Cmd+K.
     pub(crate) fn open_pick_for_rebind(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending_pick.is_some() {
+        if self.pending.pick.is_some() {
             return;
         }
         let tab_id = self.active_tab().id.clone();
-        self.pending_pick = Some(PendingPick {
+        self.pending.pick = Some(PendingPick {
             tab_id,
             sql: String::new(),
             after: PickAfter::Rebind,
@@ -174,7 +174,7 @@ impl SqlHighlandView {
     /// picks any row. Builder-safe like the other dialogs: everything is
     /// cloned in, the builder never touches the view entity.
     pub(crate) fn open_conn_pick_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pending) = self.pending_pick.clone() else {
+        let Some(pending) = self.pending.pick.clone() else {
             return;
         };
         struct PickRow {
@@ -403,7 +403,7 @@ impl SqlHighlandView {
                         .on_click(move |_, window, cx: &mut App| {
                             cancel_view
                                 .update(cx, |this, cx| {
-                                    this.pending_pick = None;
+                                    this.pending.pick = None;
                                     cx.notify();
                                 })
                                 .ok();
@@ -422,7 +422,7 @@ impl SqlHighlandView {
                             window.close_dialog(cx);
                             add_view
                                 .update(cx, |this, cx| {
-                                    this.pending_pick = None;
+                                    this.pending.pick = None;
                                     this.start_add(window, cx);
                                 })
                                 .ok();
@@ -461,7 +461,7 @@ impl SqlHighlandView {
                 .on_cancel(move |_, window, cx: &mut App| {
                     esc_view
                         .update(cx, |this, cx| {
-                            this.pending_pick = None;
+                            this.pending.pick = None;
                             cx.notify();
                         })
                         .ok();

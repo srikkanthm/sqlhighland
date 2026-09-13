@@ -329,6 +329,70 @@ pub(crate) enum ScriptResume {
     Buffer,
 }
 
+/// State for the connection add/edit dialog: the in-progress `pending_*` option
+/// pills, the stable form input entities (which persist across dialog opens),
+/// and the keychain password snapshot. Split out of [`SqlHighlandView`] so the
+/// view's field list stays navigable as features are added.
+pub(crate) struct ConnectionDialogState {
+    /// Index being edited (`None` = adding).
+    pub(crate) editing: Option<usize>,
+    /// Pending environment tag, set by start_add/start_edit, mutated by the
+    /// dialog's pill row, read by save.
+    pub(crate) pending_env: Environment,
+    /// Same pattern for role / service-kind / SSL / password-mode rows.
+    pub(crate) pending_role: OracleRole,
+    pub(crate) pending_service_kind: ServiceKind,
+    pub(crate) pending_ssl: bool,
+    pub(crate) pending_password_mode: PasswordMode,
+    /// Pending database engine. Only Oracle exists today, so the row is
+    /// display-only — but the dialog owns the value like role/kind.
+    pub(crate) pending_engine: DbEngine,
+    /// Password field value when a Keychain-mode dialog opened (None
+    /// otherwise). Keychain mode saves only *typed* changes: an untouched
+    /// blank field keeps the stored entry instead of deleting it.
+    pub(crate) password_snapshot: Option<String>,
+    // Form fields (entities persist across dialog open/close).
+    pub(crate) name: Entity<InputState>,
+    pub(crate) host: Entity<InputState>,
+    pub(crate) port: Entity<InputState>,
+    pub(crate) service: Entity<InputState>,
+    pub(crate) user: Entity<InputState>,
+    pub(crate) password: Entity<InputState>,
+}
+
+/// Runs paused on a modal: the bind-variable dialog, the connection picker, or
+/// the password prompt. At most one is set; each carries enough to resume.
+pub(crate) struct PendingOps {
+    /// Run waiting on the bind dialog (cleared on submit or cancel).
+    pub(crate) bind: Option<PendingBind>,
+    /// Run waiting on the connection picker (cleared on pick or cancel).
+    pub(crate) pick: Option<PendingPick>,
+    /// Password prompt in flight (cleared on submit or cancel). `run` is set
+    /// when the prompt gates a query run rather than a plain connect.
+    pub(crate) password: Option<PendingPassword>,
+}
+
+/// Per-connection autocomplete dictionary caches and schema-browser state.
+pub(crate) struct BrowserState {
+    /// Dictionary snapshots per connection id for autocomplete. Filled on the
+    /// background executor; the provider only clones the `Arc`.
+    pub(crate) meta: std::collections::HashMap<String, SharedCache>,
+    /// Usage counts `(connection_id, UPPER_LABEL)` bumping executed table
+    /// names; feeds completion ranking (recency/frequency boost).
+    pub(crate) usage: std::collections::HashMap<(String, String), u64>,
+    /// Open schema-browser connections.
+    pub(crate) open: std::collections::HashSet<String>,
+    /// Expanded tree node ids per connection (`s:{schema}`,
+    /// `g:{schema}/{group}`, `o:{schema}/{T|V|S}/{object}`); the source of
+    /// truth reapplied on every rebuild (filter/cache refresh), fed by
+    /// `TreeEvent`s. Per-connection so identical schemas don't mirror.
+    pub(crate) expanded: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    pub(crate) trees: std::collections::HashMap<String, Entity<TreeState>>,
+    /// Client-side tree filter, one input per open connection (entity
+    /// persists while open; Change rebuilds that connection's tree).
+    pub(crate) filters: std::collections::HashMap<String, Entity<InputState>>,
+}
+
 /// The main application view: connections, tabs, sessions, and rendering.
 pub struct SqlHighlandView {
     pub(crate) pool: SessionPool,
@@ -349,21 +413,9 @@ pub struct SqlHighlandView {
     /// mouse drags — `ResizablePanel::size()` is initial-only, which is
     /// why an `editor_h` field never moved the panel.
     pub(crate) editor_split: Entity<ResizableState>,
-    /// Index being edited in the connection dialog (`None` = adding).
-    pub(crate) editing: Option<usize>,
-    /// Pending environment tag for the open connection dialog. Set by
-    /// start_add/start_edit, mutated by the dialog's pill row, read by save.
-    /// (Only one connection dialog opens at a time, like `editing`.)
-    pub(crate) pending_env: Environment,
-    /// Same pattern for role / service-kind / SSL / password-mode rows.
-    pub(crate) pending_role: OracleRole,
-    pub(crate) pending_service_kind: ServiceKind,
-    pub(crate) pending_ssl: bool,
-    pub(crate) pending_password_mode: PasswordMode,
-    /// Pending database engine for the open connection dialog. Only
-    /// Oracle exists today, so the row is display-only — but the dialog
-    /// owns the value like role/kind, ready for a second pill.
-    pub(crate) pending_engine: DbEngine,
+    /// Connection add/edit dialog: open form, pending option pills, and stable
+    /// editor entities. See [`ConnectionDialogState`].
+    pub(crate) dialog: ConnectionDialogState,
     /// Dialog open counter + the counter value when Settings opened.
     /// Cmd+, toggles Settings off only when no other dialog opened since
     /// (top must be Settings); otherwise Settings stacks on top instead
@@ -371,17 +423,6 @@ pub struct SqlHighlandView {
     /// &self in some cases (dialog builders re-run every render).
     pub(crate) dialog_seq: std::cell::Cell<u64>,
     pub(crate) settings_seq: std::cell::Cell<Option<u64>>,
-    /// Password field value when a Keychain-mode dialog opened (None
-    /// otherwise). Keychain mode saves only *typed* changes: an untouched
-    /// blank field keeps the stored entry instead of deleting it.
-    pub(crate) password_snapshot: Option<String>,
-    // Dialog form fields (entities persist across dialog open/close).
-    pub(crate) name: Entity<InputState>,
-    pub(crate) host: Entity<InputState>,
-    pub(crate) port: Entity<InputState>,
-    pub(crate) service: Entity<InputState>,
-    pub(crate) user: Entity<InputState>,
-    pub(crate) password: Entity<InputState>,
     /// Password prompt field (Ask mode / Keychain miss). Cleared on submit.
     pub(crate) pwd_prompt: Entity<InputState>,
     /// Transient notice for the status bar ("Saved X", "Connecting…").
@@ -390,44 +431,23 @@ pub struct SqlHighlandView {
     /// even `&name` reuses the value without prompting (SQL*Plus parity).
     pub(crate) defines:
         std::collections::HashMap<String, std::collections::HashMap<String, String>>,
-    /// Run waiting on the bind dialog (cleared on submit or cancel).
-    pub(crate) pending_bind: Option<PendingBind>,
-    /// Run waiting on the connection picker (cleared on pick or cancel).
-    pub(crate) pending_pick: Option<PendingPick>,
+    /// In-flight operations waiting on a dialog (bind vars / picker /
+    /// password prompt). At most one is set at a time.
+    pub(crate) pending: PendingOps,
     /// Session-unlocked passwords, per connection id. Memory only, never
     /// persisted: Ask mode and Keychain-miss prompts land here, and every
     /// connect/run path prefers them over whatever is stored. Values are
     /// [`Zeroizing`], so removing a connection (or dropping the view) wipes
     /// the secret from memory.
     pub(crate) unlocked: std::collections::HashMap<String, Zeroizing<String>>,
-    /// Password prompt in flight (cleared on submit or cancel). `run` is
-    /// set when the prompt gates a query run rather than a plain connect.
-    pub(crate) pending_password: Option<PendingPassword>,
-    /// Dictionary snapshots per connection id for autocomplete. Filled on
-    /// the background executor; the provider only clones the `Arc`.
-    pub(crate) meta: std::collections::HashMap<String, SharedCache>,
-    /// Usage counts `(connection_id, UPPER_LABEL)` bumping executed table
-    /// names; feeds completion ranking (recency/frequency boost).
-    pub(crate) usage: std::collections::HashMap<(String, String), u64>,
+    /// Per-connection dictionary caches, usage counts, and schema-browser
+    /// state. See [`BrowserState`].
+    pub(crate) browser: BrowserState,
     /// Suggestion popup fires while typing (vs manual shortcut only).
     /// Mirrors `Preferences.completion`; toggled in Settings.
     pub(crate) complete_auto: bool,
     /// Include SYS/SYSTEM/etc. objects in suggestions. Mirrors preferences.
     pub(crate) show_system: bool,
-    /// Schema-browser trees, per connection id. Trees appear under their
-    /// connection row, independent of the active tab — expand warms the
-    /// dictionary via `ensure_meta`, and its completion hook rebuilds.
-    pub(crate) browser_open: std::collections::HashSet<String>,
-    /// Expanded tree node ids per connection (`s:{schema}`,
-    /// `g:{schema}/{group}`, `o:{schema}/{T|V|S}/{object}`); the source of
-    /// truth reapplied on every rebuild (filter/cache refresh), fed by
-    /// `TreeEvent`s. Per-connection so identical schemas don't mirror.
-    pub(crate) browser_expanded:
-        std::collections::HashMap<String, std::collections::HashSet<String>>,
-    pub(crate) browser_trees: std::collections::HashMap<String, Entity<TreeState>>,
-    /// Client-side tree filter, one input per open connection (entity
-    /// persists while open; Change rebuilds that connection's tree).
-    pub(crate) browser_filters: std::collections::HashMap<String, Entity<InputState>>,
     /// Window-lifetime subscriptions (OS appearance observer for System
     /// theme mode). Kept alive by ownership, like per-tab `_subs`.
     pub(crate) _subs: Vec<Subscription>,
@@ -610,37 +630,43 @@ impl SqlHighlandView {
             untitled_counter: 0,
             sidebar_collapsed: false,
             editor_split: cx.new(|_| ResizableState::default()),
-            editing: None,
-            pending_env: Environment::default(),
-            pending_role: OracleRole::default(),
-            pending_service_kind: ServiceKind::default(),
-            pending_ssl: false,
-            pending_password_mode: PasswordMode::default(),
-            pending_engine: DbEngine::default(),
+            dialog: ConnectionDialogState {
+                editing: None,
+                pending_env: Environment::default(),
+                pending_role: OracleRole::default(),
+                pending_service_kind: ServiceKind::default(),
+                pending_ssl: false,
+                pending_password_mode: PasswordMode::default(),
+                pending_engine: DbEngine::default(),
+                password_snapshot: None,
+                name,
+                host,
+                port,
+                service,
+                user,
+                password,
+            },
             dialog_seq: std::cell::Cell::new(0),
             settings_seq: std::cell::Cell::new(None),
-            password_snapshot: None,
-            name,
-            host,
-            port,
-            service,
-            user,
-            password,
             pwd_prompt,
             status: "".into(),
             defines: std::collections::HashMap::new(),
-            pending_bind: None,
-            pending_pick: None,
+            pending: PendingOps {
+                bind: None,
+                pick: None,
+                password: None,
+            },
             unlocked: std::collections::HashMap::new(),
-            pending_password: None,
-            meta: std::collections::HashMap::new(),
-            usage: std::collections::HashMap::new(),
+            browser: BrowserState {
+                meta: std::collections::HashMap::new(),
+                usage: std::collections::HashMap::new(),
+                open: std::collections::HashSet::new(),
+                expanded: std::collections::HashMap::new(),
+                trees: std::collections::HashMap::new(),
+                filters: std::collections::HashMap::new(),
+            },
             complete_auto: prefs.completion == CompleteMode::Auto,
             show_system: prefs.show_system_schemas,
-            browser_open: std::collections::HashSet::new(),
-            browser_expanded: std::collections::HashMap::new(),
-            browser_trees: std::collections::HashMap::new(),
-            browser_filters: std::collections::HashMap::new(),
             _subs: Vec::new(),
         };
         // Follow the OS appearance while the theme mode is System. The

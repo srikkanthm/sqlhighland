@@ -308,8 +308,7 @@ impl SqlHighlandView {
                                                                                         // Scope changed: drop caches so
                                                                                         // the next trigger refetches
                                                                                         // with the new filter.
-                                                                                        for cache in this
-                                                                                            .meta
+                                                                                        for cache in this.browser.meta
                                                                                             .values(
                                                                                             )
                                                                                         {

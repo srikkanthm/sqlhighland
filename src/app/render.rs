@@ -17,7 +17,7 @@ impl SqlHighlandView {
         conn_id: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let Some(state) = self.browser_trees.get(conn_id).cloned() else {
+        let Some(state) = self.browser.trees.get(conn_id).cloned() else {
             return div().into_any_element();
         };
         let view = cx.entity().downgrade();
