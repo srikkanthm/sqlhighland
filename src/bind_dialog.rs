@@ -6,7 +6,7 @@
 
 use std::rc::Rc;
 
-use gpui::{App, Context, Entity, SharedString, Window, px};
+use gpui::{px, App, Context, Entity, SharedString, Window};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::*;
@@ -15,7 +15,7 @@ use gpui_kit::*;
 use crate::app::{Output, SqlHighlandView};
 use crate::conn_picker::focus_tab_editor;
 use crate::db::BindParam;
-use crate::sql::{SubVar, apply_substitutions, split_statements};
+use crate::sql::{apply_substitutions, split_statements, SubVar};
 
 /// A run deferred for variable input: the statement plus the variables that
 /// still need values. Only one bind dialog opens at a time.

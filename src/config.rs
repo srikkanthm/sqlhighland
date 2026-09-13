@@ -304,7 +304,8 @@ fn default_query_timeout() -> u64 {
 
 /// Suggestion popup behavior for the query editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum CompleteMode {    /// Popup automatically while typing (2+ chars, `.` forces columns).
+pub enum CompleteMode {
+    /// Popup automatically while typing (2+ chars, `.` forces columns).
     #[default]
     Auto,
     /// Popup only on the manual shortcut (ctrl-space).
@@ -403,7 +404,8 @@ mod tests {
     }
 
     #[test]
-    fn round_trip() {        let dir = std::env::temp_dir().join(format!("sqlhighland-test-{}", std::process::id()));
+    fn round_trip() {
+        let dir = std::env::temp_dir().join(format!("sqlhighland-test-{}", std::process::id()));
         let path = dir.join("connections.toml");
         let cfg = SavedConfig {
             connections: vec![ConnectionConfig::default()],
@@ -427,18 +429,26 @@ mod tests {
     #[test]
     fn load_tightens_loose_connections_file() {
         use std::os::unix::fs::PermissionsExt as _;
-        let dir =
-            std::env::temp_dir().join(format!("sqlhighland-tighten-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("sqlhighland-tighten-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("connections.toml");
         std::fs::write(&path, "[[connections]]\nid = \"c1\"\nname = \"n\"\nhost = \"h\"\nport = 1521\nservice_name = \"s\"\nuser = \"u\"\npassword = \"p\"\n").unwrap();
         crate::fsutil::restrict(&path, 0o644).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o644);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
         // Loading migrates the file to owner-only.
         let _ = SavedConfig::load(&path).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -489,7 +499,8 @@ mod tests {
     }
 
     #[test]
-    fn new_pref_defaults() {        // Fresh defaults: 100k grid cap, comma CSVs with headers, theme
+    fn new_pref_defaults() {
+        // Fresh defaults: 100k grid cap, comma CSVs with headers, theme
         // font at 13pt. Missing keys in old files resolve the same way.
         let p = Preferences::default();
         assert_eq!(p.result_cap, 100_000);
@@ -509,8 +520,7 @@ mod tests {
     fn old_connection_entries_default_new_options() {
         // Pre-role/SSL/password-mode files load with safe defaults: plain
         // login, service name, no TLS, legacy file password.
-        let dir =
-            std::env::temp_dir().join(format!("sqlhighland-oldconn-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("sqlhighland-oldconn-{}", std::process::id()));
         let path = dir.join("connections.toml");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

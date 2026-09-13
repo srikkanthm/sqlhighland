@@ -8,7 +8,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui::{App, Context, Entity, ScrollHandle, SharedString, Window, px};
+use gpui::{px, App, Context, Entity, ScrollHandle, SharedString, Window};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputContentType, InputState};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
@@ -16,9 +16,9 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::*;
 
-use crate::app::{PendingPassword, SqlHighlandView, env_color};
-use crate::conn_picker::PickAfter;
+use crate::app::{env_color, PendingPassword, SqlHighlandView};
 use crate::config::SavedConfig;
+use crate::conn_picker::PickAfter;
 use crate::model::{ConnectionConfig, Environment, OracleRole, PasswordMode, ServiceKind};
 use crate::schema::DbEngine;
 
@@ -74,7 +74,10 @@ impl SqlHighlandView {
         // the entry (see save_from_dialog); typing replaces it.
         let pw_hint: SharedString = if cfg.password_mode == PasswordMode::Keychain
             && !cfg.id.is_empty()
-            && crate::keychain::get(&cfg.id).ok().flatten().is_some_and(|s| !s.is_empty())
+            && crate::keychain::get(&cfg.id)
+                .ok()
+                .flatten()
+                .is_some_and(|s| !s.is_empty())
         {
             "Saved in keychain".into()
         } else {
@@ -165,14 +168,12 @@ impl SqlHighlandView {
         let pending_cell: Rc<RefCell<Environment>> = Rc::new(RefCell::new(self.pending_env));
         // Same pattern for role / service-kind / SSL / password-mode rows.
         let role_cell: Rc<RefCell<OracleRole>> = Rc::new(RefCell::new(self.pending_role));
-        let kind_cell: Rc<RefCell<ServiceKind>> =
-            Rc::new(RefCell::new(self.pending_service_kind));
+        let kind_cell: Rc<RefCell<ServiceKind>> = Rc::new(RefCell::new(self.pending_service_kind));
         let ssl_cell: Rc<RefCell<bool>> = Rc::new(RefCell::new(self.pending_ssl));
         let pwmode_cell: Rc<RefCell<PasswordMode>> =
             Rc::new(RefCell::new(self.pending_password_mode));
         // Same pattern for the engine row (today a single Oracle pill).
-        let engine_cell: Rc<RefCell<DbEngine>> =
-            Rc::new(RefCell::new(self.pending_engine));
+        let engine_cell: Rc<RefCell<DbEngine>> = Rc::new(RefCell::new(self.pending_engine));
         // Owned scroll handle: the form now spans role/service/SSL/password
         // rows, so small windows overflow. Explicit handle + overflow_y_scroll
         // (NOT the Scrollable wrapper, whose caller-id keying misbehaves for
@@ -207,210 +208,235 @@ impl SqlHighlandView {
                                 .overflow_y_scroll()
                                 .track_scroll(&scroll_handle)
                                 .child(
-                            v_flex()
-                                .gap_2()
-                                .w_full()
-                                // Gutter for the overlaid scrollbar track
-                                // (16px): without it the thumb sits on top
-                                // of the full-width inputs.
-                                .pr_5()
-                                .child(
                                     v_flex()
-                                        .gap_1()
-                                        .child(div().text_xs().text_color(muted).child("Database type"))
-                                        .child({
-                                            let cell = engine_cell.clone();
-                                            let current = *cell.borrow();
-                                            let row_view = view.clone();
-                                            dialog_pills(
-                                                "conn-engine",
-                                                &[(DbEngine::Oracle, DbEngine::Oracle.label())],
-                                                current,
-                                                Rc::new(move |e, cx: &mut App| {
-                                                    *cell.borrow_mut() = e;
-                                                    row_view
-                                                        .update(cx, |this, cx| {
-                                                            this.pending_engine = e;
-                                                            cx.notify();
-                                                        })
-                                                        .ok();
+                                        .gap_2()
+                                        .w_full()
+                                        // Gutter for the overlaid scrollbar track
+                                        // (16px): without it the thumb sits on top
+                                        // of the full-width inputs.
+                                        .pr_5()
+                                        .child(
+                                            v_flex()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .child("Database type"),
+                                                )
+                                                .child({
+                                                    let cell = engine_cell.clone();
+                                                    let current = *cell.borrow();
+                                                    let row_view = view.clone();
+                                                    dialog_pills(
+                                                        "conn-engine",
+                                                        &[(
+                                                            DbEngine::Oracle,
+                                                            DbEngine::Oracle.label(),
+                                                        )],
+                                                        current,
+                                                        Rc::new(move |e, cx: &mut App| {
+                                                            *cell.borrow_mut() = e;
+                                                            row_view
+                                                                .update(cx, |this, cx| {
+                                                                    this.pending_engine = e;
+                                                                    cx.notify();
+                                                                })
+                                                                .ok();
+                                                        }),
+                                                        cx,
+                                                    )
                                                 }),
-                                                cx
-                                            )
-                                        })
-                                )
-                                .child(dialog_field("Name", &name, false, muted))
-                        .child(dialog_field("Host", &host, false, muted))
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .child(dialog_field("Port", &port, false, muted)),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .child(dialog_field(
-                                            if *kind_cell.borrow() == ServiceKind::Sid {
-                                                "SID"
-                                            } else {
-                                                "Service name"
-                                            },
-                                            &service,
-                                            false,
-                                            muted
+                                        )
+                                        .child(dialog_field("Name", &name, false, muted))
+                                        .child(dialog_field("Host", &host, false, muted))
+                                        .child(
+                                            h_flex()
+                                                .gap_2()
+                                                .child(div().flex_1().child(dialog_field(
+                                                    "Port", &port, false, muted,
+                                                )))
+                                                .child(div().flex_1().child(dialog_field(
+                                                    if *kind_cell.borrow() == ServiceKind::Sid {
+                                                        "SID"
+                                                    } else {
+                                                        "Service name"
+                                                    },
+                                                    &service,
+                                                    false,
+                                                    muted,
+                                                ))),
+                                        )
+                                        .child(dialog_field("User", &user, false, muted))
+                                        .child(dialog_field("Password", &password, true, muted))
+                                        .child(
+                                            v_flex()
+                                                .gap_1()
+                                                .child(
+                                                    div().text_xs().text_color(muted).child("Role"),
+                                                )
+                                                .child({
+                                                    let cell = role_cell.clone();
+                                                    let current = *cell.borrow();
+                                                    let row_view = view.clone();
+                                                    dialog_pills(
+                                                        "conn-role",
+                                                        &[
+                                                            (OracleRole::Default, "SYSDEFAULT"),
+                                                            (OracleRole::Sysdba, "SYSDBA"),
+                                                            (OracleRole::Sysoper, "SYSOPER"),
+                                                        ],
+                                                        current,
+                                                        Rc::new(move |r, cx: &mut App| {
+                                                            *cell.borrow_mut() = r;
+                                                            row_view
+                                                                .update(cx, |this, cx| {
+                                                                    this.pending_role = r;
+                                                                    cx.notify();
+                                                                })
+                                                                .ok();
+                                                        }),
+                                                        cx,
+                                                    )
+                                                }),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .child("Service lookup"),
+                                                )
+                                                .child({
+                                                    let cell = kind_cell.clone();
+                                                    let current = *cell.borrow();
+                                                    let row_view = view.clone();
+                                                    dialog_pills(
+                                                        "conn-kind",
+                                                        &[
+                                                            (ServiceKind::ServiceName, "Service"),
+                                                            (ServiceKind::Sid, "SID"),
+                                                        ],
+                                                        current,
+                                                        Rc::new(move |k, cx: &mut App| {
+                                                            *cell.borrow_mut() = k;
+                                                            row_view
+                                                                .update(cx, |this, cx| {
+                                                                    this.pending_service_kind = k;
+                                                                    cx.notify();
+                                                                })
+                                                                .ok();
+                                                        }),
+                                                        cx,
+                                                    )
+                                                }),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .child("Use SSL (TCPS)"),
+                                                )
+                                                .child({
+                                                    let cell = ssl_cell.clone();
+                                                    let current = *cell.borrow();
+                                                    let row_view = view.clone();
+                                                    Switch::new("conn-ssl")
+                                                        .small()
+                                                        .checked(current)
+                                                        .on_change(move |checked, _, cx| {
+                                                            *cell.borrow_mut() = *checked;
+                                                            row_view
+                                                                .update(cx, |this, cx| {
+                                                                    this.pending_ssl = *checked;
+                                                                    cx.notify();
+                                                                })
+                                                                .ok();
+                                                        })
+                                                }),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .child("Password storage"),
+                                                )
+                                                .child({
+                                                    let cell = pwmode_cell.clone();
+                                                    let current = *cell.borrow();
+                                                    let row_view = view.clone();
+                                                    dialog_pills(
+                                                        "conn-pwmode",
+                                                        &[
+                                                            (PasswordMode::File, "Save in file"),
+                                                            (PasswordMode::Keychain, "Keychain"),
+                                                            (PasswordMode::Ask, "Prompt each time"),
+                                                        ],
+                                                        current,
+                                                        Rc::new(move |m, cx: &mut App| {
+                                                            *cell.borrow_mut() = m;
+                                                            row_view
+                                                                .update(cx, |this, cx| {
+                                                                    this.pending_password_mode = m;
+                                                                    cx.notify();
+                                                                })
+                                                                .ok();
+                                                        }),
+                                                        cx,
+                                                    )
+                                                }),
+                                        )
+                                        .child(div().text_xs().text_color(muted).child(
+                                            "Database: the PDB service name (e.g. highlandpdb).",
                                         ))
-                                ),
-                        )
-                        .child(dialog_field("User", &user, false, muted))
-                        .child(dialog_field("Password", &password, true, muted))
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_xs().text_color(muted).child("Role"))
-                                .child({
-                                    let cell = role_cell.clone();
-                                    let current = *cell.borrow();
-                                    let row_view = view.clone();
-                                    dialog_pills(
-                                        "conn-role",
-                                        &[
-                                            (OracleRole::Default, "SYSDEFAULT"),
-                                            (OracleRole::Sysdba, "SYSDBA"),
-                                            (OracleRole::Sysoper, "SYSOPER")
-                                        ],
-                                        current,
-                                        Rc::new(move |r, cx: &mut App| {
-                                            *cell.borrow_mut() = r;
-                                            row_view
-                                                .update(cx, |this, cx| {
-                                                    this.pending_role = r;
-                                                    cx.notify();
-                                                })
-                                                .ok();
-                                        }),
-                                        cx
-                                    )
-                                })
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_xs().text_color(muted).child("Service lookup"))
-                                .child({
-                                    let cell = kind_cell.clone();
-                                    let current = *cell.borrow();
-                                    let row_view = view.clone();
-                                    dialog_pills(
-                                        "conn-kind",
-                                        &[
-                                            (ServiceKind::ServiceName, "Service"),
-                                            (ServiceKind::Sid, "SID")
-                                        ],
-                                        current,
-                                        Rc::new(move |k, cx: &mut App| {
-                                            *cell.borrow_mut() = k;
-                                            row_view
-                                                .update(cx, |this, cx| {
-                                                    this.pending_service_kind = k;
-                                                    cx.notify();
-                                                })
-                                                .ok();
-                                        }),
-                                        cx
-                                    )
-                                })
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .child(div().text_xs().text_color(muted).child("Use SSL (TCPS)"))
-                                .child({
-                                    let cell = ssl_cell.clone();
-                                    let current = *cell.borrow();
-                                    let row_view = view.clone();
-                                    Switch::new("conn-ssl")
-                                        .small()
-                                        .checked(current)
-                                        .on_change(move |checked, _, cx| {
-                                            *cell.borrow_mut() = *checked;
-                                            row_view
-                                                .update(cx, |this, cx| {
-                                                    this.pending_ssl = *checked;
-                                                    cx.notify();
-                                                })
-                                                .ok();
-                                        })
-                                })
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_xs().text_color(muted).child("Password storage"))
-                                .child({
-                                    let cell = pwmode_cell.clone();
-                                    let current = *cell.borrow();
-                                    let row_view = view.clone();
-                                    dialog_pills(
-                                        "conn-pwmode",
-                                        &[
-                                            (PasswordMode::File, "Save in file"),
-                                            (PasswordMode::Keychain, "Keychain"),
-                                            (PasswordMode::Ask, "Prompt each time")
-                                        ],
-                                        current,
-                                        Rc::new(move |m, cx: &mut App| {
-                                            *cell.borrow_mut() = m;
-                                            row_view
-                                                .update(cx, |this, cx| {
-                                                    this.pending_password_mode = m;
-                                                    cx.notify();
-                                                })
-                                                .ok();
-                                        }),
-                                        cx
-                                    )
-                                })
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child("Database: the PDB service name (e.g. highlandpdb).")
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_xs().text_color(muted).child("Environment"))
-                                .child(h_flex().gap_1().children(
-                                    Environment::ALL.iter().enumerate().map(|(ix, env)| {
-                                        let selected = current_env == *env;
-                                        let row_view = save_view.clone();
-                                        let pending_click = pending.clone();
-                                        let (label, text_color, bg) = match env_color(*env, cx) {
-                                            Some(color) => (
-                                                env.label().unwrap_or("").to_string(),
-                                                color,
-                                                if selected {
-                                                    color.opacity(0.25)
-                                                } else {
-                                                    color.opacity(0.0)
-                                                },
-                                            ),
-                                            None => (
-                                                "None".to_string(),
-                                                muted,
-                                                if selected {
-                                                    muted.opacity(0.25)
-                                                } else {
-                                                    muted.opacity(0.0)
-                                                },
-                                            ),
-                                        };
-                                        div()
+                                        .child(
+                                            v_flex()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .child("Environment"),
+                                                )
+                                                .child(h_flex().gap_1().children(
+                                                    Environment::ALL.iter().enumerate().map(
+                                                        |(ix, env)| {
+                                                            let selected = current_env == *env;
+                                                            let row_view = save_view.clone();
+                                                            let pending_click = pending.clone();
+                                                            let (label, text_color, bg) =
+                                                                match env_color(*env, cx) {
+                                                                    Some(color) => (
+                                                                        env.label()
+                                                                            .unwrap_or("")
+                                                                            .to_string(),
+                                                                        color,
+                                                                        if selected {
+                                                                            color.opacity(0.25)
+                                                                        } else {
+                                                                            color.opacity(0.0)
+                                                                        },
+                                                                    ),
+                                                                    None => (
+                                                                        "None".to_string(),
+                                                                        muted,
+                                                                        if selected {
+                                                                            muted.opacity(0.25)
+                                                                        } else {
+                                                                            muted.opacity(0.0)
+                                                                        },
+                                                                    ),
+                                                                };
+                                                            div()
                                             .id(("conn-env", ix))
                                             .px_2()
                                             .py_1()
@@ -430,22 +456,23 @@ impl SqlHighlandView {
                                                     .ok();
                                             })
                                             .child(label)
-                                    }),
-                                )),
-                        )
-                        )
-                        // Visible scrollbar: the kit default only shows on
-                        // hover, which hides overflow in a short dialog.
-                        // Overlay bound to the same owned handle, so it
-                        // tracks without the caller-id Scrollable wrapper.
-                        .child(
-                            div().absolute().inset_0().child(
-                                Scrollbar::vertical(&scroll_sb)
-                                    .id("conn-dialog-scrollbar")
-                                    .mode(ScrollbarMode::Always),
-                            ),
-                        )
-                        )
+                                                        },
+                                                    ),
+                                                )),
+                                        ),
+                                )
+                                // Visible scrollbar: the kit default only shows on
+                                // hover, which hides overflow in a short dialog.
+                                // Overlay bound to the same owned handle, so it
+                                // tracks without the caller-id Scrollable wrapper.
+                                .child(
+                                    div().absolute().inset_0().child(
+                                        Scrollbar::vertical(&scroll_sb)
+                                            .id("conn-dialog-scrollbar")
+                                            .mode(ScrollbarMode::Always),
+                                    ),
+                                ),
+                        ),
                 )
                 .footer(dialog_footer(
                     "dlg-cancel",
@@ -515,7 +542,6 @@ impl SqlHighlandView {
         self.status = format!("Saved {}", cfg.name).into();
         cx.notify();
     }
-
 }
 
 pub(crate) fn dialog_field(
@@ -548,8 +574,9 @@ fn dialog_pills<T: Copy + PartialEq + 'static>(
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let accent = cx.theme().accent;
-    h_flex().gap_1().children(options.iter().enumerate().map(
-        |(ix, (value, label))| {
+    h_flex()
+        .gap_1()
+        .children(options.iter().enumerate().map(|(ix, (value, label))| {
             let value = *value;
             let selected = current == value;
             let pick = pick.clone();
@@ -574,9 +601,8 @@ fn dialog_pills<T: Copy + PartialEq + 'static>(
                 .hover(move |this| this.bg(accent.opacity(0.25)))
                 .on_click(move |_, _, cx| pick(value, cx))
                 .child(label.to_string())
-        },
-    ))
-    .into_any_element()
+        }))
+        .into_any_element()
 }
 
 /// Standard form footer: right-aligned Cancel (closes the top dialog)
@@ -629,17 +655,23 @@ impl SqlHighlandView {
                     dialog
                         .title(format!("Password for {name}"))
                         .w(px(360.))
-                        .child(crate::connection_dialog::dialog_field("Password", &pwd_in, true, cx.theme().muted_foreground))
+                        .child(crate::connection_dialog::dialog_field(
+                            "Password",
+                            &pwd_in,
+                            true,
+                            cx.theme().muted_foreground,
+                        ))
                         .footer(crate::connection_dialog::dialog_footer(
                             "pwd-cancel",
                             Button::new("pwd-connect")
                                 .label("Connect")
                                 .primary()
                                 .on_click(move |_, window, cx| {
-                                    submit.update(cx, |this, cx| {
-                                        this.submit_password(window, cx);
-                                    })
-                                    .ok();
+                                    submit
+                                        .update(cx, |this, cx| {
+                                            this.submit_password(window, cx);
+                                        })
+                                        .ok();
                                 }),
                         ))
                 });

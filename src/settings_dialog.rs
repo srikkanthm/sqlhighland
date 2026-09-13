@@ -4,16 +4,18 @@
 //! apply live, persist to preferences.toml, and notify the view for a
 //! full re-render (GPUI only repaints dirty views).
 
-use gpui::{App, Context, Entity, Window, px};
+use gpui::{px, App, Context, Entity, Window};
 use gpui_kit::component::button::Button;
-use gpui_kit::component::setting::{RenderOptions, SettingGroup, SettingItem, SettingPage, Settings};
+use gpui_kit::component::setting::{
+    RenderOptions, SettingGroup, SettingItem, SettingPage, Settings,
+};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use gpui_kit_assets::IconName as KitIcon;
 
-use crate::app::{SqlHighlandView, app_view};
+use crate::app::{app_view, SqlHighlandView};
 use crate::config::{CompleteMode, Preferences, SavedConfig, TabsManifest, THEME_LIST};
 
 impl SqlHighlandView {
@@ -48,8 +50,7 @@ impl SqlHighlandView {
     /// use take_settings_toggle for lack of &mut self. Same contract.
     /// Public only for main.rs; not part of the app's UI surface.
     pub fn note_dialog_open_for_settings(&mut self, active: bool) -> bool {
-        let top_is_settings =
-            self.settings_seq.get() == Some(self.dialog_seq.get()) && active;
+        let top_is_settings = self.settings_seq.get() == Some(self.dialog_seq.get()) && active;
         self.dialog_seq.set(self.dialog_seq.get() + 1);
         if top_is_settings {
             self.settings_seq.set(None);
@@ -753,9 +754,10 @@ fn settings_pick_row(
                 .gap_2()
                 .items_center()
                 .child(
-                    v_flex().flex_1().child(div().text_sm().child(label)).children(
-                        detail.map(|d| div().text_xs().text_color(muted).child(d)),
-                    ),
+                    v_flex()
+                        .flex_1()
+                        .child(div().text_sm().child(label))
+                        .children(detail.map(|d| div().text_xs().text_color(muted).child(d))),
                 )
                 .when(selected, |this| {
                     this.child(div().text_color(muted).child(KitIcon::Check))

@@ -3,6 +3,10 @@ name = "sqlhighland"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.89"
+description = "A native, cross-platform SQL client built with Rust + GPUI."
+repository = "https://github.com/srikkanthm/sqlhighland"
+# Application crate: never published to crates.io.
+publish = false
 
 [dependencies]
 # Official Oracle thin driver (pure Rust, no Instant Client). Beta — expect API churn.
@@ -12,9 +16,6 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 # Stable ids for saved connections.
 uuid = { version = "1", features = ["v4"] }
-# macOS login keychain for stored connection passwords. Pinned like the
-# rest; the .crate is vendored so this resolves offline.
-security-framework = "=3.7.0"
 # SQL formatter (https://github.com/shssoichiro/sqlformat-rs).
 sqlformat = "=0.5.0"
 # LSP types for the editor completion provider (gui-only).
@@ -30,6 +31,12 @@ gpui-kit-assets = { version = "=0.6.1", optional = true }
 # Native .xlsx export (pure Rust, no native deps). Pinned like the rest.
 # `constant_memory` streams worksheet writes (uncapped exports stay lean).
 rust_xlsxwriter = { version = "=0.99.0", features = ["constant_memory"] }
+
+# OS keychain backend, per platform. macOS login keychain today (Apple-only
+# crate); Windows (Credential Manager) / Linux (Secret Service) to follow.
+# Pinned like the rest; the .crate is vendored so this resolves offline.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+security-framework = "=3.7.0"
 
 [features]
 default = []
@@ -54,4 +61,17 @@ required-features = ["gui"]
 [[test]]
 name = "menus"
 path = "tests/menus.rs"
+required-features = ["gui"]
+
+# gui-gated tests: these import `sqlhighland::app` / `guitheme`, so without
+# `required-features` a plain `cargo test`/`clippy --all-targets` fails to
+# compile them.
+[[test]]
+name = "browser_tree"
+path = "tests/browser_tree.rs"
+required-features = ["gui"]
+
+[[test]]
+name = "themes"
+path = "tests/themes.rs"
 required-features = ["gui"]

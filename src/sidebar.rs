@@ -14,12 +14,16 @@ use gpui_kit::*;
 use gpui_kit_assets::IconName as KitIcon;
 
 use crate::app::{
-    ConnMenuOp, DismissResults, NextTab, OpenSql, PrevTab, SaveSql, SaveSqlAs, SqlHighlandView,
-    conn_menu_item, env_tag,
+    conn_menu_item, env_tag, ConnMenuOp, DismissResults, NextTab, OpenSql, PrevTab, SaveSql,
+    SaveSqlAs, SqlHighlandView,
 };
 
 impl SqlHighlandView {
-    pub(crate) fn render_connection_row(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_connection_row(
+        &self,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let cfg = &self.connections[ix];
         let is_live = self.live.contains(&cfg.id);
         let view = cx.entity().downgrade();
@@ -32,73 +36,78 @@ impl SqlHighlandView {
         // connection context menu, and anything inside its hitbox fires
         // both menus on right-click (one menu per hitbox, last wins).
         let row_body = h_flex()
-                    .gap_2()
-                    .items_stretch()
-                    .px_2()
-                    .py_1()
-                    // Status bar: the live indicator — success green when
-                    // connected, faint border tone when idle. First child
-                    // of the horizontal body so items_stretch gives it
-                    // full row height (as a row-level child it collapsed
-                    // to zero height and never painted).
-                    .child(div().id(("conn-status", ix)).test_support().w(px(3.)).rounded_full().bg(if is_live {
+            .gap_2()
+            .items_stretch()
+            .px_2()
+            .py_1()
+            // Status bar: the live indicator — success green when
+            // connected, faint border tone when idle. First child
+            // of the horizontal body so items_stretch gives it
+            // full row height (as a row-level child it collapsed
+            // to zero height and never painted).
+            .child(
+                div()
+                    .id(("conn-status", ix))
+                    .test_support()
+                    .w(px(3.))
+                    .rounded_full()
+                    .bg(if is_live {
                         cx.theme().success
                     } else {
                         cx.theme().border
-                    }))
-                    // Schema-browser disclosure: per-connection tree below.
+                    }),
+            )
+            // Schema-browser disclosure: per-connection tree below.
+            .child(
+                Button::new(("conn-expand", ix))
+                    .icon(if browser_open {
+                        KitIcon::ChevronDown
+                    } else {
+                        KitIcon::ChevronRight
+                    })
+                    .ghost()
+                    .with_size(px(24.))
+                    .tooltip("Browse schema")
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.toggle_browser(&toggle_id, window, cx);
+                    })),
+            )
+            .child(
+                Button::new(("conn-icon", ix))
+                    .icon(KitIcon::Database)
+                    .ghost()
+                    .with_size(px(24.))
+                    // Live state reads from the icon + the 3px
+                    // status bar, not a full-row wash.
+                    .text_color(if is_live {
+                        cx.theme().success
+                    } else {
+                        cx.theme().muted_foreground
+                    }),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .justify_center()
+                    // Truncate (not clip): long names collapse
+                    // to an ellipsis when the pane shrinks instead of
+                    // overflowing or pushing the layout.
                     .child(
-                        Button::new(("conn-expand", ix))
-                            .icon(if browser_open {
-                                KitIcon::ChevronDown
-                            } else {
-                                KitIcon::ChevronRight
-                            })
-                            .ghost()
-                            .with_size(px(24.))
-                            .tooltip("Browse schema")
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                this.toggle_browser(&toggle_id, window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new(("conn-icon", ix))
-                            .icon(KitIcon::Database)
-                            .ghost()
-                            .with_size(px(24.))
-                            // Live state reads from the icon + the 3px
-                            // status bar, not a full-row wash.
-                            .text_color(if is_live {
-                                cx.theme().success
-                            } else {
-                                cx.theme().muted_foreground
-                            }),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .justify_center()
-                            // Truncate (not clip): long names collapse
-                            // to an ellipsis when the pane shrinks instead of
-                            // overflowing or pushing the layout.
+                        h_flex()
+                            .gap_1()
+                            .items_center()
                             .child(
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_sm()
-                                            .truncate()
-                                            .child(cfg.name.clone()),
-                                    )
-                                    .when_some(env_tag(cfg.environment, cx), |this, tag| {
-                                        this.child(tag)
-                                    }),
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .truncate()
+                                    .child(cfg.name.clone()),
                             )
-                    );
+                            .when_some(env_tag(cfg.environment, cx), |this, tag| this.child(tag)),
+                    ),
+            );
         let row = div()
             .id(("conn-row", ix))
             .w_full()
@@ -144,38 +153,34 @@ impl SqlHighlandView {
         // row div owns the connection context menu, and anything nested
         // inside it (visually below or not) shares its hitbox and fires
         // both menus on right-click (one menu slot, last opener wins).
-        v_flex()
-            .w_full()
-            .child(row)
-            .when(browser_open, |this| {
-                let filter_row = self
-                    .browser_filters
-                    .get(&tree_conn)
-                    .map(|f| {
-                        div().w_full().pt_1().pb_1().child(
-                            Input::new(f).w_full().h(px(18.)).text_xs(),
-                        )
-                    });
-                // Fit the visible rows with a little breathing room: row
-                // pixels vary a hair by font metrics, and any shortfall
-                // overflows into a scrollbar, while a small surplus reads
-                // as intentional padding. Capped: beyond it the tree owns
-                // its scroll and the bar is legitimate.
-                let mut rows = 0;
-                if let Some(state) = self.browser_trees.get(&tree_conn) {
-                    let state = state.read(cx);
-                    while state.entry(rows).is_some() {
-                        rows += 1;
-                    }
+        v_flex().w_full().child(row).when(browser_open, |this| {
+            let filter_row = self.browser_filters.get(&tree_conn).map(|f| {
+                div()
+                    .w_full()
+                    .pt_1()
+                    .pb_1()
+                    .child(Input::new(f).w_full().h(px(18.)).text_xs())
+            });
+            // Fit the visible rows with a little breathing room: row
+            // pixels vary a hair by font metrics, and any shortfall
+            // overflows into a scrollbar, while a small surplus reads
+            // as intentional padding. Capped: beyond it the tree owns
+            // its scroll and the bar is legitimate.
+            let mut rows = 0;
+            if let Some(state) = self.browser_trees.get(&tree_conn) {
+                let state = state.read(cx);
+                while state.entry(rows).is_some() {
+                    rows += 1;
                 }
-                let height_px = (44.0 + rows as f32 * 30.0).min(320.0);
-                this.child(
-                    v_flex()
-                        .w_full()
-                        .h(px(height_px))
-                        .pl(px(8.))
-                        .pr(px(2.))
-                        .pb_1()
+            }
+            let height_px = (44.0 + rows as f32 * 30.0).min(320.0);
+            this.child(
+                v_flex()
+                    .w_full()
+                    .h(px(height_px))
+                    .pl(px(8.))
+                    .pr(px(2.))
+                    .pb_1()
                     .children(filter_row)
                     .child(
                         div()
@@ -413,8 +418,12 @@ impl SqlHighlandView {
             .into_any_element()
     }
 
-
-    pub(crate) fn toggle_sidebar(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_sidebar(
+        &mut self,
+        _: &ClickEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.set_sidebar_collapsed(!self.sidebar_collapsed, cx);
     }
 

@@ -29,14 +29,13 @@ fn main() {
                             // Same toggle as the view-level entry, inside
                             // view.update (safe here: nothing leases the view).
                             let active = window.has_active_dialog(cx);
-                            let toggle_off = view.update(cx, |this, _| {
-                                this.note_dialog_open_for_settings(active)
-                            });
-                        if !toggle_off {
-                            app::SqlHighlandView::open_settings_dialog(&view, window, cx);
-                        } else if window.has_active_dialog(cx) {
-                            window.close_dialog(cx);
-                        }
+                            let toggle_off = view
+                                .update(cx, |this, _| this.note_dialog_open_for_settings(active));
+                            if !toggle_off {
+                                app::SqlHighlandView::open_settings_dialog(&view, window, cx);
+                            } else if window.has_active_dialog(cx) {
+                                window.close_dialog(cx);
+                            }
                         }
                     });
                 }

@@ -13,8 +13,8 @@ use gpui_kit::*;
 use crate::app::SqlHighlandView;
 use crate::db::DbClient;
 use crate::metadata::{
-    MetadataCache, fetch_columns_blocking, fetch_fks_blocking, fetch_sequences_blocking,
-    fetch_tables_blocking,
+    fetch_columns_blocking, fetch_fks_blocking, fetch_sequences_blocking, fetch_tables_blocking,
+    MetadataCache,
 };
 use crate::schema::{OracleProvider, SchemaProvider as _};
 use crate::session::lock;
@@ -27,11 +27,8 @@ impl SqlHighlandView {
     /// `o:{schema}/{T|V|S}/{object}` (click → viewer tab),
     /// `c:{schema}/{object}/{column}` leaf.
     pub(crate) fn browser_tree_items(&self, conn_id: &str, filter: &str) -> Vec<TreeItem> {
-        let loading_item = |label: &str| {
-            vec![
-                TreeItem::new(format!("b:note:{label}"), label).disabled(true),
-            ]
-        };
+        let loading_item =
+            |label: &str| vec![TreeItem::new(format!("b:note:{label}"), label).disabled(true)];
         let Some(cache) = self.meta.get(conn_id) else {
             return loading_item("Loading schema…");
         };
@@ -61,7 +58,11 @@ impl SqlHighlandView {
             };
             return loading_item(label);
         }
-        let expanded = self.browser_expanded.get(conn_id).cloned().unwrap_or_default();
+        let expanded = self
+            .browser_expanded
+            .get(conn_id)
+            .cloned()
+            .unwrap_or_default();
         let exp = |id: &str| expanded.contains(id);
         // Own schema's groups sit at the root (no schema folder); every
         // other visible schema nests under "Other Users". The tree model
@@ -141,9 +142,7 @@ impl SqlHighlandView {
                 let items: Vec<TreeItem> = g
                     .sequences
                     .iter()
-                    .map(|s| {
-                        TreeItem::new(format!("o:{}:S:{s}", g.name), s.clone())
-                    })
+                    .map(|s| TreeItem::new(format!("o:{}:S:{s}", g.name), s.clone()))
                     .collect();
                 groups.push(
                     TreeItem::new(gid.clone(), format!("Sequences ({})", g.sequences.len()))
@@ -176,7 +175,12 @@ impl SqlHighlandView {
     /// Expand/collapse the schema tree under a connection. Expanding a
     /// dead connection auto-connects first; `ensure_meta` warms the
     /// dictionary and its completion hook rebuilds the tree on arrival.
-    pub(crate) fn toggle_browser(&mut self, conn_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_browser(
+        &mut self,
+        conn_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.browser_open.contains(conn_id) {
             self.browser_open.remove(conn_id);
             self.browser_trees.remove(conn_id);
@@ -356,6 +360,6 @@ impl SqlHighlandView {
             })
             .ok();
         })
-            .detach();
+        .detach();
     }
 }

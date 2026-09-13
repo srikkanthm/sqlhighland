@@ -1,0 +1,6 @@
+[toolchain]
+# The app's MSRV is 1.89 (see Cargo.toml `rust-version`); CI and local builds
+# use stable. `components` ensures rustfmt/clippy are present everywhere.
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

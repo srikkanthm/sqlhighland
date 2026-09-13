@@ -5,7 +5,7 @@
 
 use gpui::{Context, Window};
 
-use crate::app::{COMPLETE_LIMIT, SqlHighlandView};
+use crate::app::{SqlHighlandView, COMPLETE_LIMIT};
 use crate::complete::{
     allows_empty_prefix, ambiguous_columns, build_alias_map, byte_to_lsp_pos, classify_context,
     detect_join_on, display_name, function_insert, insert_text_for, is_system_schema,

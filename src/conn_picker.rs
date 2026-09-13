@@ -6,7 +6,7 @@
 
 use std::rc::Rc;
 
-use gpui::{App, Context, ScrollHandle, Window, px};
+use gpui::{px, App, Context, ScrollHandle, Window};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
@@ -14,7 +14,7 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::app::{SqlHighlandView, env_tag};
+use crate::app::{env_tag, SqlHighlandView};
 use crate::model::Environment;
 
 /// A run deferred for connection choice: the statement waits while the user
@@ -71,8 +71,7 @@ fn pick_connection_resume(
                     None
                 }
                 PickAfter::NewTab => {
-                    let new_id =
-                        this.add_tab(Some(conn_id.to_string()), String::new(), window, cx);
+                    let new_id = this.add_tab(Some(conn_id.to_string()), String::new(), window, cx);
                     if let Some(ix) = this.tab_index(&new_id) {
                         this.select_tab(ix, window, cx);
                     }
@@ -262,17 +261,12 @@ impl SqlHighlandView {
                 .w_full()
                 .child(Input::new(&search).w_full());
             if rows.is_empty() {
-                body = body.child(
-                    div()
-                        .text_sm()
-                        .text_color(muted)
-                        .child(match pick_mode {
-                            PickAfter::Run => "No connections yet — add one to run this statement.",
-                            PickAfter::NewTab | PickAfter::Rebind | PickAfter::ScriptBuffer => {
-                                "No connections yet — add one to get started."
-                            }
-                        }),
-                );
+                body = body.child(div().text_sm().text_color(muted).child(match pick_mode {
+                    PickAfter::Run => "No connections yet — add one to run this statement.",
+                    PickAfter::NewTab | PickAfter::Rebind | PickAfter::ScriptBuffer => {
+                        "No connections yet — add one to get started."
+                    }
+                }));
             } else if shown.is_empty() {
                 body = body.child(
                     div()
@@ -281,23 +275,18 @@ impl SqlHighlandView {
                         .child(format!("No matches for “{filter}”.",)),
                 );
             } else {
-                body = body.child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(match pick_mode {
-                            PickAfter::Run => "Type to filter, Enter runs on the highlighted match.",
-                            PickAfter::NewTab => {
-                                "Type to filter, Enter opens a new tab on the highlighted match."
-                            }
-                            PickAfter::Rebind => {
-                                "Type to filter, Enter rebinds the active tab to the highlighted match."
-                            }
-                            PickAfter::ScriptBuffer => {
-                                "Type to filter, Enter runs the buffer script on the highlighted match."
-                            }
-                        }),
-                );
+                body = body.child(div().text_xs().text_color(muted).child(match pick_mode {
+                    PickAfter::Run => "Type to filter, Enter runs on the highlighted match.",
+                    PickAfter::NewTab => {
+                        "Type to filter, Enter opens a new tab on the highlighted match."
+                    }
+                    PickAfter::Rebind => {
+                        "Type to filter, Enter rebinds the active tab to the highlighted match."
+                    }
+                    PickAfter::ScriptBuffer => {
+                        "Type to filter, Enter runs the buffer script on the highlighted match."
+                    }
+                }));
             }
             // Enter works off this snapshot (it runs outside the build).
             *shown_ids.borrow_mut() = shown.iter().map(|r| r.id.clone()).collect();
@@ -455,9 +444,9 @@ impl SqlHighlandView {
                         let ix = (*ok_active.borrow()).min(ids.len() - 1);
                         ids[ix].clone()
                     });
-                    let pick = pick.as_deref().and_then(|id| {
-                        ok_rows.iter().find(|r| r.id == id)
-                    });
+                    let pick = pick
+                        .as_deref()
+                        .and_then(|id| ok_rows.iter().find(|r| r.id == id));
                     match pick {
                         Some(row) => {
                             pick_connection_resume(

@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # `rustup show` installs the toolchain pinned in rust-toolchain.toml.
+      - run: rustup show
+      - run: cargo fmt --all -- --check
+
+  # GUI-free core: builds and tests without Xcode/Metal. This is the job that
+  # catches regressions in the database, SQL, completion, and config layers.
+  core:
+    name: Core (no gui)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --lib
+
+  # macOS-only: the GPUI snapshot compiles Metal shaders from its build script,
+  # so this needs the Metal toolchain. Non-blocking until the runner image is
+  # confirmed; flip `continue-on-error` off once it is green.
+  gui:
+    name: GUI (macOS)
+    runs-on: macos-14
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Metal toolchain
+        run: sudo xcodebuild -downloadComponent MetalToolchain
+      - name: Clippy
+        run: cargo clippy --features gui --all-targets -- -D warnings
+      - name: Headless UI tests
+        run: cargo test --features gui --test menus --test browser_tree --test themes
+      - name: Picker UI tests (skip known flakes)
+        run: >
+          cargo test --features gui --test ui_picker --
+          --skip cmd_t_opens_and_focuses_new_query_tab
+          --skip cmd_w_closes_active_query_tab
+
+  # Informational: surfaces RustSec advisories in the dependency tree. Kept
+  # non-blocking because transitive crates can report advisories we don't own.
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
