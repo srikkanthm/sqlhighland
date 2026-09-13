@@ -1,0 +1,84 @@
+name: Release
+
+# Publishes a signed-out macOS .app/.dmg to a GitHub Release.
+#
+# Cut a release with:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# `workflow_dispatch` runs the same build but only uploads a workflow artifact
+# (no release), so the pipeline can be tested without tagging.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    name: macOS (Apple Silicon .app + .dmg)
+    # macOS 15 arm64 (Apple Silicon). Do NOT use macos-15-intel/-large:
+    # SQLHighland ships arm64 only. macos-14 is deprecated (retires 2026-11).
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Installs the toolchain pinned in rust-toolchain.toml (stable + rustfmt/clippy).
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+
+      # Guard against a tag that doesn't match the crate version.
+      - name: Verify tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::tag v$tag does not match Cargo.toml version $ver"
+            exit 1
+          fi
+
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked --version 0.11
+      - name: Add cargo bin to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # GPUI compiles Metal shaders from its build script; Xcode 16.3+ ships the
+      # Metal compiler as a separate ~700 MB component on the runner.
+      - name: Install Metal toolchain (GPUI shaders)
+        run: sudo xcodebuild -downloadComponent MetalToolchain
+
+      # Runs before-packaging-command (`cargo build --release --features gui`)
+      # then bundles dist/SQLHighland.app + dist/SQLHighland_<ver>_aarch64.dmg.
+      - name: Package
+        run: cargo packager --release
+
+      - name: Write checksums
+        run: |
+          cd dist
+          shasum -a 256 ./*.dmg > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SQLHighland-macos-arm64
+          path: |
+            dist/*.dmg
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.dmg
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
+          fail_on_unmatched_files: true

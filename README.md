@@ -118,6 +118,11 @@ Artifacts land in `dist/` (git-ignored): `SQLHighland.app` and
 [`docs/PACKAGING.md`](docs/PACKAGING.md) for the Gatekeeper/`xattr` note, the
 icon pipeline, and signing steps if ever needed.
 
+Releases are automated: push a `v*` tag (matching `Cargo.toml`'s version) and
+[`.github/workflows/release.yml`](.github/workflows/release.yml) builds the DMG
+on an arm64 macOS runner and attaches it (plus `SHA256SUMS.txt`) to the GitHub
+Release.
+
 ## Troubleshooting
 
 - `xcrun: error: unable to find utility "metal"` → Xcode isn't selected

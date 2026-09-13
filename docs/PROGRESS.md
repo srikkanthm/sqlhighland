@@ -848,3 +848,17 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   of scope. Distribution to other Macs needs a Gatekeeper unlock
   (right-click → Open, or `xattr -dr com.apple.quarantine`). Signing steps (if
   ever needed) + the icon/verify recipes: `docs/PACKAGING.md`.
+
+## Automated GitHub Releases (2026-09-13)
+
+- `.github/workflows/release.yml`: on pushed `v*` tags (and manual
+  `workflow_dispatch`, which only uploads a workflow artifact), a `macos-15`
+  **arm64** runner verifies the tag matches `Cargo.toml`, installs
+  cargo-packager (`--locked --version 0.11`) + the Metal toolchain, runs
+  `cargo packager --release`, writes `dist/SHA256SUMS.txt`, and attaches the
+  DMG + checksums to the GitHub Release via `softprops/action-gh-release`
+  (auto-generated notes; no secrets, uses `GITHUB_TOKEN`).
+- `ci.yml` GUI job bumped `macos-14` → `macos-15` (arm64; `macos-14` is
+  deprecated, retires 2026-11, and the `-intel`/`-large` labels are x86_64).
+- Docs: `PACKAGING.md` §8 (release flow) + README pointer. Not yet exercised on
+  CI — needs a pushed tag or a manual run.

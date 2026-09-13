@@ -147,3 +147,44 @@ hdiutil detach /Volumes/SQLHighland
 The DMG contains `SQLHighland.app` plus an `Applications` symlink for
 drag-to-install. App data still lives in `~/.config/sqlhighland/`
 (`connections.toml`, `preferences.toml`, `tabs/`).
+
+## 8. Publishing a GitHub Release
+
+Automated by [`.github/workflows/release.yml`](../.github/workflows/release.yml),
+which runs on a **`macos-15` arm64** runner (Apple Silicon; `macos-15` is the
+arm64 label, while `macos-15-intel`/`-large` are x86_64).
+
+Triggered by pushing a `v*` tag, and by manual `workflow_dispatch` (which only
+uploads a workflow artifact, no release — handy for testing the pipeline).
+
+The job:
+1. verifies the tag matches `Cargo.toml`'s `version`
+   (`v0.1.0` ⇔ `version = "0.1.0"`);
+2. installs `cargo-packager` (`--locked --version 0.11`) and the Metal toolchain
+   (`xcodebuild -downloadComponent MetalToolchain`, ~700 MB, needed by GPUI's
+   shader build);
+3. runs `cargo packager --release`;
+4. writes `dist/SHA256SUMS.txt` and uploads `dist/*.dmg` + `SHA256SUMS.txt` to
+   the GitHub Release with auto-generated notes.
+
+Cut a release:
+
+```sh
+# 1. bump `version` in Cargo.toml, commit
+git commit -am "chore: release v0.1.0"
+# 2. tag and push (the tag must equal the Cargo.toml version)
+git tag v0.1.0
+git push origin main v0.1.0
+```
+
+The workflow needs no secrets: it uses the automatic `GITHUB_TOKEN`
+(`permissions: contents: write`). The uploaded DMG is **unsigned** — see §5 for
+the Gatekeeper note.
+
+Without CI, the equivalent local flow is:
+
+```sh
+cargo packager --release
+gh release create v0.1.0 dist/SQLHighland_0.1.0_aarch64.dmg --generate-notes
+```
+

@@ -93,7 +93,9 @@ jobs:
   # tests/ui_picker.rs; see docs/REVIEW.md.)
   gui:
     name: GUI (macOS)
-    runs-on: macos-14
+    # macOS 15 arm64 (Apple Silicon). macos-14 is deprecated (retires 2026-11);
+    # the -intel/-large labels would be x86_64.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
