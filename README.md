@@ -11,14 +11,25 @@ see `PROGRESS.md` for the build log and `PLAN.md` for the original plan.
 
 - **Connections sidebar** — collapsible, resizable, persisted list. Add/Edit
   via dialog; per-row right-click menu (Connect/Disconnect, Edit…, Delete).
-  Live connection marked with a green dot.
-- **Query editor** — tree-sitter SQL highlighting, **Format** button
-  (`sqlformat`), **Cmd+Enter** runs the statement under the cursor
+  Live connection marked with a green dot. Environment tags (Prod/Dev/QA/UAT)
+  and Oracle role / service-vs-SID / TLS options per connection.
+- **Query editor** — tree-sitter SQL highlighting, code folding, **Format**
+  button (`sqlformat`), **Cmd+Enter** runs the statement under the cursor
   (multi-statement scripts supported client-side).
+- **Autocomplete & hover** — dictionary-backed table/column/sequence
+  suggestions, JOIN…ON completion from foreign keys, and table/column hover
+  cards. Also Cmd-click a table for its `DESCRIBE`.
+- **Schema browser** — per-connection tree of schemas, tables, views, and
+  sequences, with a client-side filter.
 - **Results grid** — virtualized table, `NULL` styling, error banner.
 - **Incremental fetching** — first 1000 rows load immediately, then 1000-row
   pages append as you scroll near the bottom. Server-side cursor stays open
   (no re-execution); 100,000-row memory cap with notice.
+- **Export** — CSV and native `.xlsx` (with the exported SQL on a `query`
+  sheet), uncapped, streamed with constant memory.
+- **Secret storage** — per-connection password mode: plaintext `File` (legacy),
+  macOS login **Keychain**, or **Ask every time**. App state is written
+  owner-only (`0600` files in a `0700` dir) and fsynced.
 - **Status bar** — action status left (`Running…` / `N rows · M ms` /
   `Fetching more…`), connection status right.
 
@@ -49,8 +60,9 @@ cargo build --release --features gui
 
 On first launch add a connection with **+** in the sidebar
 (e.g. host `localhost`, port `1521`, service `highlandpdb`, user `system`).
-Connections persist to `~/.config/sqlhighland/connections.toml`
-(plaintext passwords — keychain integration is planned).
+Connections persist to `~/.config/sqlhighland/connections.toml`. Passwords can
+be kept in the macOS login keychain or prompted per run; the legacy plaintext
+`File` mode stores the secret owner-only (`0600`).
 
 Try: `SELECT level AS n FROM dual CONNECT BY level <= 5000;` then scroll
 to watch on-demand fetching kick in.
@@ -59,13 +71,16 @@ to watch on-demand fetching kick in.
 
 ```sh
 cargo check                     # lib only, no Metal toolchain needed
-cargo test --lib                # 17 unit tests (no DB required)
-cargo test --test live          # 5 integration tests, needs Oracle up
+cargo test --lib                # 116 unit tests (no DB required)
+cargo test --test live          # 11 integration tests, needs Oracle up
+cargo test --features gui --test menus --test ui_picker \
+    --test browser_tree --test themes   # headless UI tests
 cargo clippy --features gui --all-targets   # must stay clean
 ```
 
 GUI code lives behind the `gui` feature so DB logic and tests build without
-Xcode/Metal. Pinned dependency highlights: `oracledb 26.0.0-beta.3` (official
+Xcode/Metal. The headless UI tests also require `--features gui`, but no
+window server. Pinned dependency highlights: `oracledb 26.0.0-beta.3` (official
 thin driver, no Instant Client), `gpui-pre 0.3.4`, `gpui-kit 0.6.1`.
 
 ## Troubleshooting
@@ -89,6 +104,5 @@ thin driver, no Instant Client), `gpui-pre 0.3.4`, `gpui-kit 0.6.1`.
 ## Roadmap
 
 Single statement execution is statement-at-cursor (scripts with multiple
-statements run one at a time); multi-session connections, query history,
-CSV export, schema browser, persisted pane sizes, and keychain secret
-storage are all future work.
+statements run one at a time). Still open: multi-session connections, query
+history, and persisted pane sizes.
