@@ -8,8 +8,9 @@ Baseline verified locally: `cargo clippy --features gui --all-targets` clean,
 Findings are ordered by severity. Items marked **FIXED** were addressed in the
 same change set as this document; the rest are open recommendations.
 
-Update (follow-up change set): the organization findings in §2 and the stale
-docs in §4.3 are now fixed too — see the second change set at the end.
+Update (follow-up change sets): the organization findings in §2 and the stale
+docs in §4.3 are fixed, and the Tier 1 hygiene items (§3 formatting, §4.1,
+§4.2, §4.4) are fixed too — see the change sets at the end.
 
 ## 1. Security
 
@@ -104,32 +105,34 @@ Still open:
   `.lock().ok()`/`.map(...)` and silently degrade to empty/stale data on
   poison, while `session::lock` exists to recover. Pick one policy.
 - `eprintln!` used for user-facing failures instead of structured logging.
-- Formatting is not enforced (e.g. an inline doc comment after
-  `pub enum CompleteMode {`); no `rustfmt.toml`/CI `fmt --check`.
+- **FIXED:** formatting is now enforced — `cargo fmt --all` applied across the
+  crate (including the inline `CompleteMode` doc) and CI runs
+  `cargo fmt --all -- --check`.
 - No `#[must_use]` on fallible/query helpers (minor).
 
 ## 4. Build / test hygiene
 
-### 4.1 Gui-only tests are not feature-gated — open (bug)
-`tests/browser_tree.rs` and `tests/themes.rs` import `sqlhighland::app` /
-`sqlhighland::guitheme` (gui-gated) but are not declared with
-`required-features = ["gui"]` in `Cargo.toml` (only `ui_picker`/`menus` are).
-Confirmed: `cargo clippy --all-targets` / `cargo test` without
-`--features gui` fails to compile. Add `[[test]]` entries or a file-level
-`#![cfg(feature = "gui")]`.
+### 4.1 Gui-only tests are not feature-gated — **FIXED**
+`tests/browser_tree.rs` and `tests/themes.rs` now have `required-features =
+["gui"]` `[[test]]` entries in `Cargo.toml`, matching `ui_picker`/`menus`.
+Plain `cargo test` / `cargo clippy --all-targets` (no gui) compiles again.
 
-### 4.2 No CI / toolchain / audit config — open
-No GitHub Actions, `rust-toolchain.toml`, `[profile.release]`,
-`cargo-audit`, or `deny.toml`. Recommended CI: `cargo fmt --check`,
-`clippy -D warnings` (with and without `gui`), `test`, `cargo audit`.
+### 4.2 No CI / toolchain / audit config — **FIXED**
+Added `.github/workflows/ci.yml` (fmt; core clippy `-D warnings` + tests on
+Linux without gui; a macOS GUI job gated on the Metal toolchain — currently
+`continue-on-error` until the runner image is confirmed; a non-blocking
+`rustsec/audit-check`) and `rust-toolchain.toml` (stable + rustfmt/clippy).
+An MSRV (1.89) job is not yet wired up.
 
 ### 4.3 Stale docs — **FIXED**
 `README.md` was refreshed: correct test counts (116 lib / 11 live), the three
 password modes, shipped features (autocomplete, schema browser, CSV/XLSX
 export), and a pruned roadmap. `PROGRESS.md` remains a historical build log.
 
-### 4.4 Package metadata — open
-`Cargo.toml` lacks `description`, `license`, and `repository`.
+### 4.4 Package metadata — **FIXED**
+`Cargo.toml` now has `description`, `repository`, and `publish = false`
+(private app). A `license` is intentionally omitted until distribution terms
+are chosen; add it (plus a LICENSE file) if the source is ever published.
 
 ## 5. Rust best practices
 
@@ -161,3 +164,16 @@ export), and a pruned roadmap. `PROGRESS.md` remains a historical build log.
 - `ARCHITECTURE.md` (new): module map and the split pattern.
 - Docs: `README.md` refreshed.
 - Remaining files all < ~1,000 lines; 116 lib tests green, clippy clean.
+
+## Change set — hygiene (Tier 1)
+
+- `.github/workflows/ci.yml` (new): fmt, core clippy/tests, macOS GUI
+  clippy/tests, RustSec audit.
+- `rust-toolchain.toml` (new): stable + rustfmt/clippy.
+- `Cargo.toml`: gui tests feature-gated; `description`/`repository`/
+  `publish = false`; `security-framework` moved to an Apple-only target dep.
+- `cargo fmt` applied crate-wide; `cargo fmt --check` clean.
+- `src/keychain.rs`: macOS backend behind `cfg(target_vendor = "apple")` with
+  a std-only stub elsewhere, so the core builds on Windows/Linux.
+- Docs reworded to engine-first / cross-platform (Oracle first, macOS current).
+- Fixes §3 (formatting) and §4.1, §4.2, §4.4.
