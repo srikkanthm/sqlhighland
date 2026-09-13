@@ -12,7 +12,9 @@ fn cfg() -> ConnectionConfig {
             .unwrap_or(1521),
         service_name: std::env::var("ORACLE_SERVICE").unwrap_or_else(|_| "highlandpdb".to_string()),
         user: std::env::var("ORACLE_USER").unwrap_or_else(|_| "system".to_string()),
-        password: std::env::var("ORACLE_PWD").unwrap_or_else(|_| "test".to_string()),
+        password: std::env::var("ORACLE_PWD")
+            .unwrap_or_else(|_| "test".to_string())
+            .into(),
         environment: sqlhighland::model::Environment::Dev,
         engine: Default::default(),
         role: Default::default(),

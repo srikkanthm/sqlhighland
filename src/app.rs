@@ -12,6 +12,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use zeroize::Zeroizing;
+
 use crate::bind_dialog::PendingBind;
 use crate::complete::{
     build_alias_map, byte_to_lsp_pos, describe_target, hover_markdown, is_trivia_position,
@@ -394,8 +396,10 @@ pub struct SqlHighlandView {
     pub(crate) pending_pick: Option<PendingPick>,
     /// Session-unlocked passwords, per connection id. Memory only, never
     /// persisted: Ask mode and Keychain-miss prompts land here, and every
-    /// connect/run path prefers them over whatever is stored.
-    pub(crate) unlocked: std::collections::HashMap<String, String>,
+    /// connect/run path prefers them over whatever is stored. Values are
+    /// [`Zeroizing`], so removing a connection (or dropping the view) wipes
+    /// the secret from memory.
+    pub(crate) unlocked: std::collections::HashMap<String, Zeroizing<String>>,
     /// Password prompt in flight (cleared on submit or cancel). `run` is
     /// set when the prompt gates a query run rather than a plain connect.
     pub(crate) pending_password: Option<PendingPassword>,

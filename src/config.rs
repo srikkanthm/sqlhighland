@@ -98,7 +98,16 @@ impl TabsManifest {
         Ok(base_dir()?.join("tabs"))
     }
 
+    /// True when `id` is safe to use as a single path component for a draft.
+    /// Generated ids are UUIDs and adopted orphan stems come from real
+    /// directory entries, but `tabs.toml` is user-editable and could carry
+    /// `../` or a Windows drive spec — reject separators and `.`/`..`.
+    fn is_safe_id(id: &str) -> bool {
+        !id.is_empty() && id != "." && id != ".." && !id.contains(['/', '\\', ':', '\0'])
+    }
+
     pub fn draft_path(tab_id: &str) -> anyhow::Result<PathBuf> {
+        anyhow::ensure!(Self::is_safe_id(tab_id), "unsafe tab id {tab_id:?}");
         Ok(Self::tabs_dir()?.join(format!("{tab_id}.sql")))
     }
 
@@ -110,7 +119,15 @@ impl TabsManifest {
         tighten_owned(&path);
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        toml::from_str(&text).context("parsing tabs manifest")
+        let mut manifest: Self = toml::from_str(&text).context("parsing tabs manifest")?;
+        // Rekey unsafe ids (hand-edited or corrupt): their draft is unreadable
+        // by design, so the tab restores empty rather than escaping the dir.
+        for tab in &mut manifest.tabs {
+            if !Self::is_safe_id(&tab.id) {
+                tab.id = uuid::Uuid::new_v4().to_string();
+            }
+        }
+        Ok(manifest)
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -603,6 +620,38 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().starts_with("tabs.corrupt-"))
             .collect();
         assert_eq!(backup.len(), 1, "evidence preserved");
+
+        unsafe { std::env::remove_var("SQLHIGHLAND_CONFIG_DIR") };
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unsafe_tab_ids_are_rejected_and_rekeyed() {
+        let _guard = env_lock();
+        let dir = std::env::temp_dir().join(format!("sqlhighland-badid-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        unsafe { std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir) };
+
+        // draft_path refuses traversal / separators.
+        assert!(TabsManifest::draft_path("../escape").is_err());
+        assert!(TabsManifest::draft_path("a/b").is_err());
+        assert!(TabsManifest::draft_path("..").is_err());
+        assert!(TabsManifest::draft_path("ok-id").is_ok());
+
+        // A manifest carrying a traversal id is rekeyed on load.
+        let manifest = TabsManifest {
+            tabs: vec![SavedTab {
+                id: "../../etc/passwd".to_string(),
+                name: "evil".to_string(),
+                connection_id: None,
+                path: None,
+            }],
+        };
+        manifest.save().unwrap();
+        let loaded = TabsManifest::load().unwrap();
+        assert_eq!(loaded.tabs.len(), 1);
+        assert_ne!(loaded.tabs[0].id, "../../etc/passwd");
+        assert!(TabsManifest::is_safe_id(&loaded.tabs[0].id));
 
         unsafe { std::env::remove_var("SQLHIGHLAND_CONFIG_DIR") };
         std::fs::remove_dir_all(&dir).ok();

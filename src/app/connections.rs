@@ -107,7 +107,7 @@ impl SqlHighlandView {
     /// Effective password for a connection: session unlock first, then
     /// stored (File) or keychain (Keychain). None = must prompt (Ask,
     /// Keychain miss, empty File entry).
-    pub(crate) fn effective_password(&self, cfg: &ConnectionConfig) -> Option<String> {
+    pub(crate) fn effective_password(&self, cfg: &ConnectionConfig) -> Option<Zeroizing<String>> {
         if let Some(pw) = self.unlocked.get(&cfg.id) {
             return Some(pw.clone());
         }
@@ -119,7 +119,10 @@ impl SqlHighlandView {
                     Some(cfg.password.clone())
                 }
             }
-            PasswordMode::Keychain => crate::keychain::get(&cfg.id).ok().flatten(),
+            PasswordMode::Keychain => crate::keychain::get(&cfg.id)
+                .ok()
+                .flatten()
+                .map(Zeroizing::new),
             PasswordMode::Ask => None,
         }
     }

@@ -16,6 +16,9 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 # Stable ids for saved connections.
 uuid = { version = "1", features = ["v4"] }
+# Zeroize secrets held in memory (connection passwords) on drop.
+# `serde` keeps `Zeroizing<String>` round-trippable through the TOML files.
+zeroize = { version = "1", features = ["serde"] }
 # SQL formatter (https://github.com/shssoichiro/sqlformat-rs).
 sqlformat = "=0.5.0"
 # LSP types for the editor completion provider (gui-only).

@@ -15,6 +15,7 @@ use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::*;
+use zeroize::Zeroizing;
 
 use crate::app::{env_color, PendingPassword, SqlHighlandView};
 use crate::config::SavedConfig;
@@ -41,7 +42,7 @@ impl SqlHighlandView {
             port: self.port.read(cx).value().parse().unwrap_or(1521),
             service_name: self.service.read(cx).value().to_string(),
             user: self.user.read(cx).value().to_string(),
-            password,
+            password: password.into(),
             environment: self.pending_env,
             engine: self.pending_engine,
             role: self.pending_role,
@@ -66,7 +67,7 @@ impl SqlHighlandView {
         // Never fill stored secrets back into the form: File mode shows
         // its (legacy) value; Keychain/Ask always start blank.
         let shown_password = match cfg.password_mode {
-            PasswordMode::File => cfg.password.clone(),
+            PasswordMode::File => cfg.password.to_string(),
             PasswordMode::Keychain | PasswordMode::Ask => String::new(),
         };
         // Keychain mode with a stored entry says so: a blank field
@@ -113,7 +114,7 @@ impl SqlHighlandView {
         self.pending_role = OracleRole::default();
         self.pending_service_kind = ServiceKind::default();
         self.pending_ssl = false;
-        self.pending_password_mode = PasswordMode::default();
+        self.pending_password_mode = PasswordMode::default_for_new();
         self.pending_engine = DbEngine::default();
         // Blank form: text fields empty, standard Oracle port kept.
         self.fill_form(
@@ -123,6 +124,7 @@ impl SqlHighlandView {
                 port: 1521,
                 service_name: String::new(),
                 user: String::new(),
+                password_mode: self.pending_password_mode,
                 ..Default::default()
             },
             window,
@@ -707,7 +709,8 @@ impl SqlHighlandView {
                 return;
             }
         }
-        self.unlocked.insert(pending.conn_id.clone(), pw);
+        self.unlocked
+            .insert(pending.conn_id.clone(), Zeroizing::new(pw));
         window.close_dialog(cx);
         match pending.run {
             Some((tab_id, _, PickAfter::ScriptBuffer)) => {

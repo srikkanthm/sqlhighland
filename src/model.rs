@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::schema::DbEngine;
 
@@ -72,6 +73,18 @@ impl PasswordMode {
             PasswordMode::Ask => "Ask every time",
         }
     }
+
+    /// Mode for a *newly created* connection. `File` stays the serde default so
+    /// legacy files without the field keep loading as plaintext, but new
+    /// connections prefer the OS keychain where a backend exists, and otherwise
+    /// never store the secret (prompt per run).
+    pub fn default_for_new() -> Self {
+        if cfg!(target_vendor = "apple") {
+            PasswordMode::Keychain
+        } else {
+            PasswordMode::Ask
+        }
+    }
 }
 
 /// Deployment environment tag for a connection. Purely visual (no behavior
@@ -118,7 +131,10 @@ pub struct ConnectionConfig {
     pub port: u16,
     pub service_name: String,
     pub user: String,
-    pub password: String,
+    /// Wrapped in [`Zeroizing`] so every in-memory copy is wiped on drop, not
+    /// just the one written to disk. Still serialized as a plain string (the
+    /// `File` mode is intentionally plaintext; `Keychain`/`Ask` leave it empty).
+    pub password: Zeroizing<String>,
     /// Environment tag. Missing on pre-tag entries; defaults to untagged.
     #[serde(default)]
     pub environment: Environment,
@@ -178,7 +194,7 @@ impl Default for ConnectionConfig {
             port: 1521,
             service_name: "highlandpdb".to_string(),
             user: "system".to_string(),
-            password: String::new(),
+            password: Zeroizing::new(String::new()),
             environment: Environment::default(),
             engine: DbEngine::default(),
             role: OracleRole::default(),
@@ -306,7 +322,7 @@ mod tests {
     #[test]
     fn debug_redacts_password() {
         let cfg = ConnectionConfig {
-            password: "hunter2-secret".to_string(),
+            password: Zeroizing::new("hunter2-secret".to_string()),
             ..Default::default()
         };
         let rendered = format!("{cfg:?}");
