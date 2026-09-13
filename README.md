@@ -116,6 +116,7 @@ thin driver, no Instant Client), `gpui-pre 0.3.4`, `gpui-kit 0.6.1`.
 - [`docs/PROGRESS.md`](docs/PROGRESS.md) — chronological build log.
 - [`docs/HISTORY.md`](docs/HISTORY.md) — original plan, shipped feature designs, completed refactor.
 - [`docs/REVIEW.md`](docs/REVIEW.md) — code, security, and organization review with fix status.
+- [`docs/AUTOCOMPLETE_ISSUE.md`](docs/AUTOCOMPLETE_ISSUE.md) — open: autocomplete intermittently dies (diagnosis + proposed fix).
 
 ## Roadmap
 
