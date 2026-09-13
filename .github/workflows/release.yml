@@ -44,7 +44,7 @@ jobs:
           fi
 
       - name: Install cargo-packager
-        run: cargo install cargo-packager --locked --version 0.11
+        run: cargo install cargo-packager --locked --version '^0.11'
       - name: Add cargo bin to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
