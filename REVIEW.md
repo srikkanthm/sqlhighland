@@ -10,9 +10,9 @@ same change set as this document; the rest are open recommendations.
 
 Update (follow-up change sets): the organization findings in §2 and the stale
 docs in §4.3 are fixed, the Tier 1 hygiene items (§3 formatting, §4.1, §4.2,
-§4.4) are fixed, and the Tier 2 security items (new-connection default,
-in-memory zeroization, tab-id path safety) are fixed — see the change sets at
-the end.
+§4.4), the Tier 2 security items (new-connection default, in-memory
+zeroization, tab-id path safety), and the Tier 3 remainder (§3 lock policy and
+logging, plus an MSRV CI job) are fixed — see the change sets at the end.
 
 ## 1. Security
 
@@ -112,10 +112,12 @@ Still open:
 ## 3. Code smells
 
 - **FIXED:** `ConnectionConfig` debug redaction (see 1.2).
-- Inconsistent lock handling: `providers.rs` and `app/lsp.rs` use
-  `.lock().ok()`/`.map(...)` and silently degrade to empty/stale data on
-  poison, while `session::lock` exists to recover. Pick one policy.
-- `eprintln!` used for user-facing failures instead of structured logging.
+- **FIXED:** inconsistent lock handling — every `MetadataCache`/`ResultData`
+  mutex now goes through `session::lock` (poison-tolerant) instead of
+  `.lock().ok()`/`.map(...)` silently degrading. `SessionPool::remove` keeps
+  its intentional non-blocking `try_lock`.
+- **FIXED:** `eprintln!` replaced by the `logging` shim (`logging::warn` /
+  `logging::error`) at all five call sites.
 - **FIXED:** formatting is now enforced — `cargo fmt --all` applied across the
   crate (including the inline `CompleteMode` doc) and CI runs
   `cargo fmt --all -- --check`.
@@ -201,3 +203,14 @@ are chosen; add it (plus a LICENSE file) if the source is ever published.
 - `config.rs`: safe tab-id validation + rekey of unsafe ids on load.
 - `tests/live.rs`: updated to the new password type.
 - Fixes §1.1b, §1.4, §1.6; 117 lib tests green.
+
+## Change set — hygiene (Tier 3)
+
+- `src/session.rs` / `providers.rs` / `app/lsp.rs` / `app/results.rs` /
+  `browser.rs` / `run/query.rs` / `run/export.rs`: all cache/result locks now
+  use `session::lock`, removing the silent `.lock().ok()`/`.map()` degradation.
+- `src/logging.rs` (new): `warn`/`error` shim; the five `eprintln!` sites
+  replaced.
+- `.github/workflows/ci.yml`: added a blocking MSRV (1.89) job
+  (`cargo +1.89.0 check --all-targets`), verified locally on 1.89.0.
+- Fixes the remaining §3 items; 117 lib tests green, clippy clean.
