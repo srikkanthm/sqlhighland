@@ -26,7 +26,7 @@ jobs:
     # SQLHighland ships arm64 only. macos-14 is deprecated (retires 2026-11).
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Installs the toolchain pinned in rust-toolchain.toml (stable + rustfmt/clippy).
       - run: rustup show
@@ -75,7 +75,7 @@ jobs:
           cat SHA256SUMS.txt
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: SQLHighland-macos-arm64
           path: |
@@ -85,7 +85,7 @@ jobs:
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/*.dmg

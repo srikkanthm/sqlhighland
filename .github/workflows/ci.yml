@@ -13,7 +13,7 @@ jobs:
     name: Formatting
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # `rustup show` installs the toolchain pinned in rust-toolchain.toml.
       - run: rustup show
       - run: cargo fmt --all -- --check
@@ -24,7 +24,7 @@ jobs:
     name: Core (no gui)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
@@ -38,7 +38,7 @@ jobs:
     name: MSRV (1.89)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install 1.89.0 --profile minimal
       - uses: Swatinem/rust-cache@v2
       - run: cargo +1.89.0 check --all-targets
@@ -51,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - name: System deps (GPUI Linux backend)
@@ -76,7 +76,7 @@ jobs:
     runs-on: windows-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - name: Install NASM (aws-lc-sys build dependency)
@@ -97,7 +97,7 @@ jobs:
     # the -intel/-large labels would be x86_64.
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - name: Ensure Metal toolchain
@@ -125,7 +125,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
