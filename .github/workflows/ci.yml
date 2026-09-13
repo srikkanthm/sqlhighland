@@ -100,8 +100,17 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
-      - name: Install Metal toolchain
-        run: sudo xcodebuild -downloadComponent MetalToolchain
+      - name: Ensure Metal toolchain
+        run: |
+          if xcrun --sdk macosx metal --version >/dev/null 2>&1; then
+            echo "Metal compiler already available"
+            exit 0
+          fi
+          latest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          echo "Selecting $latest"
+          sudo xcode-select -s "$latest/Contents/Developer"
+          sudo xcodebuild -downloadComponent MetalToolchain
+          xcrun --sdk macosx metal --version
       - name: Clippy
         run: cargo clippy --features gui --all-targets -- -D warnings
       - name: Headless UI tests

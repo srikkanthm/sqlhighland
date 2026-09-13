@@ -48,10 +48,20 @@ jobs:
       - name: Add cargo bin to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      # GPUI compiles Metal shaders from its build script; Xcode 16.3+ ships the
-      # Metal compiler as a separate ~700 MB component on the runner.
-      - name: Install Metal toolchain (GPUI shaders)
-        run: sudo xcodebuild -downloadComponent MetalToolchain
+      # GPUI compiles Metal shaders from its build script. The macOS runner
+      # already ships the compiler; only if a future image splits it out do we
+      # select the newest Xcode and download the component.
+      - name: Ensure Metal toolchain (GPUI shaders)
+        run: |
+          if xcrun --sdk macosx metal --version >/dev/null 2>&1; then
+            echo "Metal compiler already available"
+            exit 0
+          fi
+          latest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          echo "Selecting $latest"
+          sudo xcode-select -s "$latest/Contents/Developer"
+          sudo xcodebuild -downloadComponent MetalToolchain
+          xcrun --sdk macosx metal --version
 
       # Runs before-packaging-command (`cargo build --release --features gui`)
       # then bundles dist/SQLHighland.app + dist/SQLHighland_<ver>_aarch64.dmg.
