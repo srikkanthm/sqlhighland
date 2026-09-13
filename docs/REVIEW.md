@@ -167,9 +167,12 @@ menus/themes/browser_tree. Un-ignore once the harness timing is fixed.
 - Few production `unwrap`/`expect`, all guarded
   (`complete/aliases.rs` non-empty group, `app/tabs.rs` pre-checked path,
   `main.rs` startup). No `unsafe` outside tests.
-- `oracledb 26.0.0-beta.3` is a beta dependency (documented, isolated in
-  `db.rs`). A transitive `block 0.1.6` (via `gpui-pre` → `cocoa`) reports a
-  future-incompat warning upstream; not fixable locally.
+- `oracledb 26.0.0-beta.4` is pulled from a git patch to our fork
+  (`srikkanthm/rust-oracledb`, pinned by commit) that adds plain-TCP query
+  cancellation; isolated in `db.rs`. Carrying the fork is tracked debt — revert
+  steps in [`CANCELLATION.md`](CANCELLATION.md). A transitive `block 0.1.6`
+  (via `gpui-pre` → `cocoa`) reports a future-incompat warning upstream; not
+  fixable locally.
 
 ## 6. Cross-platform & engine readiness
 

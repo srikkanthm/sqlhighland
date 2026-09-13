@@ -9,7 +9,7 @@ Plan: `HISTORY.md` (Part 1). Status: working MVP — connect, edit, run, page th
 
 | Crate | Version | Notes |
 |---|---|---|
-| `oracledb` | `26.0.0-beta.3` | Official pure-Rust thin driver, no Instant Client. Beta — API churn expected, isolated in `db.rs` |
+| `oracledb` | `26.0.0-beta.4` (fork) | Pure-Rust thin driver, no Instant Client. Pinned via `[patch.crates-io]` to `srikkanthm/rust-oracledb@49bb38a` for real query cancellation (see `CANCELLATION.md`). Beta — API churn expected, isolated in `db.rs` |
 | `gpui` (`gpui-pre`) | `=0.3.4` | Zed snapshot from crates.io |
 | `gpui-kit` | `=0.6.1` + `tree-sitter-sql` | Component library (sidebar/dialog/table/editor). Grammar feature required or the editor is plain text |
 | `gpui-kit-assets` | `=0.6.1` | `AllAssets` bundle registered at startup; the default bundle lacks Database/Plug/etc. icons |
@@ -105,7 +105,9 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   client-side abandon: a per-tab run token is bumped, late completions are
   discarded, and the server finishes in the background. Same-connection
   re-runs queue behind the abandoned worker's session lock, then proceed
-  normally with the fresh token.
+  normally with the fresh token. *(Superseded 2026-09-13 by real server-side
+  cancellation on plain TCP — see the cancellation section below; the abandon
+  path remains as the fallback.)*
 - **Render path never blocks on sessions** — connection liveness is cached in
   view state (`live` set, updated on connect/disconnect/run outcomes) because
   locking a session mutex during render froze the whole UI behind in-flight
@@ -790,3 +792,30 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - Refactor complete: app.rs 8,019 → 3,491 across
   settings_dialog / connection_dialog / conn_picker /
   bind_dialog / run / providers / browser / sidebar.
+
+## Real query cancellation, forked driver (2026-09-13)
+
+- Upstream `oracledb` still has no break API, so Cancel was abandon-only.
+  Added a plain-TCP interrupt in a fork of the driver
+  (`srikkanthm/rust-oracledb`, pinned by commit in `[patch.crates-io]`):
+  `Connection::cancel_handle()` / `cancel()` / `supports_oob()`, a
+  `CancelHandle`, and `ErrorKind::Cancelled` for ORA-01013.
+- App keeps a driver-agnostic seam: `CancelToken` trait +
+  `DbClient::cancel_token()` (`db.rs`), a per-connection token registry on
+  `SessionPool`, and calls in `run/query.rs` (`cancel_run`), `run/script.rs`,
+  `run/export.rs` (`cancel_export`) and `app/connections.rs` (capture on
+  connect). The handle owns an independent socket clone, so cancel never
+  needs the session mutex; `ErrorKind::Cancelled` maps to "Query cancelled".
+- The fork's real bug was recovery: `Client::reset()` waited for a second
+  reset marker the caller had already consumed, hanging after every
+  interrupt. Returning the first non-marker data packet fixed it. The local
+  server reports `supports_oob() == false`, so the in-band INTERRUPT marker
+  is the working path (OOB plumbing stays for servers that accept it).
+- Fallback preserved: TLS/other engines, or a tab with no captured token,
+  still use the `run_token` abandon.
+- New opt-in `tests/cancel_live.rs` (ignored; needs plain-TCP Oracle):
+  15 s `dbms_lock.sleep` returned in ~3 s with `Cancelled`, connection
+  reusable. Full details + upstream revert checklist: `CANCELLATION.md`.
+- Verified: clean `clippy --all-targets`, fmt, 122 lib + menus/themes/
+  browser_tree green, live cancel test green, fork pushed + re-pinned by
+  commit.

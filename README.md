@@ -33,6 +33,10 @@ development — see [`docs/PROGRESS.md`](docs/PROGRESS.md) for the build log and
   (no re-execution); 100,000-row memory cap with notice.
 - **Export** — CSV and native `.xlsx` (with the exported SQL on a `query`
   sheet), uncapped, streamed with constant memory.
+- **Query cancellation** — Cancel on a running query/script/export sends a
+  real server-side interrupt on plain-TCP Oracle sessions (forked driver, see
+  [`docs/CANCELLATION.md`](docs/CANCELLATION.md)); it falls back to
+  client-side abandon when no interrupt is available (TLS, other engines).
 - **Secret storage** — per-connection password mode: plaintext `File` (legacy),
   OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret
   Service), or **Ask every time**. App
@@ -80,8 +84,9 @@ to watch on-demand fetching kick in.
 
 ```sh
 cargo check                     # lib only, no Metal toolchain needed
-cargo test --lib                # 120 unit tests (no DB required)
+cargo test --lib                # 122 unit tests (no DB required)
 cargo test --test live          # 11 integration tests, needs Oracle up
+cargo test --test cancel_live -- --ignored   # interrupt test, needs plain-TCP Oracle
 cargo test --features gui --test menus --test ui_picker \
     --test browser_tree --test themes   # headless UI tests
 cargo clippy --features gui --all-targets   # must stay clean
@@ -89,8 +94,10 @@ cargo clippy --features gui --all-targets   # must stay clean
 
 GUI code lives behind the `gui` feature so DB logic and tests build without
 Xcode/Metal. The headless UI tests also require `--features gui`, but no
-window server. Pinned dependency highlights: `oracledb 26.0.0-beta.3` (official
-thin driver, no Instant Client), `gpui-pre 0.3.4`, `gpui-kit 0.6.1`.
+window server. Pinned dependency highlights: `oracledb 26.0.0-beta.4` via a
+pinned git patch to `srikkanthm/rust-oracledb` (adds plain-TCP cancellation;
+see [`docs/CANCELLATION.md`](docs/CANCELLATION.md)), `gpui-pre 0.3.4`,
+`gpui-kit 0.6.1`.
 
 ## Troubleshooting
 
@@ -116,6 +123,7 @@ thin driver, no Instant Client), `gpui-pre 0.3.4`, `gpui-kit 0.6.1`.
 - [`docs/PROGRESS.md`](docs/PROGRESS.md) — chronological build log.
 - [`docs/HISTORY.md`](docs/HISTORY.md) — original plan, shipped feature designs, completed refactor.
 - [`docs/REVIEW.md`](docs/REVIEW.md) — code, security, and organization review with fix status.
+- [`docs/CANCELLATION.md`](docs/CANCELLATION.md) — forked-driver query cancellation and upstream revert guide.
 - [`docs/AUTOCOMPLETE_ISSUE.md`](docs/AUTOCOMPLETE_ISSUE.md) — open: autocomplete intermittently dies (diagnosis + proposed fix).
 
 ## Roadmap
