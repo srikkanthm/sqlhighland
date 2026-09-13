@@ -773,3 +773,18 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   menus/themes/browser_tree green, GUI builds, live serial 11/11
   (one transient serial failure mid-phase, green on immediate
   rerun x2 — live tests don't touch GUI code; environmental).
+
+## Refactor Phase 3d — final homes + close-out (2026-09-13, uncommitted)
+
+- ensure_meta → browser.rs, bump_usage → providers.rs,
+  with_password + submit_password → connection_dialog.rs
+  (mechanical moves). app.rs 3,708 → 3,491. PendingPassword
+  fields pub(crate). apply_font_prefs already in guitheme.rs.
+- Declined: ConnCache / ConnectionDialogState / PendingOps
+  struct introductions — field-layout restructures, risk exceeds
+  benefit; modules are cohesive without them.
+- Verified: clean clippy --all-targets, 112 lib +
+  menus/themes/browser_tree green, GUI builds, live serial 11/11.
+- Refactor complete: app.rs 8,019 → 3,491 across
+  settings_dialog / connection_dialog / conn_picker /
+  bind_dialog / run / providers / browser / sidebar.

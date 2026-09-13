@@ -3,13 +3,21 @@
 //!
 //! Extracted from `app.rs` (refactor Phase 3); behavior unchanged.
 
+use std::sync::{Arc, Mutex};
+
 use gpui::{Context, Window};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::tree::{TreeEvent, TreeItem, TreeState};
 use gpui_kit::*;
 
 use crate::app::SqlHighlandView;
+use crate::db::DbClient;
+use crate::metadata::{
+    MetadataCache, fetch_columns_blocking, fetch_fks_blocking, fetch_sequences_blocking,
+    fetch_tables_blocking,
+};
 use crate::schema::{OracleProvider, SchemaProvider as _};
+use crate::session::lock;
 
 impl SqlHighlandView {
     // -- Schema browser ---------------------------------------------------
@@ -233,5 +241,121 @@ impl SqlHighlandView {
         self._subs.push(sub);
         self.browser_trees.insert(conn_id.to_string(), state);
         cx.notify();
+    }
+}
+
+impl SqlHighlandView {
+    /// Fetch (or refresh) the dictionary cache for a connection on the
+    /// background executor. No-op when fresh or already loading. Safe to
+    /// call from any run/connect completion or the manual trigger.
+    pub(crate) fn ensure_meta(&mut self, conn_id: &str, cx: &mut Context<Self>) {
+        let cache = self
+            .meta
+            .entry(conn_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(MetadataCache::default())))
+            .clone();
+        let stale = cache
+            .lock()
+            .map(|c| c.is_stale() && !c.loading)
+            .unwrap_or(false);
+        if !stale {
+            return;
+        }
+        let Some(mut cfg) = self.connections.iter().find(|c| c.id == conn_id).cloned() else {
+            return;
+        };
+        // Same unlock/keychain preference as runs; background triggers
+        // never prompt — a missing password just fails this fetch.
+        if let Some(pw) = self.effective_password(&cfg) {
+            cfg.password = pw;
+        }
+        if let Ok(mut c) = cache.lock() {
+            c.loading = true;
+        }
+        self.status = "Loading suggestions…".into();
+        cx.notify();
+        let session = self.pool.get_or_create(conn_id);
+        let bg = cx.background_executor().clone();
+        let view = cx.entity().downgrade();
+        let conn_bg = conn_id.to_string();
+        // Snapshot the filter: a toggle mid-fetch must not mix scopes.
+        // The connected user's own schema is always exempt server-side.
+        let include_system = self.show_system;
+        let own_schema = cfg.user.clone();
+        cx.spawn(async move |_, cx| {
+            // Per-dictionary outcomes: one failing query must never nuke
+            // the rest (a broken FK query once emptied every cache).
+            struct Parts {
+                tables: Result<Vec<crate::metadata::TableId>, String>,
+                columns: Result<
+                    std::collections::HashMap<(String, String), Vec<crate::metadata::ColumnMeta>>,
+                    String,
+                >,
+                sequences: Result<Vec<crate::metadata::TableId>, String>,
+                fks: Result<Vec<crate::complete::ForeignKey>, String>,
+            }
+            let outcome = bg
+                .spawn(async move {
+                    let mut s = lock(&session);
+                    if !s.is_connected() {
+                        if let Err(e) = s.connect(&cfg).map_err(|e| e.to_string()) {
+                            let e = e.to_string();
+                            return Parts {
+                                tables: Err(e.clone()),
+                                columns: Err(e.clone()),
+                                sequences: Err(e.clone()),
+                                fks: Err(e),
+                            };
+                        }
+                    }
+                    Parts {
+                        tables: fetch_tables_blocking(&mut *s, include_system, &own_schema)
+                            .map_err(|e| e.to_string()),
+                        columns: fetch_columns_blocking(&mut *s, include_system, &own_schema)
+                            .map_err(|e| e.to_string()),
+                        sequences: fetch_sequences_blocking(&mut *s, include_system, &own_schema)
+                            .map_err(|e| e.to_string()),
+                        fks: fetch_fks_blocking(&mut *s, include_system, &own_schema)
+                            .map_err(|e| e.to_string()),
+                    }
+                })
+                .await;
+            view.update(cx, |this, cx| {
+                let Some(cache) = this.meta.get(&conn_bg).cloned() else {
+                    // Entry vanished mid-flight (connection deleted):
+                    // never leave the loading notice up.
+                    this.status = "".into();
+                    cx.notify();
+                    return;
+                };
+                if let Ok(mut c) = cache.lock() {
+                    c.loading = false;
+                    // Install each dictionary independently; anything that
+                    // failed keeps its previous content (possibly empty).
+                    // fetched_at advances on tables (the core set) so a
+                    // partial failure retries next TTL, not every keystroke.
+                    if let Ok(tables) = outcome.tables {
+                        c.tables = tables;
+                        c.fetched_at = Some(std::time::Instant::now());
+                    }
+                    if let Ok(columns) = outcome.columns {
+                        c.columns = columns;
+                    }
+                    if let Ok(sequences) = outcome.sequences {
+                        c.sequences = sequences;
+                    }
+                    if let Ok(fks) = outcome.fks {
+                        c.fks = fks;
+                    }
+                    // Degrade silently: keywords + whatever is cached work.
+                    this.status = "".into();
+                }
+                // Fresh dictionaries rebuild an open schema-browser tree.
+                this.refresh_browser(&conn_bg, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+            .detach();
     }
 }

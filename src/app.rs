@@ -19,10 +19,7 @@ use crate::complete::{
 use crate::config::{CompleteMode, Preferences, SavedConfig, SavedTab, TabsManifest};
 use crate::db::{DbClient, OracledbSession};
 use crate::filetab::{self, FileStamp};
-use crate::metadata::{
-    fetch_columns_blocking, fetch_fks_blocking, fetch_sequences_blocking, fetch_tables_blocking,
-    MetadataCache, SharedCache,
-};
+use crate::metadata::SharedCache;
 use crate::model::{
     csv_row, tab_name_from_sql, ColumnInfo, ConnectionConfig, Environment, OracleRole, PasswordMode,
     ServiceKind,
@@ -801,8 +798,8 @@ pub fn app_view(cx: &App) -> Option<Entity<SqlHighlandView>> {
 /// carries how to re-enter: a stored statement re-runs, a buffer script
 /// re-reads the live editor text.
 pub(crate) struct PendingPassword {
-    conn_id: String,
-    run: Option<(String, String, PickAfter)>,
+    pub(crate) conn_id: String,
+    pub(crate) run: Option<(String, String, PickAfter)>,
 }
 
 /// How a script run resumes after the connection picker or password
@@ -2061,95 +2058,7 @@ impl SqlHighlandView {
         }
     }
 
-    /// Resolve the password, opening the prompt when the mode needs one
-    /// and none is available. Returns the config with the usable password,
-    /// or None when the prompt took over — it resumes via
-    /// `submit_password` (re-running `run`, or plain-connecting).
-    pub(crate) fn with_password(
-        &mut self,
-        mut cfg: ConnectionConfig,
-        run: Option<(String, String, PickAfter)>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<ConnectionConfig> {
-        match self.effective_password(&cfg) {
-            Some(pw) => {
-                cfg.password = pw;
-                Some(cfg)
-            }
-            None => {
-                self.pending_password = Some(PendingPassword {
-                    conn_id: cfg.id.clone(),
-                    run,
-                });
-                self.pwd_prompt
-                    .update(cx, |s, cx| s.set_value(String::new(), window, cx));
-                let name = cfg.name.clone();
-                let pwd = self.pwd_prompt.clone();
-                let view = cx.entity().downgrade();
-                self.note_dialog_open();
-                window.open_dialog(cx, move |dialog, _, cx| {
-                    let submit = view.clone();
-                    let pwd_in = pwd.clone();
-                    dialog
-                        .title(format!("Password for {name}"))
-                        .w(px(360.))
-                        .child(crate::connection_dialog::dialog_field("Password", &pwd_in, true, cx.theme().muted_foreground))
-                        .footer(crate::connection_dialog::dialog_footer(
-                            "pwd-cancel",
-                            Button::new("pwd-connect")
-                                .label("Connect")
-                                .primary()
-                                .on_click(move |_, window, cx| {
-                                    submit.update(cx, |this, cx| {
-                                        this.submit_password(window, cx);
-                                    })
-                                    .ok();
-                                }),
-                        ))
-                });
-                None
-            }
-        }
-    }
-
-    /// Password prompt submit: unlock the session (persisting to the
-    /// keychain when that mode is missing its entry), close the prompt,
-    /// then resume the pending connect or run.
-    fn submit_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pending) = self.pending_password.take() else {
-            return;
-        };
-        let pw = self.pwd_prompt.read(cx).value().to_string();
-        self.pwd_prompt
-            .update(cx, |s, cx| s.set_value(String::new(), window, cx));
-        if pw.is_empty() {
-            self.status = "Password required — cancelled".into();
-            cx.notify();
-            return;
-        }
-        let mode = self
-            .connections
-            .iter()
-            .find(|c| c.id == pending.conn_id)
-            .map(|c| c.password_mode);
-        if mode == Some(PasswordMode::Keychain) {
-            if let Err(e) = crate::keychain::set(&pending.conn_id, &pw) {
-                self.status = format!("Keychain store failed: {e}").into();
-                cx.notify();
-                return;
-            }
-        }
-        self.unlocked.insert(pending.conn_id.clone(), pw);
-        window.close_dialog(cx);
-        match pending.run {
-            Some((tab_id, _, PickAfter::ScriptBuffer)) => {
-                self.run_buffer_as_script(&tab_id, window, cx)
-            }
-            Some((tab_id, sql, _)) => self.start_run(&tab_id, sql, window, cx),
-            None => self.connect_connection(&pending.conn_id, window, cx),
-        }
-    }
+    // (with_password + submit_password live in connection_dialog.rs)
 
     pub(crate) fn connect_connection(
         &mut self,
@@ -2394,136 +2303,10 @@ impl SqlHighlandView {
             .unwrap_or_default()
     }
 
-    /// Fetch (or refresh) the dictionary cache for a connection on the
-    /// background executor. No-op when fresh or already loading. Safe to
-    /// call from any run/connect completion or the manual trigger.
-    pub(crate) fn ensure_meta(&mut self, conn_id: &str, cx: &mut Context<Self>) {
-        let cache = self
-            .meta
-            .entry(conn_id.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(MetadataCache::default())))
-            .clone();
-        let stale = cache
-            .lock()
-            .map(|c| c.is_stale() && !c.loading)
-            .unwrap_or(false);
-        if !stale {
-            return;
-        }
-        let Some(mut cfg) = self.connections.iter().find(|c| c.id == conn_id).cloned() else {
-            return;
-        };
-        // Same unlock/keychain preference as runs; background triggers
-        // never prompt — a missing password just fails this fetch.
-        if let Some(pw) = self.effective_password(&cfg) {
-            cfg.password = pw;
-        }
-        if let Ok(mut c) = cache.lock() {
-            c.loading = true;
-        }
-        self.status = "Loading suggestions…".into();
-        cx.notify();
-        let session = self.pool.get_or_create(conn_id);
-        let bg = cx.background_executor().clone();
-        let view = cx.entity().downgrade();
-        let conn_bg = conn_id.to_string();
-        // Snapshot the filter: a toggle mid-fetch must not mix scopes.
-        // The connected user's own schema is always exempt server-side.
-        let include_system = self.show_system;
-        let own_schema = cfg.user.clone();
-        cx.spawn(async move |_, cx| {
-            // Per-dictionary outcomes: one failing query must never nuke
-            // the rest (a broken FK query once emptied every cache).
-            struct Parts {
-                tables: Result<Vec<crate::metadata::TableId>, String>,
-                columns: Result<
-                    std::collections::HashMap<(String, String), Vec<crate::metadata::ColumnMeta>>,
-                    String,
-                >,
-                sequences: Result<Vec<crate::metadata::TableId>, String>,
-                fks: Result<Vec<crate::complete::ForeignKey>, String>,
-            }
-            let outcome = bg
-                .spawn(async move {
-                    let mut s = lock(&session);
-                    if !s.is_connected() {
-                        if let Err(e) = s.connect(&cfg).map_err(|e| e.to_string()) {
-                            let e = e.to_string();
-                            return Parts {
-                                tables: Err(e.clone()),
-                                columns: Err(e.clone()),
-                                sequences: Err(e.clone()),
-                                fks: Err(e),
-                            };
-                        }
-                    }
-                    Parts {
-                        tables: fetch_tables_blocking(&mut *s, include_system, &own_schema)
-                            .map_err(|e| e.to_string()),
-                        columns: fetch_columns_blocking(&mut *s, include_system, &own_schema)
-                            .map_err(|e| e.to_string()),
-                        sequences: fetch_sequences_blocking(&mut *s, include_system, &own_schema)
-                            .map_err(|e| e.to_string()),
-                        fks: fetch_fks_blocking(&mut *s, include_system, &own_schema)
-                            .map_err(|e| e.to_string()),
-                    }
-                })
-                .await;
-            view.update(cx, |this, cx| {
-                let Some(cache) = this.meta.get(&conn_bg).cloned() else {
-                    // Entry vanished mid-flight (connection deleted):
-                    // never leave the loading notice up.
-                    this.status = "".into();
-                    cx.notify();
-                    return;
-                };
-                if let Ok(mut c) = cache.lock() {
-                    c.loading = false;
-                    // Install each dictionary independently; anything that
-                    // failed keeps its previous content (possibly empty).
-                    // fetched_at advances on tables (the core set) so a
-                    // partial failure retries next TTL, not every keystroke.
-                    if let Ok(tables) = outcome.tables {
-                        c.tables = tables;
-                        c.fetched_at = Some(std::time::Instant::now());
-                    }
-                    if let Ok(columns) = outcome.columns {
-                        c.columns = columns;
-                    }
-                    if let Ok(sequences) = outcome.sequences {
-                        c.sequences = sequences;
-                    }
-                    if let Ok(fks) = outcome.fks {
-                        c.fks = fks;
-                    }
-                    // Degrade silently: keywords + whatever is cached work.
-                    this.status = "".into();
-                }
-                // Fresh dictionaries rebuild an open schema-browser tree.
-                this.refresh_browser(&conn_bg, cx);
-                cx.notify();
-            })
-            .ok();
-        })
-            .detach();
-    }
+    // (ensure_meta lives in browser.rs)
     // (trigger_complete lives in providers.rs)
 
-    /// Bump usage counts for tables named in an executed statement so
-    /// future rankings prefer working objects. Bounded: cleared past 5k.
-    pub(crate) fn bump_usage(&mut self, conn_id: &str, sql: &str) {
-        let map = build_alias_map(sql);
-        if map.is_empty() {
-            return;
-        }
-        for tref in map.values() {
-            let key = (conn_id.to_string(), tref.name.to_ascii_uppercase());
-            *self.usage.entry(key).or_insert(0) += 1;
-        }
-        if self.usage.len() > 5000 {
-            self.usage.clear();
-        }
-    }
+    // (bump_usage lives in providers.rs)
 
     /// Copy the grid selection to the clipboard: the most recently selected
     /// cell or row. Silent no-op with no selection.

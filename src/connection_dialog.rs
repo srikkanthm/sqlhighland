@@ -16,7 +16,8 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::*;
 
-use crate::app::{SqlHighlandView, env_color};
+use crate::app::{PendingPassword, SqlHighlandView, env_color};
+use crate::conn_picker::PickAfter;
 use crate::config::SavedConfig;
 use crate::model::{ConnectionConfig, Environment, OracleRole, PasswordMode, ServiceKind};
 use crate::schema::DbEngine;
@@ -592,4 +593,96 @@ pub(crate) fn dialog_footer(cancel_id: &'static str, confirm: Button) -> impl In
                 .on_click(|_, window, cx| window.close_dialog(cx)),
         )
         .child(confirm)
+}
+
+impl SqlHighlandView {
+    /// Resolve the password, opening the prompt when the mode needs one
+    /// and none is available. Returns the config with the usable password,
+    /// or None when the prompt took over — it resumes via
+    /// `submit_password` (re-running `run`, or plain-connecting).
+    pub(crate) fn with_password(
+        &mut self,
+        mut cfg: ConnectionConfig,
+        run: Option<(String, String, PickAfter)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<ConnectionConfig> {
+        match self.effective_password(&cfg) {
+            Some(pw) => {
+                cfg.password = pw;
+                Some(cfg)
+            }
+            None => {
+                self.pending_password = Some(PendingPassword {
+                    conn_id: cfg.id.clone(),
+                    run,
+                });
+                self.pwd_prompt
+                    .update(cx, |s, cx| s.set_value(String::new(), window, cx));
+                let name = cfg.name.clone();
+                let pwd = self.pwd_prompt.clone();
+                let view = cx.entity().downgrade();
+                self.note_dialog_open();
+                window.open_dialog(cx, move |dialog, _, cx| {
+                    let submit = view.clone();
+                    let pwd_in = pwd.clone();
+                    dialog
+                        .title(format!("Password for {name}"))
+                        .w(px(360.))
+                        .child(crate::connection_dialog::dialog_field("Password", &pwd_in, true, cx.theme().muted_foreground))
+                        .footer(crate::connection_dialog::dialog_footer(
+                            "pwd-cancel",
+                            Button::new("pwd-connect")
+                                .label("Connect")
+                                .primary()
+                                .on_click(move |_, window, cx| {
+                                    submit.update(cx, |this, cx| {
+                                        this.submit_password(window, cx);
+                                    })
+                                    .ok();
+                                }),
+                        ))
+                });
+                None
+            }
+        }
+    }
+
+    /// Password prompt submit: unlock the session (persisting to the
+    /// keychain when that mode is missing its entry), close the prompt,
+    /// then resume the pending connect or run.
+    fn submit_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_password.take() else {
+            return;
+        };
+        let pw = self.pwd_prompt.read(cx).value().to_string();
+        self.pwd_prompt
+            .update(cx, |s, cx| s.set_value(String::new(), window, cx));
+        if pw.is_empty() {
+            self.status = "Password required — cancelled".into();
+            cx.notify();
+            return;
+        }
+        let mode = self
+            .connections
+            .iter()
+            .find(|c| c.id == pending.conn_id)
+            .map(|c| c.password_mode);
+        if mode == Some(PasswordMode::Keychain) {
+            if let Err(e) = crate::keychain::set(&pending.conn_id, &pw) {
+                self.status = format!("Keychain store failed: {e}").into();
+                cx.notify();
+                return;
+            }
+        }
+        self.unlocked.insert(pending.conn_id.clone(), pw);
+        window.close_dialog(cx);
+        match pending.run {
+            Some((tab_id, _, PickAfter::ScriptBuffer)) => {
+                self.run_buffer_as_script(&tab_id, window, cx)
+            }
+            Some((tab_id, sql, _)) => self.start_run(&tab_id, sql, window, cx),
+            None => self.connect_connection(&pending.conn_id, window, cx),
+        }
+    }
 }

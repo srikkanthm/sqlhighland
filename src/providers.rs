@@ -415,3 +415,21 @@ impl SqlHighlandView {
         });
     }
 }
+
+impl SqlHighlandView {
+    /// Bump usage counts for tables named in an executed statement so
+    /// future rankings prefer working objects. Bounded: cleared past 5k.
+    pub(crate) fn bump_usage(&mut self, conn_id: &str, sql: &str) {
+        let map = build_alias_map(sql);
+        if map.is_empty() {
+            return;
+        }
+        for tref in map.values() {
+            let key = (conn_id.to_string(), tref.name.to_ascii_uppercase());
+            *self.usage.entry(key).or_insert(0) += 1;
+        }
+        if self.usage.len() > 5000 {
+            self.usage.clear();
+        }
+    }
+}
