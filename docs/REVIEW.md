@@ -11,8 +11,10 @@ same change set as this document; the rest are open recommendations.
 Update (follow-up change sets): the organization findings in §2 and the stale
 docs in §4.3 are fixed, the Tier 1 hygiene items (§3 formatting, §4.1, §4.2,
 §4.4), the Tier 2 security items (new-connection default, in-memory
-zeroization, tab-id path safety), and the Tier 3 remainder (§3 lock policy and
-logging, plus an MSRV CI job) are fixed — see the change sets at the end.
+zeroization, tab-id path safety), the Tier 3 remainder (§3 lock policy and
+logging, plus an MSRV CI job), and cross-platform P0 (§6.1 home-dir resolution)
+are fixed — see the change sets at the end. §6 tracks the remaining
+cross-platform / second-engine work.
 
 ## 1. Security
 
@@ -134,8 +136,8 @@ Plain `cargo test` / `cargo clippy --all-targets` (no gui) compiles again.
 Added `.github/workflows/ci.yml` (fmt; core clippy `-D warnings` + tests on
 Linux without gui; a macOS GUI job gated on the Metal toolchain — currently
 `continue-on-error` until the runner image is confirmed; a non-blocking
-`rustsec/audit-check`) and `rust-toolchain.toml` (stable + rustfmt/clippy).
-An MSRV (1.89) job is not yet wired up.
+`rustsec/audit-check`; and a blocking MSRV (1.89) job, added in Tier 3) and
+`rust-toolchain.toml` (stable + rustfmt/clippy).
 
 ### 4.3 Stale docs — **FIXED**
 `../README.md` was refreshed: correct test counts (116 lib / 11 live), the three
@@ -155,6 +157,54 @@ are chosen; add it (plus a LICENSE file) if the source is ever published.
 - `oracledb 26.0.0-beta.3` is a beta dependency (documented, isolated in
   `db.rs`). A transitive `block 0.1.6` (via `gpui-pre` → `cocoa`) reports a
   future-incompat warning upstream; not fixable locally.
+
+## 6. Cross-platform & engine readiness
+
+Assessed after the Tier 1–3 cleanups (Oracle-first, macOS the current target).
+The GUI stack is **not** Apple-locked upstream: `gpui-pre 0.3.4` selects
+`gpui-pre-linux` (Linux/FreeBSD), `gpui-pre-windows`, `gpui-pre-web` (wasm),
+and `gpui-pre-macos` per target. `security-framework` is an Apple-only target
+dep and `keychain` compiles a stub elsewhere. Remaining gaps are app-level.
+
+### 6.1 `HOME`-only path resolution — **FIXED (P0)**
+`config::base_dir` read `HOME` only, so on Windows the config dir failed and
+connections/tabs/preferences never persisted; `~` expansion in `@`-scripts and
+the export / save-as default dirs assumed `HOME` too. All four now use
+`fsutil::home_dir()` (`HOME` → `USERPROFILE` → `HOMEDRIVE`+`HOMEPATH`), and the
+config dir uses `%APPDATA%\sqlhighland` on Windows. Precedence is unit-tested
+(`fsutil::tests::home_dir_precedence_is_cross_platform`).
+
+### 6.2 Secret-file ACLs on Windows — open (P1)
+`fsutil`'s owner-only `0600`/`0700` tightening is `#[cfg(unix)]`; on Windows the
+legacy plaintext `File` password mode gets inherited ACLs. The Keychain path
+can't be selected there (stub returns "unsupported") until a backend exists, so
+the real fix is a Windows ACL or excluding `File` on Windows.
+
+### 6.3 Keychain backends — open
+macOS only; Windows Credential Manager and Linux Secret Service are stubs.
+`PasswordMode::default_for_new()` returns `Ask` off Apple, so this degrades
+safely (prompt per run) rather than failing.
+
+### 6.4 Port CI — open (P2)
+The GUI CI job is macOS-only. Add a Linux `cargo check --features gui` job
+(gpui-pre-linux) to catch port breakage early. Note: a Windows build is not a
+plain `cargo check` — `oracledb` → rustls pulls `aws-lc-sys`, which needs a
+native C toolchain (MSVC/CMake/NASM); a local `--target x86_64-pc-windows-msvc`
+check failed in that build script on macOS, not in our code.
+
+### 6.5 Second-engine plumbing — open
+`DbClient` / `SchemaProvider` / `DbEngine` are real seams, but the session layer
+is Oracle-concrete: `SessionPool` = `HashMap<String, Arc<Mutex<OracledbSession>>>`
+(`session.rs`), `FetchState.session` (`app/results.rs`), and the run/export
+signatures (`run/query.rs`, `run/export.rs`). The `DbClient` trait has no
+incremental-cursor API (`start_query`/`fetch_more` live on `OracledbSession`),
+and the metadata fetchers are Oracle dictionary SQL. A second engine needs its
+own cursor + metadata + dialect module.
+
+### 6.6 View-state breadth — open (feature velocity)
+`SqlHighlandView` remains a ~45-field struct; every feature adds fields and
+`impl` methods. The declined `ConnectionDialogState`/`PendingOps`/`ConnCache`
+grouping is the main maintainability cost for new features.
 
 ## Change set — security
 
@@ -213,4 +263,14 @@ are chosen; add it (plus a LICENSE file) if the source is ever published.
   replaced.
 - `.github/workflows/ci.yml`: added a blocking MSRV (1.89) job
   (`cargo +1.89.0 check --all-targets`), verified locally on 1.89.0.
-- Fixes the remaining §3 items; 117 lib tests green, clippy clean.
+- Fixes the §3 lock and logging items; 117 lib tests green, clippy clean.
+
+## Change set — cross-platform (P0)
+
+- `src/fsutil.rs`: `home_dir()` (`HOME` → `USERPROFILE` → `HOMEDRIVE`+`HOMEPATH`)
+  with a platform-independent, unit-tested precedence helper.
+- `src/config.rs`: `base_dir` uses `%APPDATA%\sqlhighland` on Windows, else
+  `home_dir()/.config/sqlhighland`.
+- `src/sql/script.rs`, `src/run/export.rs`, `src/app/tabs.rs`: `~` expansion and
+  dialog default dirs use `home_dir()`.
+- Fixes §6.1; 119 lib tests green, clippy clean (macOS).
