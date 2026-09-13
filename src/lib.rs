@@ -19,3 +19,7 @@ pub mod guitheme;
 pub mod settings_dialog;
 #[cfg(feature = "gui")]
 pub mod connection_dialog;
+#[cfg(feature = "gui")]
+pub mod conn_picker;
+#[cfg(feature = "gui")]
+pub mod bind_dialog;

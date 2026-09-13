@@ -446,26 +446,19 @@ impl SqlHighlandView {
                         )
                         )
                 )
-                .footer(
-                    h_flex()
-                        .gap_2()
-                        .child(div().flex_1())
-                        .child(Button::new("dlg-cancel").label("Cancel").on_click(
-                            move |_, window, cx| {
-                                window.close_dialog(cx);
-                            },
-                        ))
-                        .child(Button::new("dlg-save").primary().label("Save").on_click(
-                            move |_, window, cx: &mut App| {
-                                save_view
-                                    .update(cx, |this, cx| {
-                                        this.save_from_dialog(window, cx);
-                                    })
-                                    .ok();
-                                window.close_dialog(cx);
-                            },
-                        )),
-                )
+                .footer(dialog_footer(
+                    "dlg-cancel",
+                    Button::new("dlg-save").primary().label("Save").on_click(
+                        move |_, window, cx: &mut App| {
+                            save_view
+                                .update(cx, |this, cx| {
+                                    this.save_from_dialog(window, cx);
+                                })
+                                .ok();
+                            window.close_dialog(cx);
+                        },
+                    ),
+                ))
         });
     }
 
@@ -583,4 +576,20 @@ fn dialog_pills<T: Copy + PartialEq + 'static>(
         },
     ))
     .into_any_element()
+}
+
+/// Standard form footer: right-aligned Cancel (closes the top dialog)
+/// plus one primary action. Covers the dialogs whose Cancel does
+/// nothing else; alerts and custom footers (picker, bind, delete)
+/// keep their own.
+pub(crate) fn dialog_footer(cancel_id: &'static str, confirm: Button) -> impl IntoElement {
+    h_flex()
+        .gap_2()
+        .child(div().flex_1())
+        .child(
+            Button::new(cancel_id)
+                .label("Cancel")
+                .on_click(|_, window, cx| window.close_dialog(cx)),
+        )
+        .child(confirm)
 }

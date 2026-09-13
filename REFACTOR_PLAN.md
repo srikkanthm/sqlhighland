@@ -63,14 +63,21 @@ Status: **done** (2026-09-12), uncommitted at time of writing.
   112 lib + menus/themes/browser_tree green (2 pre-existing
   headless flakes excluded).
 
-## Phase 2 — flows out (~1,100 lines)
+## Phase 2 — flows out (in progress; picker/bind done, runner pending)
 
-- `conn_picker.rs` + `bind_dialog.rs`: collapse the 4×
-  `pick_connection_*` fns and twin open-pick fns into one
-  parameterized resume; one shared dialog-footer helper (kills the
-  7× footer duplication).
-- `run.rs`: `start_run`/script gates, `run_sql`/`run_script`,
-  export-drain UI, local `Outcome`/`StmtOutcome` enums.
+Status: **part-done** (2026-09-12), uncommitted at time of writing.
+`app.rs` 6,831 → ~6,000.
+
+- Done: 4× `pick_connection_*` unified into one parameterized
+  `pick_connection_resume` (verified in place first); `conn_picker.rs`
+  (~490: PendingPick/PickAfter, resume, focus helper, open fns,
+  picker dialog); `bind_dialog.rs` (~310: PendingBind/BindField,
+  submit fns, open/submit); `dialog_footer` helper converted at the
+  connection + password-prompt footers (alerts/custom footers keep
+  theirs). Verified: temp probes for both dialogs (since removed),
+  clean clippy, 112 lib + menus/themes/browser_tree green.
+- Remaining: `run.rs` executor (`start_run`/script gates,
+  `run_sql`/`run_script`, export-drain UI, `Outcome`/`StmtOutcome`).
 
 ## Phase 3 — surfaces out (~800 lines)
 

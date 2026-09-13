@@ -704,3 +704,17 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   unchanged. Two tab-command fns swept up in the cut moved back.
 - Verified: temp headless probe for both dialogs (since removed),
   clean clippy, 112 lib + menus/themes/browser_tree green.
+
+## Refactor Phase 2a — picker/bind dialogs extracted (2026-09-12, uncommitted)
+
+- Unified the 4 pick_connection_* helpers into one parameterized
+  pick_connection_resume (verified in place first): same per-mode
+  behavior, both call sites collapsed to one call each.
+- conn_picker.rs (~490): PendingPick/PickAfter, resume, focus helper,
+  open_pick_for_*, open_conn_pick_dialog. bind_dialog.rs (~310):
+  PendingBind/BindField, submit fns, open/submit bind dialog.
+  dialog_footer helper (connection + password-prompt footers; alerts
+  and custom footers keep theirs). pub(crate) for cross-module use.
+- Verified: temp headless probes for connection dialog (pills, cancel)
+  and bind dialog (opens on pick, Enter submits) — since removed.
+  Clean clippy, 112 lib + menus/themes/browser_tree green.

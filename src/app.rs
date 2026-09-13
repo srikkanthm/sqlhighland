@@ -36,6 +36,8 @@ use crate::model::{
 };
 use crate::schema::{DbEngine, OracleProvider, SchemaProvider as _};
 use crate::session::{SessionPool, lock};
+use crate::conn_picker::{PendingPick, PickAfter};
+use crate::bind_dialog::PendingBind;
 use crate::sql::{
     apply_substitutions, exec_summary, expand_at_directives, expand_script_file, find_bind_vars,
     find_substitution_vars, format_sql, is_dml, line_at, parse_at_directive, split_statements,
@@ -53,7 +55,6 @@ use gpui_kit::component::list::ListItem;
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tree::{tree, TreeEvent, TreeItem, TreeState};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
@@ -664,13 +665,13 @@ enum OutputKind {
 }
 
 #[derive(Clone)]
-struct Output {
+pub(crate) struct Output {
     kind: OutputKind,
     text: SharedString,
 }
 
 impl Output {
-    fn error(text: impl Into<SharedString>) -> Self {
+    pub(crate) fn error(text: impl Into<SharedString>) -> Self {
         Self {
             kind: OutputKind::Error,
             text: text.into(),
@@ -686,15 +687,15 @@ impl Output {
 }
 
 /// One query tab: editor + grid + run state + connection binding.
-struct QueryTab {
-    id: String,
+pub(crate) struct QueryTab {
+    pub(crate) id: String,
     name: SharedString,
     kind: TabKind,
-    connection_id: Option<String>,
+    pub(crate) connection_id: Option<String>,
     path: Option<std::path::PathBuf>,
     file_stamp: Option<FileStamp>,
     dirty: bool,
-    editor: Entity<EditorState>,
+    pub(crate) editor: Entity<EditorState>,
     table: Entity<TableState<ResultsDelegate>>,
     /// Mirrors the delegate's fetch for lock-free (no entity read) checks.
     fetch: Option<Arc<FetchState>>,
@@ -703,7 +704,7 @@ struct QueryTab {
     /// Latest action outcome for the output pane: failures, and confirmations
     /// of non-query statements. Cleared on every new run; Dismiss returns to
     /// the grid (or placeholder) without re-running.
-    output: Option<Output>,
+    pub(crate) output: Option<Output>,
     busy: bool,
     /// Generation of the tab's latest run. Bumped on every Run and on Cancel;
     /// late completions whose token mismatches are discarded. This is what
@@ -1012,43 +1013,6 @@ pub fn app_view(cx: &App) -> Option<Entity<SqlHighlandView>> {
     AppView::global(cx).0.upgrade()
 }
 
-/// A run deferred for variable input: the statement plus the variables that
-/// still need values. Only one bind dialog opens at a time.
-#[derive(Debug, Clone)]
-struct PendingBind {
-    tab_id: String,
-    sql: String,
-    subs: Vec<SubVar>,
-    binds: Vec<String>,
-    /// Script display name (`seed.sql`) when this run is an `@`-script:
-    /// `sql` holds the fully expanded text, and submit re-splits it into
-    /// statements for the sequential runner instead of a single `run_sql`.
-    script: Option<String>,
-}
-
-/// A run deferred for connection choice: the statement waits while the user
-/// picks the tab's connection. Only one pick dialog opens at a time.
-/// What picking a connection does once chosen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PickAfter {
-    /// Classic unbound-run mode: bind the tab and run its statement.
-    Run,
-    /// Cmd+K mode: open a NEW tab bound to the pick (no run).
-    NewTab,
-    /// Shift+Cmd+K mode: rebind the ACTIVE tab to the pick (no run).
-    Rebind,
-    /// Whole-buffer script mode: bind the tab and run its buffer as a
-    /// script (fresh buffer text is re-read on resume, never stored).
-    ScriptBuffer,
-}
-
-#[derive(Debug, Clone)]
-struct PendingPick {
-    tab_id: String,
-    sql: String,
-    after: PickAfter,
-}
-
 /// Password prompt in flight: which connection, and the run to resume
 /// afterwards (`None` = plain connect from the sidebar/tree). The resume
 /// carries how to re-enter: a stored statement re-runs, a buffer script
@@ -1069,191 +1033,15 @@ enum ScriptResume {
     Buffer,
 }
 
-/// One row in the variables dialog: `&name` substitution or `:name` bind.
-struct BindField {
-    /// Display key: `&name` or `:name`.
-    key: String,
-    /// Variable name without prefix.
-    name: String,
-    /// True for substitution (`&`), false for bind (`:`).
-    is_sub: bool,
-    input: Entity<InputState>,
-}
+    // -- Variables dialog (see bind_dialog.rs) ---------------------------------
 
 /// Read every dialog field and submit the run. Shared by the Run button and
 /// the dialog's Enter-to-confirm (`on_ok`) so both paths behave identically.
 /// Blank fields block submission: the error slot is filled (shown in the
 /// dialog on rebuild) and false is returned so the dialog stays open.
-fn submit_bind_fields(
-    view: &WeakEntity<SqlHighlandView>,
-    fields: &std::rc::Rc<Vec<BindField>>,
-    error: &std::rc::Rc<std::cell::RefCell<Option<String>>>,
-    cx: &mut App,
-) -> bool {
-    let mut sub_values: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    let mut bind_values: Vec<BindParam> = Vec::new();
-    let mut missing: Vec<String> = Vec::new();
-    for f in fields.iter() {
-        let v = f.input.read(cx).value().to_string();
-        if v.trim().is_empty() {
-            missing.push(f.key.clone());
-            continue;
-        }
-        if f.is_sub {
-            sub_values.insert(f.name.clone(), v);
-        } else {
-            bind_values.push(BindParam {
-                name: f.name.clone(),
-                value: v,
-            });
-        }
-    }
-    if !missing.is_empty() {
-        *error.borrow_mut() = Some(format!("Value required: {}", missing.join(", ")));
-        // Rebuild the dialog so the message paints; the builder never moves
-        // anything out, so this notify is crash-safe (see env-tag fix).
-        view.update(cx, |_, cx| cx.notify()).ok();
-        return false;
-    }
-    *error.borrow_mut() = None;
-    view.update(cx, |this, cx| {
-        this.submit_bind_dialog(sub_values, bind_values, cx);
-    })
-    .ok();
-    true
-}
+    // (submit_bind_fields lives in bind_dialog.rs)
 
-/// Bind the tab to the picked connection and run the deferred statement
-/// (variables dialog next, if needed). Shared by picker click and Enter
-/// handlers so both paths behave identically.
-fn pick_connection_and_run(
-    view: &WeakEntity<SqlHighlandView>,
-    tab_id: &str,
-    sql: &str,
-    conn_id: &str,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    // Close the picker first so a variables dialog opened below lands on a
-    // clean dialog stack.
-    window.close_dialog(cx);
-    view.update(cx, |this, cx| {
-        if let Some(t) = this.tab_by_id(tab_id) {
-            t.connection_id = Some(conn_id.to_string());
-        }
-        this.pending_pick = None;
-        this.persist_tabs(cx);
-        this.start_run(tab_id, sql.to_string(), window, cx);
-    })
-    .ok();
-}
-
-/// Bind a NEW tab to the picked connection (Cmd+K flow): closes the
-/// picker, creates + selects a blank tab bound to conn_id, focuses its
-/// editor. Never runs anything (contrast pick_connection_and_run, which
-/// binds the pending tab and resumes its deferred statement).
-fn pick_connection_for_new_tab(
-    view: &WeakEntity<SqlHighlandView>,
-    conn_id: &str,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    // Close the picker first so focus lands cleanly below.
-    window.close_dialog(cx);
-    let new_id = view
-        .update(cx, |this, cx| {
-            let tab_id = this.add_tab(Some(conn_id.to_string()), String::new(), window, cx);
-            if let Some(ix) = this.tab_index(&tab_id) {
-                this.select_tab(ix, window, cx);
-            }
-            this.pending_pick = None;
-            this.persist_tabs(cx);
-            // Establish the session now so the tab is live before the
-            // first run (failures surface through the standard
-            // connect-failed path, same as sidebar Connect).
-            this.connect_connection(conn_id, window, cx);
-            tab_id
-        })
-        .ok();
-    if let Some(tab_id) = new_id {
-        focus_tab_editor(view, &tab_id, window, cx);
-    }
-}
-
-/// Rebind the ACTIVE tab to the picked connection (Shift+Cmd+K flow):
-/// closes the picker, swaps the tab's binding, connects eagerly, and
-/// refocuses its editor. No new tab, no run (contrast the siblings
-/// above/below).
-fn pick_connection_for_rebind(
-    view: &WeakEntity<SqlHighlandView>,
-    tab_id: &str,
-    conn_id: &str,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    // Close the picker first so focus lands cleanly below.
-    window.close_dialog(cx);
-    view.update(cx, |this, cx| {
-        if let Some(t) = this.tab_by_id(tab_id) {
-            t.connection_id = Some(conn_id.to_string());
-        }
-        this.pending_pick = None;
-        this.persist_tabs(cx);
-        // Same eager session as a fresh Cmd+K tab (failures surface
-        // through the standard connect-failed path).
-        this.connect_connection(conn_id, window, cx);
-    })
-    .ok();
-    // Outside the update above: reading the leased view here would panic.
-    focus_tab_editor(view, tab_id, window, cx);
-}
-
-/// Bind the tab to the picked connection and run its whole buffer as a
-/// script (Run Script flow on an unbound tab): closes the picker, binds,
-/// then re-reads the live editor text and enters the shared script
-/// gates (variables dialog next, if needed).
-fn pick_connection_and_resume_buffer(
-    view: &WeakEntity<SqlHighlandView>,
-    tab_id: &str,
-    conn_id: &str,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    // Close the picker first so a variables dialog opened below lands on a
-    // clean dialog stack.
-    window.close_dialog(cx);
-    view.update(cx, |this, cx| {
-        if let Some(t) = this.tab_by_id(tab_id) {
-            t.connection_id = Some(conn_id.to_string());
-        }
-        this.pending_pick = None;
-        this.persist_tabs(cx);
-        this.run_buffer_as_script(tab_id, window, cx);
-    })
-    .ok();
-}
-
-/// Return keyboard focus to the tab's editor so the next Cmd+Enter works
-/// immediately after the dialog closes (no reliance on focus-restore alone).
-fn focus_tab_editor(
-    view: &WeakEntity<SqlHighlandView>,
-    tab_id: &str,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let editor = view.upgrade().and_then(|v| {
-        v.read(cx)
-            .tabs
-            .iter()
-            .find(|t| t.id == tab_id)
-            .map(|t| t.editor.clone())
-    });
-    if let Some(editor) = editor {
-        let handle = editor.read(cx).focus_handle(cx);
-        window.focus(&handle, cx);
-    }
-}
+    // (pick_connection_resume + focus_tab_editor live in conn_picker.rs)
 
 pub struct SqlHighlandView {
     pool: SessionPool,
@@ -1264,7 +1052,7 @@ pub struct SqlHighlandView {
     /// from a render through the pool.
     live: std::collections::HashSet<String>,
     pub(crate) connections: Vec<ConnectionConfig>,
-    tabs: Vec<QueryTab>,
+    pub(crate) tabs: Vec<QueryTab>,
     active: usize,
     tab_scroll: ScrollHandle,
     untitled_counter: usize,
@@ -1313,11 +1101,11 @@ pub struct SqlHighlandView {
     pub(crate) status: SharedString,
     /// `&&name` values defined this session, per connection id. Once defined,
     /// even `&name` reuses the value without prompting (SQL*Plus parity).
-    defines: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    pub(crate) defines: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     /// Run waiting on the bind dialog (cleared on submit or cancel).
-    pending_bind: Option<PendingBind>,
+    pub(crate) pending_bind: Option<PendingBind>,
     /// Run waiting on the connection picker (cleared on pick or cancel).
-    pending_pick: Option<PendingPick>,
+    pub(crate) pending_pick: Option<PendingPick>,
     /// Session-unlocked passwords, per connection id. Memory only, never
     /// persisted: Ask mode and Keychain-miss prompts land here, and every
     /// connect/run path prefers them over whatever is stored.
@@ -1581,15 +1369,15 @@ impl SqlHighlandView {
 
     // -- Tabs ---------------------------------------------------------------
 
-    fn tab_index(&self, tab_id: &str) -> Option<usize> {
+    pub(crate) fn tab_index(&self, tab_id: &str) -> Option<usize> {
         self.tabs.iter().position(|t| t.id == tab_id)
     }
 
-    fn tab_by_id(&mut self, tab_id: &str) -> Option<&mut QueryTab> {
+    pub(crate) fn tab_by_id(&mut self, tab_id: &str) -> Option<&mut QueryTab> {
         self.tabs.iter_mut().find(|t| t.id == tab_id)
     }
 
-    fn active_tab(&self) -> &QueryTab {
+    pub(crate) fn active_tab(&self) -> &QueryTab {
         &self.tabs[self.active]
     }
 
@@ -1828,7 +1616,7 @@ impl SqlHighlandView {
         self.active = 0;
     }
 
-    fn add_tab(
+    pub(crate) fn add_tab(
         &mut self,
         connection_id: Option<String>,
         text: String,
@@ -2030,7 +1818,7 @@ impl SqlHighlandView {
         });
     }
 
-    fn select_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if ix >= self.tabs.len() {
             return;
         }
@@ -2128,7 +1916,7 @@ impl SqlHighlandView {
         self.select_tab(next, window, cx);
     }
 
-    fn persist_tabs(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn persist_tabs(&mut self, cx: &mut Context<Self>) {
         let manifest = TabsManifest {
             tabs: self
                 .tabs
@@ -2526,27 +2314,18 @@ impl SqlHighlandView {
                         .title(format!("Password for {name}"))
                         .w(px(360.))
                         .child(crate::connection_dialog::dialog_field("Password", &pwd_in, true, cx.theme().muted_foreground))
-                        .footer(
-                            h_flex()
-                                .gap_2()
-                                .child(div().flex_1())
-                                .child(Button::new("pwd-cancel").label("Cancel").on_click(
-                                    move |_, window, cx| {
-                                        window.close_dialog(cx);
-                                    },
-                                ))
-                                .child(
-                                    Button::new("pwd-connect")
-                                        .label("Connect")
-                                        .primary()
-                                        .on_click(move |_, window, cx| {
-                                            submit.update(cx, |this, cx| {
-                                                this.submit_password(window, cx);
-                                            })
-                                            .ok();
-                                        }),
-                                ),
-                        )
+                        .footer(crate::connection_dialog::dialog_footer(
+                            "pwd-cancel",
+                            Button::new("pwd-connect")
+                                .label("Connect")
+                                .primary()
+                                .on_click(move |_, window, cx| {
+                                    submit.update(cx, |this, cx| {
+                                        this.submit_password(window, cx);
+                                    })
+                                    .ok();
+                                }),
+                        ))
                 });
                 None
             }
@@ -2591,7 +2370,7 @@ impl SqlHighlandView {
         }
     }
 
-    fn connect_connection(
+    pub(crate) fn connect_connection(
         &mut self,
         conn_id: &str,
         window: &mut Window,
@@ -2720,7 +2499,7 @@ impl SqlHighlandView {
     /// substitution variables and `:binds`, and either runs directly or opens
     /// the variables dialog first. With no connection bound, offers the
     /// connection picker first and runs right after the pick.
-    fn start_run(
+    pub(crate) fn start_run(
         &mut self,
         tab_id: &str,
         sql: String,
@@ -2857,7 +2636,7 @@ impl SqlHighlandView {
     /// and plain SQL together, then follows the shared script gates. The
     /// buffer is re-read on every resume, so edits made while a picker
     /// or password prompt is open are picked up.
-    fn run_buffer_as_script(&mut self, tab_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn run_buffer_as_script(&mut self, tab_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.tab_index(tab_id) else {
             return;
         };
@@ -2970,630 +2749,20 @@ impl SqlHighlandView {
         self.open_bind_dialog(window, cx);
     }
 
-    /// Cmd+K: open the connection picker; choosing opens a NEW tab
-    /// bound to the pick (no run). No-op while a pick is already pending
-    /// (picker open) so the deferred run it carries is never clobbered.
-    /// The active tab id is kept only to refocus it on cancel/Esc.
-    fn open_pick_for_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending_pick.is_some() {
-            return;
-        }
-        let tab_id = self.active_tab().id.clone();
-        self.pending_pick = Some(PendingPick {
-            tab_id,
-            sql: String::new(),
-            after: PickAfter::NewTab,
-        });
-        self.open_conn_pick_dialog(window, cx);
-    }
+    // (open_pick_for_new_tab/open_pick_for_rebind live in conn_picker.rs)
 
-    /// Shift+Cmd+K: open the connection picker; choosing rebinds the
-    /// ACTIVE tab to the pick and connects (no new tab, no run). Same
-    /// already-pending guard as Cmd+K.
-    fn open_pick_for_rebind(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending_pick.is_some() {
-            return;
-        }
-        let tab_id = self.active_tab().id.clone();
-        self.pending_pick = Some(PendingPick {
-            tab_id,
-            sql: String::new(),
-            after: PickAfter::Rebind,
-        });
-        self.open_conn_pick_dialog(window, cx);
-    }
-
-    /// Connection picker for unbound runs: choosing binds the tab and the
-    /// deferred statement runs immediately (variables dialog next, if needed).
-    /// Search-first: type to filter, Enter runs on the first match, click
-    /// picks any row. Builder-safe like the other dialogs: everything is
-    /// cloned in, the builder never touches the view entity.
-    fn open_conn_pick_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pending) = self.pending_pick.clone() else {
-            return;
-        };
-        struct PickRow {
-            id: String,
-            name: String,
-            detail: String,
-            env: Environment,
-        }
-        let rows: Vec<PickRow> = self
-            .connections
-            .iter()
-            .map(|c| PickRow {
-                id: c.id.clone(),
-                name: c.name.clone(),
-                detail: format!("{}@{}/{}", c.user, c.host, c.service_name),
-                env: c.environment,
-            })
-            .collect();
-        let rows: Rc<Vec<PickRow>> = Rc::new(rows);
-        // Search field, rebuilt per open so no stale filter survives.
-        let search =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Type to filter connections…"));
-        let view = cx.entity().downgrade();
-        let tab_id = pending.tab_id.clone();
-        let sql = pending.sql.clone();
-        // Picker mode: Run binds the tab and runs; Cmd+K opens a new
-        // tab; Shift+Cmd+K rebinds the active tab. Cloned into every
-        // handler below (click, Enter) so both paths agree.
-        let pick_mode = pending.after;
-        // Explicit scroll handle (NOT the overflow_y_scrollbar() wrapper):
-        // the wrapper's caller-id keying misbehaves for dialog content that
-        // rebuilds every render, while an owned handle tracks stably.
-        let scroll_handle = Rc::new(ScrollHandle::new());
-        // Last filter seen: typing rewinds to the top, since a stale offset
-        // could hide the whole shortened list. Compared in the builder (the
-        // input's own change notification already repaints every keystroke).
-        let last_filter: Rc<std::cell::RefCell<String>> =
-            Rc::new(std::cell::RefCell::new(String::new()));
-        // Active row (index into the filtered list below): hover drives it,
-        // Enter confirms it. Reset on filter change like the scroll offset.
-        let active: Rc<std::cell::RefCell<usize>> = Rc::new(std::cell::RefCell::new(0));
-        // Filtered ids per render, for Enter (which runs outside the build).
-        let shown_ids: Rc<std::cell::RefCell<Vec<String>>> =
-            Rc::new(std::cell::RefCell::new(Vec::new()));
-        // Keyboard flow: search takes focus on open; Enter confirms the
-        // highlighted match. The builder re-runs every render, so focusing
-        // happens one-shot on the first build (a pre-mount focus call
-        // alone may not stick).
-        let search_focus = search.read(cx).focus_handle(cx);
-        let focused_once: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
-        let search_in = search.clone();
-        self.note_dialog_open();
-        window.open_dialog(cx, move |dialog, window, cx| {
-            let rows = rows.clone();
-            let search = search_in.clone();
-            if !focused_once.get() {
-                focused_once.set(true);
-                window.focus(&search.read(cx).focus_handle(cx), cx);
-            }
-            let muted = cx.theme().muted_foreground;
-            // Highlighted-match wash (same selected language as the
-            // dialog pills): the row Enter will take, live with hover
-            // and the filter.
-            let first_bg = cx.theme().accent.opacity(0.25);
-            let filter = search.read(cx).value().to_string();
-            if *last_filter.borrow() != filter {
-                *last_filter.borrow_mut() = filter.clone();
-                scroll_handle.set_offset(gpui_kit::point(px(0.), px(0.)));
-                *active.borrow_mut() = 0;
-            }
-            let needle = filter.to_lowercase();
-            let shown: Vec<&PickRow> = if needle.trim().is_empty() {
-                rows.iter().collect()
-            } else {
-                rows.iter()
-                    .filter(|r| {
-                        r.name.to_lowercase().contains(&needle)
-                            || r.detail.to_lowercase().contains(&needle)
-                    })
-                    .collect()
-            };
-            let mut body = v_flex()
-                .gap_1()
-                .w_full()
-                .child(Input::new(&search).w_full());
-            if rows.is_empty() {
-                body = body.child(
-                    div()
-                        .text_sm()
-                        .text_color(muted)
-                        .child(match pick_mode {
-                            PickAfter::Run => "No connections yet — add one to run this statement.",
-                            PickAfter::NewTab | PickAfter::Rebind | PickAfter::ScriptBuffer => {
-                                "No connections yet — add one to get started."
-                            }
-                        }),
-                );
-            } else if shown.is_empty() {
-                body = body.child(
-                    div()
-                        .text_sm()
-                        .text_color(muted)
-                        .child(format!("No matches for “{filter}”.",)),
-                );
-            } else {
-                body = body.child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(match pick_mode {
-                            PickAfter::Run => "Type to filter, Enter runs on the highlighted match.",
-                            PickAfter::NewTab => {
-                                "Type to filter, Enter opens a new tab on the highlighted match."
-                            }
-                            PickAfter::Rebind => {
-                                "Type to filter, Enter rebinds the active tab to the highlighted match."
-                            }
-                            PickAfter::ScriptBuffer => {
-                                "Type to filter, Enter runs the buffer script on the highlighted match."
-                            }
-                        }),
-                );
-            }
-            // Enter works off this snapshot (it runs outside the build).
-            *shown_ids.borrow_mut() = shown.iter().map(|r| r.id.clone()).collect();
-            // Cap + scroll: long connection lists overflow the dialog.
-            // Explicit handle + overflow_y_scroll (NOT the Scrollable
-            // wrapper, whose caller-id keying misbehaves for content that
-            // rebuilds every render). Rows hang directly off the scroll
-            // area (not a nested column) so tracked item indices address
-            // rows — the rewind-on-type below targets item 0, the first row.
-            let scroll_handle = scroll_handle.clone();
-            let mut scroll_body = div()
-                .id("conn-pick-scroll")
-                .test_support()
-                .w_full()
-                .max_h(px(400.))
-                .overflow_y_scroll()
-                .track_scroll(&scroll_handle)
-                .flex()
-                .flex_col()
-                .gap_1()
-                // Gutter for the overlaid scrollbar track (see dialog).
-                // NOTE: this used to live inside each row so the
-                // first-match wash spanned full width, but per-row
-                // restyle made hover laggy — container-level stays.
-                .pr_5();
-            for (rix, r) in shown.iter().enumerate() {
-                let pick_view = view.clone();
-                let pick_tab = tab_id.clone();
-                let pick_sql = sql.clone();
-                let pick_mode = pick_mode;
-                let hover_view = view.clone();
-                let hover_active = active.clone();
-                let conn_id = r.id.clone();
-                let mut line = h_flex()
-                    .gap_2()
-                    .items_center()
-                    .w_full()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .hover(|this| this.bg(muted.opacity(0.15)));
-                line = line.child(
-                    v_flex()
-                        .flex_1()
-                        .child(div().text_sm().child(r.name.clone()))
-                        .child(div().text_xs().text_color(muted).child(r.detail.clone())),
-                );
-                if let Some(tag) = env_tag(r.env, cx) {
-                    line = line.child(tag);
-                }
-                scroll_body = scroll_body.child(
-                    div()
-                        .id(("conn-pick", rix))
-                        .test_support()
-                        .flex_shrink_0()
-                        .w_full()
-                        // Highlighted row is the Enter target: hover moves
-                        // the highlight here (repaint only when it changes).
-                        .when(rix == *active.borrow(), |this| this.bg(first_bg))
-                        .child(line)
-                        .on_hover(move |hovered, _, cx| {
-                            if *hovered && *hover_active.borrow() != rix {
-                                *hover_active.borrow_mut() = rix;
-                                hover_view.update(cx, |_, cx| cx.notify()).ok();
-                            }
-                        })
-                        .on_click(move |_, window, cx: &mut App| {
-                            match pick_mode {
-                                PickAfter::Run => {
-                                    pick_connection_and_run(
-                                        &pick_view, &pick_tab, &pick_sql, &conn_id, window, cx,
-                                    );
-                                }
-                                PickAfter::NewTab => {
-                                    pick_connection_for_new_tab(&pick_view, &conn_id, window, cx);
-                                }
-                                PickAfter::Rebind => {
-                                    pick_connection_for_rebind(
-                                        &pick_view, &pick_tab, &conn_id, window, cx,
-                                    );
-                                }
-                                PickAfter::ScriptBuffer => {
-                                    pick_connection_and_resume_buffer(
-                                        &pick_view, &pick_tab, &conn_id, window, cx,
-                                    );
-                                }
-                            }
-                        }),
-                );
-            }
-            // Same always-visible scrollbar overlay as the connection
-            // dialog: the kit default (hover-only) hides picker overflow.
-            let pick_sb = (*scroll_handle).clone();
-            body = body.child(
-                div()
-                    .id("conn-pick-scroll-wrap")
-                    .test_support()
-                    .w_full()
-                    .max_h(px(400.))
-                    .relative()
-                    .child(scroll_body)
-                    .child(
-                        div().absolute().inset_0().child(
-                            Scrollbar::vertical(&pick_sb)
-                                .id("conn-pick-scrollbar")
-                                .mode(ScrollbarMode::Always),
-                        ),
-                    ),
-            );
-            let ok_view = view.clone();
-            let ok_rows = rows.clone();
-            let ok_active = active.clone();
-            let ok_shown = shown_ids.clone();
-            let ok_tab = tab_id.clone();
-            let ok_sql = sql.clone();
-            let ok_mode = pick_mode;
-            let cancel_view = view.clone();
-            let cancel_tab = tab_id.clone();
-            let esc_view = view.clone();
-            let esc_tab = tab_id.clone();
-            let mut footer = h_flex()
-                .gap_2()
-                .child(div().flex_1())
-                // Footer buttons sit after the search field in Tab order.
-                // The dialog X is hidden (Esc cancels).
-                .child(
-                    Button::new("pick-cancel")
-                        .label("Cancel")
-                        .tab_index(100)
-                        .on_click(move |_, window, cx: &mut App| {
-                            cancel_view
-                                .update(cx, |this, cx| {
-                                    this.pending_pick = None;
-                                    cx.notify();
-                                })
-                                .ok();
-                            window.close_dialog(cx);
-                            focus_tab_editor(&cancel_view, &cancel_tab, window, cx);
-                        }),
-                );
-            if rows.is_empty() {
-                let add_view = view.clone();
-                footer = footer.child(
-                    Button::new("pick-add")
-                        .primary()
-                        .label("Add connection…")
-                        .tab_index(101)
-                        .on_click(move |_, window, cx: &mut App| {
-                            window.close_dialog(cx);
-                            add_view
-                                .update(cx, |this, cx| {
-                                    this.pending_pick = None;
-                                    this.start_add(window, cx);
-                                })
-                                .ok();
-                        }),
-                );
-            }
-            dialog
-                .title("Select connection")
-                .w(px(400.))
-                .close_button(false)
-                .child(body)
-                // Enter confirms the highlighted match (hover or, by
-                // default/reset, the first). False keeps the dialog open
-                // (no matches); the close is manual so a variables dialog
-                // opened below lands on a clean stack.
-                .on_ok(move |_, window, cx: &mut App| {
-                    let ids = ok_shown.borrow();
-                    let pick = (!ids.is_empty()).then(|| {
-                        let ix = (*ok_active.borrow()).min(ids.len() - 1);
-                        ids[ix].clone()
-                    });
-                    let pick = pick.as_deref().and_then(|id| {
-                        ok_rows.iter().find(|r| r.id == id)
-                    });
-                    match pick {
-                        Some(row) => {
-                            match ok_mode {
-                                PickAfter::Run => {
-                                    window.close_dialog(cx);
-                                    ok_view
-                                        .update(cx, |this, cx| {
-                                            if let Some(t) = this.tab_by_id(&ok_tab) {
-                                                t.connection_id = Some(row.id.clone());
-                                            }
-                                            this.pending_pick = None;
-                                            this.persist_tabs(cx);
-                                            this.start_run(&ok_tab, ok_sql.clone(), window, cx);
-                                        })
-                                        .ok();
-                                }
-                                PickAfter::NewTab => {
-                                    pick_connection_for_new_tab(&ok_view, &row.id, window, cx);
-                                }
-                                PickAfter::Rebind => {
-                                    pick_connection_for_rebind(
-                                        &ok_view, &ok_tab, &row.id, window, cx,
-                                    );
-                                }
-                                PickAfter::ScriptBuffer => {
-                                    pick_connection_and_resume_buffer(
-                                        &ok_view, &ok_tab, &row.id, window, cx,
-                                    );
-                                }
-                            }
-                            false
-                        }
-                        None => false,
-                    }
-                })
-                // Escape cancels: drop the deferred run and refocus.
-                .on_cancel(move |_, window, cx: &mut App| {
-                    esc_view
-                        .update(cx, |this, cx| {
-                            this.pending_pick = None;
-                            cx.notify();
-                        })
-                        .ok();
-                    focus_tab_editor(&esc_view, &esc_tab, window, cx);
-                    true
-                })
-                .footer(footer)
-        });
-        // Search takes focus on open (open_dialog focuses the dialog layer;
-        // the field must win so typing + Enter work immediately).
-        window.focus(&search_focus, cx);
-    }
+    // (open_conn_pick_dialog lives in conn_picker.rs)
 
     /// Variables dialog: one blank field per `&name` / `:name` (always blank,
     /// no memory). Builder-safe: everything the dialog renders is cloned in —
     /// the builder never touches the view entity (see env-tag crash fix).
-    fn open_bind_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pending) = self.pending_bind.clone() else {
-            return;
-        };
-        let mut fields: Vec<BindField> = Vec::new();
-        for sub in &pending.subs {
-            let prefix = if sub.double { "&&" } else { "&" };
-            let input = cx.new(|cx| {
-                InputState::new(window, cx).placeholder(format!("Value for {prefix}{}", sub.name))
-            });
-            fields.push(BindField {
-                key: format!("&{}", sub.name),
-                name: sub.name.clone(),
-                is_sub: true,
-                input,
-            });
-        }
-        for b in &pending.binds {
-            let input =
-                cx.new(|cx| InputState::new(window, cx).placeholder(format!("Value for :{b}")));
-            fields.push(BindField {
-                key: format!(":{b}"),
-                name: b.clone(),
-                is_sub: false,
-                input,
-            });
-        }
-        // Short single-line preview so users know what they're feeding.
-        // Scripts show their display name + statement count instead.
-        let preview: SharedString = match &pending.script {
-            Some(display) => {
-                let n = split_statements(&pending.sql).len();
-                format!("{display} · {n} statements").into()
-            }
-            None => {
-                let flat: String = pending.sql.split_whitespace().collect::<Vec<_>>().join(" ");
-                const CAP: usize = 200;
-                if flat.len() > CAP {
-                    format!("{}…", flat.chars().take(CAP).collect::<String>()).into()
-                } else {
-                    flat.into()
-                }
-            }
-        };
-        let view = cx.entity().downgrade();
-        let title: SharedString = if pending.subs.is_empty() {
-            "Enter binds".into()
-        } else if pending.binds.is_empty() {
-            "Enter substitution variables".into()
-        } else {
-            "Enter variables".into()
-        };
-        // Shared across builder re-runs (the dialog rebuilds every render):
-        // the builder is `Fn`, so nothing may be moved out of it.
-        let fields: Rc<Vec<BindField>> = Rc::new(fields);
-        // Validation message slot, dialog-local like the env-tag pill state:
-        // submit handlers write it and notify; the builder only reads it,
-        // so the view entity is never touched during render (no double-lease).
-        let submit_error: Rc<std::cell::RefCell<Option<String>>> =
-            Rc::new(std::cell::RefCell::new(None));
-        // Keyboard flow: focus the first field on open so typing + Enter
-        // works without touching the mouse. (Focusing a handle before its
-        // element mounts is fine — GPUI resolves it on render.)
-        let first_input = fields.first().map(|f| f.input.clone());
-        let tab_id = pending.tab_id.clone();
-        self.note_dialog_open();
-        window.open_dialog(cx, move |dialog, _, cx| {
-            let fields = fields.clone();
-            let submit_error = submit_error.clone();
-            let muted = cx.theme().muted_foreground;
-            let danger = cx.theme().danger;
-            let mut body = v_flex().gap_2().w_full();
-            body = body.child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(format!("{} variable(s)", fields.len())),
-            );
-            // Substitution section first, then binds (fields already ordered).
-            for (fx, f) in fields.iter().enumerate() {
-                let section = if f.is_sub { "& substitution" } else { ": bind" };
-                body = body.child(
-                    v_flex()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(format!("{} · {}", f.key, section)),
-                        )
-                        .child(Input::new(&f.input).w_full()),
-                );
-                let _ = fx;
-            }
-            if let Some(err) = submit_error.borrow().clone() {
-                body = body.child(div().text_xs().text_color(danger).child(err));
-            }
-            body = body.child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(format!("Statement: {preview}")),
-            );
-            let ok_view = view.clone();
-            let ok_fields = fields.clone();
-            let ok_err = submit_error.clone();
-            let ok_tab = tab_id.clone();
-            let cancel_view_ok = view.clone();
-            let cancel_tab_ok = tab_id.clone();
-            let cancel_view_btn = view.clone();
-            let cancel_tab_btn = tab_id.clone();
-            let run_view = view.clone();
-            let run_fields = fields.clone();
-            let run_err = submit_error.clone();
-            let run_tab = tab_id.clone();
-            dialog
-                .title(title.clone())
-                .w(px(440.))
-                .child(body)
-                // Enter confirms (the kit binds `enter` → Confirm in the
-                // dialog context; single-line inputs don't consume it, so it
-                // bubbles here). False keeps the dialog open on empty fields.
-                .on_ok(move |_, window, cx: &mut App| {
-                    if submit_bind_fields(&ok_view, &ok_fields, &ok_err, cx) {
-                        focus_tab_editor(&ok_view, &ok_tab, window, cx);
-                        true
-                    } else {
-                        false
-                    }
-                })
-                // Escape cancels: drop the deferred run and refocus.
-                .on_cancel(move |_, window, cx: &mut App| {
-                    cancel_view_ok
-                        .update(cx, |this, cx| {
-                            this.pending_bind = None;
-                            cx.notify();
-                        })
-                        .ok();
-                    focus_tab_editor(&cancel_view_ok, &cancel_tab_ok, window, cx);
-                    true
-                })
-                .footer(
-                    h_flex()
-                        .gap_2()
-                        .child(div().flex_1())
-                        .child(Button::new("bind-cancel").label("Cancel").on_click(
-                            move |_, window, cx: &mut App| {
-                                cancel_view_btn
-                                    .update(cx, |this, cx| {
-                                        this.pending_bind = None;
-                                        cx.notify();
-                                    })
-                                    .ok();
-                                window.close_dialog(cx);
-                                focus_tab_editor(&cancel_view_btn, &cancel_tab_btn, window, cx);
-                            },
-                        ))
-                        .child(Button::new("bind-run").primary().label("Run").on_click(
-                            move |_, window, cx: &mut App| {
-                                if submit_bind_fields(&run_view, &run_fields, &run_err, cx) {
-                                    window.close_dialog(cx);
-                                    focus_tab_editor(&run_view, &run_tab, window, cx);
-                                }
-                            },
-                        )),
-                )
-        });
-        // Focus after opening (open_dialog focuses the dialog layer; the
-        // field must win so keystrokes land in it).
-        if let Some(input) = first_input {
-            let handle = input.read(cx).focus_handle(cx);
-            window.focus(&handle, cx);
-        }
-    }
+    // (open_bind_dialog lives in bind_dialog.rs)
 
     /// Run-button handler: stores `&&` values in the session defines, applies
     /// substitution, and launches the run with native binds.
-    fn submit_bind_dialog(
-        &mut self,
-        sub_values: std::collections::HashMap<String, String>,
-        bind_values: Vec<BindParam>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(pending) = self.pending_bind.take() else {
-            return;
-        };
-        let Some(ix) = self.tab_index(&pending.tab_id) else {
-            return;
-        };
-        let conn_id = match self.tabs[ix].connection_id.clone() {
-            Some(id) => id,
-            None => {
-                self.tabs[ix].output = Some(Output::error("Select a connection for this tab"));
-                cx.notify();
-                return;
-            }
-        };
-        // Persist `&&` values for the session; `&`-only values are one-shot.
-        {
-            let entry = self.defines.entry(conn_id).or_default();
-            for sub in &pending.subs {
-                if sub.double {
-                    if let Some(v) = sub_values.get(&sub.name) {
-                        entry.insert(sub.name.clone(), v.clone());
-                    }
-                }
-            }
-            // Full map = previously defined + just-entered.
-            let mut full = entry.clone();
-            for (k, v) in &sub_values {
-                full.insert(k.clone(), v.clone());
-            }
-            let final_sql = apply_substitutions(&pending.sql, &full);
-            match pending.script {
-                Some(name) => {
-                    // Substitute first, split second: values are literals
-                    // that must not disturb statement boundaries.
-                    let statements: Vec<String> = split_statements(&final_sql)
-                        .into_iter()
-                        .map(|s| s.text)
-                        .collect();
-                    self.run_script(&pending.tab_id, name, statements, bind_values, cx);
-                }
-                None => self.run_sql(&pending.tab_id, final_sql, bind_values, cx),
-            }
-        }
-    }
+    // (submit_bind_dialog lives in bind_dialog.rs)
 
-    fn run_sql(
+    pub(crate) fn run_sql(
         &mut self,
         tab_id: &str,
         sql: String,
@@ -3869,7 +3038,7 @@ impl SqlHighlandView {
     /// partitioned from the shared list so unused names never reach the
     /// driver (Oracle errors on unbound extras). The per-round-trip call
     /// timeout applies per statement, unchanged.
-    fn run_script(
+    pub(crate) fn run_script(
         &mut self,
         tab_id: &str,
         display: String,
@@ -6659,7 +5828,7 @@ pub(crate) fn env_color(env: Environment, cx: &App) -> Option<Hsla> {
 /// and delimiter lists so they stay visually identical.
     // (settings_pick_row lives in settings_dialog.rs)
 
-fn env_tag(env: Environment, cx: &App) -> Option<AnyElement> {    let label = env.label()?;
+pub(crate) fn env_tag(env: Environment, cx: &App) -> Option<AnyElement> {    let label = env.label()?;
     let color = env_color(env, cx)?;
     Some(
         div()
