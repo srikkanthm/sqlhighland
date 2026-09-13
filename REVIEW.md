@@ -9,8 +9,10 @@ Findings are ordered by severity. Items marked **FIXED** were addressed in the
 same change set as this document; the rest are open recommendations.
 
 Update (follow-up change sets): the organization findings in §2 and the stale
-docs in §4.3 are fixed, and the Tier 1 hygiene items (§3 formatting, §4.1,
-§4.2, §4.4) are fixed too — see the change sets at the end.
+docs in §4.3 are fixed, the Tier 1 hygiene items (§3 formatting, §4.1, §4.2,
+§4.4) are fixed, and the Tier 2 security items (new-connection default,
+in-memory zeroization, tab-id path safety) are fixed — see the change sets at
+the end.
 
 ## 1. Security
 
@@ -33,9 +35,14 @@ Fix:
 - Tests: `fsutil::tests::secret_writes_are_owner_only`,
   `config::tests::load_tightens_loose_connections_file`.
 
-Still open: the default password mode is still `File`. Consider making
-`Keychain` the default (the implementation already exists), or removing
-`File` for new connections.
+Still open: `File` is still selectable and remains the serde default for
+legacy entries; the plaintext is only owner-readable but unencrypted at rest.
+
+### 1.1b New-connection default — **FIXED**
+`PasswordMode::default_for_new()` now returns `Keychain` on Apple platforms
+and `Ask` elsewhere, so new connections no longer start in plaintext `File`
+mode. `File` remains the serde default so legacy files keep loading.
+`connection_dialog::start_add` seeds the dialog with this mode.
 
 ### 1.2 `Debug` leaked the password — **FIXED**
 `ConnectionConfig` derived `Debug`, so any `{:?}` (panic messages, future
@@ -50,21 +57,25 @@ the rename or leave a stale temp. `fsutil::write_atomic` now syncs the file
 and the parent directory. The temp name is `path + ".tmp"` (rather than
 `with_extension("tmp")`), so `a.sql` and `a.toml` no longer share a temp.
 
-### 1.4 In-memory secrets are not zeroized — open (low)
-`unlocked: HashMap<String, String>` and the dialog `InputState` hold
-passwords in plain heap memory for the process lifetime. Consider a
-`secrecy`/`zeroize`-style wrapper if the threat model includes memory
-scraping.
+### 1.4 In-memory secrets are now zeroized — **FIXED (mostly)**
+`ConnectionConfig.password` is a `zeroize::Zeroizing<String>` and the
+session-unlocked map is `HashMap<String, Zeroizing<String>>`, so every copy
+wipes its buffer on drop (including clones and connection deletion). The
+`test-support` GUI tests, `oracledb`'s own credentials copy, and the GPUI
+`InputState` buffers are outside our control and still hold transient
+plaintext while a dialog/connection is live.
 
 ### 1.5 TLS is opt-in and transport-only — open (informational)
 `ConnectionConfig.ssl` defaults to `false` and only switches the EZCONNECT
 scheme to `tcps://`. There is no certificate/wallet validation control. Fine
 for localhost, worth documenting before remote use.
 
-### 1.6 Path handling — open (low)
-`tabs.toml`'s `SavedTab.id` flows into `TabsManifest::draft_path` via
-`{tab_id}.sql`. A hand-edited id containing `../` could write outside the
-config dir. Sanitize/validate ids on load.
+### 1.6 Path handling — **FIXED**
+`TabsManifest::draft_path` now requires a safe single-component id
+(`is_safe_id`: rejects empty, `.`, `..`, and `/ \ : NUL`), and `load`
+rekeys any unsafe id from a hand-edited/corrupt `tabs.toml` with a fresh
+UUID instead of letting it reach the filesystem. Test:
+`config::tests::unsafe_tab_ids_are_rejected_and_rekeyed`.
 
 ### 1.7 SQL construction — no issues found
 `rewrite_describe` / `escape_literal`, `system_predicate` (escapes
@@ -177,3 +188,16 @@ are chosen; add it (plus a LICENSE file) if the source is ever published.
   a std-only stub elsewhere, so the core builds on Windows/Linux.
 - Docs reworded to engine-first / cross-platform (Oracle first, macOS current).
 - Fixes §3 (formatting) and §4.1, §4.2, §4.4.
+
+## Change set — security (Tier 2)
+
+- `Cargo.toml`: `zeroize` (with `serde`) dependency.
+- `model.rs`: `ConnectionConfig.password` is `Zeroizing<String>`;
+  `PasswordMode::default_for_new()` (Keychain on Apple, Ask elsewhere).
+- `app.rs` / `app/connections.rs`: session-unlocked map is
+  `HashMap<String, Zeroizing<String>>`; `effective_password` returns a
+  zeroizing value.
+- `connection_dialog.rs`: new connections seed the platform default mode.
+- `config.rs`: safe tab-id validation + rekey of unsafe ids on load.
+- `tests/live.rs`: updated to the new password type.
+- Fixes §1.1b, §1.4, §1.6; 117 lib tests green.
