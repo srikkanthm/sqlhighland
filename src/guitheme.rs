@@ -28,7 +28,7 @@ pub fn register_themes(cx: &mut App) {
         AYU_THEMES,
     ] {
         if let Err(e) = registry.load_themes_from_str(content) {
-            eprintln!("failed to load bundled themes: {e:#}");
+            crate::logging::error(format!("failed to load bundled themes: {e:#}"));
         }
     }
 }
@@ -56,7 +56,9 @@ pub fn apply_theme(selection: &str, window: Option<&mut Window>, cx: &mut App) {
     } else if let Some(mode) = config_mode(selection, cx) {
         apply_config_by_name(selection, mode, window, cx);
     } else {
-        eprintln!("unknown theme {selection:?}; keeping current theme");
+        crate::logging::warn(format!(
+            "unknown theme {selection:?}; keeping current theme"
+        ));
     }
 }
 
@@ -75,7 +77,9 @@ fn config_mode(selection: &str, cx: &App) -> Option<ThemeMode> {
 fn apply_config_by_name(name: &str, mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
     let config = ThemeRegistry::global(cx).themes().get(name).cloned();
     let Some(config) = config else {
-        eprintln!("theme {name:?} not registered; keeping current theme");
+        crate::logging::warn(format!(
+            "theme {name:?} not registered; keeping current theme"
+        ));
         return;
     };
     Theme::global_mut(cx).apply_config(&config);

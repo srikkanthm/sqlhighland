@@ -101,7 +101,7 @@ impl SqlHighlandView {
             let target = crate::schema::parse_object_id(&ids);
             if ids.starts_with("o:") && target.is_none() {
                 debug_assert!(false, "unparsed object row {ids}");
-                eprintln!("unparsed schema-browser object row: {ids}");
+                crate::logging::warn(format!("unparsed schema-browser object row: {ids}"));
             }
             // Click synthesis (`on_click`) never fires inside the kit's
             // virtualized rows (its mousedown rebuild drops the pending

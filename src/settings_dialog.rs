@@ -73,7 +73,7 @@ impl SqlHighlandView {
                     cx.notify();
                 });
             } else {
-                eprintln!("preferences save failed: {e:#}");
+                crate::logging::error(format!("preferences save failed: {e:#}"));
             }
         }
     }

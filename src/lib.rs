@@ -5,6 +5,7 @@ pub mod export;
 pub mod filetab;
 pub mod fsutil;
 pub mod keychain;
+pub mod logging;
 pub mod metadata;
 pub mod model;
 pub mod schema;
