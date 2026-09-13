@@ -89,7 +89,7 @@ seams (`DbClient`, `SchemaProvider`), poison-safe `session::lock`, atomic
 state writes, strong doc comments, and a large test suite.
 
 **FIXED — file-size / impl sprawl.** The four giants were split by
-responsibility using the pattern documented in `ARCHITECTURE.md` (parent file
+responsibility using the pattern documented in `../ARCHITECTURE.md` (parent file
 + submodule directory; inherent `impl SqlHighlandView` blocks re-opened per
 module; re-exports preserve public paths; tests in a sibling `tests.rs`):
 
@@ -138,7 +138,7 @@ Linux without gui; a macOS GUI job gated on the Metal toolchain — currently
 An MSRV (1.89) job is not yet wired up.
 
 ### 4.3 Stale docs — **FIXED**
-`README.md` was refreshed: correct test counts (116 lib / 11 live), the three
+`../README.md` was refreshed: correct test counts (116 lib / 11 live), the three
 password modes, shipped features (autocomplete, schema browser, CSV/XLSX
 export), and a pruned roadmap. `PROGRESS.md` remains a historical build log.
 
@@ -174,8 +174,8 @@ are chosen; add it (plus a LICENSE file) if the source is ever published.
 - `src/complete/` (new): `context`, `catalog`, `aliases`, `ranking`,
   `tests` — 2,233-line `complete.rs` now 102.
 - `src/run/` (new): `query`, `script`, `export` — 1,291-line `run.rs` now 30.
-- `ARCHITECTURE.md` (new): module map and the split pattern.
-- Docs: `README.md` refreshed.
+- `../ARCHITECTURE.md` (new): module map and the split pattern.
+- Docs: `../README.md` refreshed.
 - Remaining files all < ~1,000 lines; 116 lib tests green, clippy clean.
 
 ## Change set — hygiene (Tier 1)

@@ -1,4 +1,5 @@
-//! Saved connections on disk (TOML). Plaintext passwords in v1 — see PLAN.md.
+//! Saved connections on disk (TOML). The legacy `File` password mode is
+//! plaintext — see `docs/HISTORY.md`.
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};

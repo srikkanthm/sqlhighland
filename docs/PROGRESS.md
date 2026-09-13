@@ -3,7 +3,7 @@
 Cross-platform SQL GUI client in Rust + GPUI (Oracle is the first engine;
 macOS is the current target). Started 2026-09-08. Older entries below say
 "Oracle-only"/"macOS-only", reflecting the original v1 scope.
-Plan: `PLAN.md`. Status: working MVP — connect, edit, run, page through results.
+Plan: `HISTORY.md` (Part 1). Status: working MVP — connect, edit, run, page through results.
 
 ## Stack (all pinned)
 
@@ -233,7 +233,7 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 
 ## Autocomplete v1 (2026-09-12)
 
-- Plan: `AUTOCOMPLETE_PLAN.md` (locked decisions + queued follow-ups).
+- Plan: `HISTORY.md` (Part 2; locked decisions + queued follow-ups).
 - `src/complete.rs` (pure): word prefix + quoted identifiers, qualifier
   detection (`e.` / `scott.emp.`), context classify
   (BareWord/AfterFrom/ColumnOf/SequenceMember/JoinOn), `FROM`/`JOIN` alias
@@ -535,7 +535,7 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   Reason: any scroll between double-click presses moves the row,
   press #2 lands elsewhere, viewer never opens — timing-dependent,
   unfixable by reducing movement alone.
-- Solution preserved in SCHEMA_TREE_AUTOREVEAL.md (final code,
+- Solution preserved in `HISTORY.md` (Part 4; final code,
   variants tried, kit facts) for possible restoration.
 - Verified: clean `clippy`, 101 lib + browser_tree green.
 
@@ -696,7 +696,7 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - Release signal for unparsed browser rows (eprintln; view updates
   are lease-illegal mid-render).
 - Verified: clean clippy, 112 lib + menus/themes/browser_tree green,
-  GUI builds. See REFACTOR_PLAN.md for Phases 1–3.
+  GUI builds. See `HISTORY.md` (Part 5) for Phases 1–3.
 
 ## Refactor Phase 1 — dialogs extracted (2026-09-12, uncommitted)
 

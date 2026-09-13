@@ -117,7 +117,8 @@ impl Environment {
 }
 
 /// Connection parameters for a single database.
-/// Password is stored in plaintext in v1 (see PLAN.md debt note).
+/// The legacy `File` password mode stores the secret in plaintext (see
+/// `docs/HISTORY.md`).
 ///
 /// `Debug` is implemented by hand to redact `password`: a derived `Debug`
 /// would leak the secret through any `{:?}`, panic message, or log line.

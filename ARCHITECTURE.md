@@ -1,7 +1,8 @@
 # Architecture & Code Organization
 
 How SQLHighland is laid out and how to keep files small as it grows. See
-`README.md` for features and `PROGRESS.md` for the build log.
+`README.md` for features, `docs/PROGRESS.md` for the build log, and
+`docs/HISTORY.md` for the original plan and completed design notes.
 
 ## Layering
 

@@ -8,8 +8,8 @@ macOS is the current target (GPUI renders via Metal there); Windows and Linux
 are planned. Oracle is the first supported engine — the driver (`DbClient`)
 and schema (`SchemaProvider`) layers are built as engine seams, so more can
 plug in without reshaping the app. Currently a working MVP under active
-development — see `PROGRESS.md` for the build log and `PLAN.md` for the
-original plan.
+development — see [`docs/PROGRESS.md`](docs/PROGRESS.md) for the build log and
+[`docs/HISTORY.md`](docs/HISTORY.md) for the original plan and design notes.
 
 ## Features
 
@@ -106,6 +106,13 @@ thin driver, no Instant Client), `gpui-pre 0.3.4`, `gpui-kit 0.6.1`.
   rustup component add llvm-tools
   touch src/main.rs && cargo build --features gui --release
   ```
+
+## Documentation
+
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — module map, layering, and the code-split pattern.
+- [`docs/PROGRESS.md`](docs/PROGRESS.md) — chronological build log.
+- [`docs/HISTORY.md`](docs/HISTORY.md) — original plan, shipped feature designs, completed refactor.
+- [`docs/REVIEW.md`](docs/REVIEW.md) — code, security, and organization review with fix status.
 
 ## Roadmap
 

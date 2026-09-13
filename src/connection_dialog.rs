@@ -2,8 +2,8 @@
 //! password/engine rows, keychain routing.
 //!
 //! Extracted from `app.rs` (refactor Phase 1); behavior unchanged. The
-//! dialog owns `pending_*` mirroring (a `ConnectionDialogState` struct
-//! is the Phase 1 follow-up in REFACTOR_PLAN.md).
+//! dialog owns `pending_*` mirroring; the `ConnectionDialogState` grouping
+//! was declined (see `docs/HISTORY.md`, Part 5).
 
 use std::cell::RefCell;
 use std::rc::Rc;
