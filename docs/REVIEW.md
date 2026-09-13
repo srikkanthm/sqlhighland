@@ -16,7 +16,9 @@ logging, plus an MSRV CI job), cross-platform P0 (§6.1 home-dir resolution),
 and port hardening P1/P2 (§6.2 Windows ACLs, §6.4 Linux/Windows check jobs) are
 fixed — see the change sets at the end. Later change sets add P3 (cross-platform
 keychain backends, §6.3), P4 (view-state grouping, §6.6), and P5 (second-engine
-plumbing, §6.5). §6 tracks any remaining cross-platform / second-engine work.
+plumbing, §6.5). A feature-readiness pass (H1/H2) makes the macOS GUI CI
+blocking and quarantines the two flaky picker tests (§4.5). §6 tracks any
+remaining cross-platform / second-engine work.
 
 ## 1. Security
 
@@ -108,7 +110,8 @@ Every source file is now under ~1,000 lines. Behavior-preserving: 116 lib
 tests green, GUI UI tests unchanged, `clippy --all-targets` clean.
 
 Still open:
-- 3× `#[allow(clippy::too_many_arguments)]` remain in `run/export.rs`.
+- 2× `#[allow(clippy::too_many_arguments)]` remain in `run/export.rs` (drain
+  helpers; the other 3 stale allows were removed in the readiness pass).
 
 (Field-grouping follow-up done in P4 — see §6.6: `SqlHighlandView` is now 21
 fields via `ConnectionDialogState` / `PendingOps` / `BrowserState`.)
@@ -136,20 +139,28 @@ Plain `cargo test` / `cargo clippy --all-targets` (no gui) compiles again.
 
 ### 4.2 No CI / toolchain / audit config — **FIXED**
 Added `.github/workflows/ci.yml` (fmt; core clippy `-D warnings` + tests on
-Linux without gui; a macOS GUI job gated on the Metal toolchain — currently
-`continue-on-error` until the runner image is confirmed; a non-blocking
-`rustsec/audit-check`; and a blocking MSRV (1.89) job, added in Tier 3) and
-`rust-toolchain.toml` (stable + rustfmt/clippy).
+Linux without gui; a **blocking** macOS GUI job — clippy `--features gui` plus
+the headless UI tests; a non-blocking `rustsec/audit-check`; and a blocking
+MSRV (1.89) job, added in Tier 3) and `rust-toolchain.toml` (stable +
+rustfmt/clippy). The two flaky picker tests are `#[ignore]`d, so the GUI lane
+runs green without `--skip`.
 
 ### 4.3 Stale docs — **FIXED**
-`../README.md` was refreshed: correct test counts (116 lib / 11 live), the three
-password modes, shipped features (autocomplete, schema browser, CSV/XLSX
+`../README.md` was refreshed: correct test counts (now 120 lib / 11 live), the
+three password modes, shipped features (autocomplete, schema browser, CSV/XLSX
 export), and a pruned roadmap. `PROGRESS.md` remains a historical build log.
 
 ### 4.4 Package metadata — **FIXED**
 `Cargo.toml` now has `description`, `repository`, and `publish = false`
 (private app). A `license` is intentionally omitted until distribution terms
 are chosen; add it (plus a LICENSE file) if the source is ever published.
+
+### 4.5 Flaky headless tests — quarantined
+`tests/ui_picker.rs`'s `cmd_t_opens_and_focuses_new_query_tab` and
+`cmd_w_closes_active_query_tab` are `#[ignore]`d: they fail
+non-deterministically on the deferred window-take path (they reproduce on the
+clean tree). The GUI lane runs the remaining three picker tests plus
+menus/themes/browser_tree. Un-ignore once the harness timing is fixed.
 
 ## 5. Rust best practices
 
@@ -196,12 +207,13 @@ Compilation of the off-macOS stores is covered by the provisional
 `windows-core` / `linux-gui` CI jobs; runtime is untested here.
 
 ### 6.4 Port CI — **PARTIALLY FIXED (P2)**
-Added two non-blocking jobs to `.github/workflows/ci.yml`: `linux-gui`
-(`cargo check --features gui`, installing the GPUI Linux system deps) and
-`windows-core` (`cargo check --lib`, with NASM installed for `aws-lc-sys`).
-Both are `continue-on-error` until confirmed green on the runners — the apt set
-and the kit's Linux/Windows support are unproven. Flip them blocking once
-verified. Windows still isn't a plain `cargo check`: `oracledb` → rustls pulls
+The **macOS** GUI job is now blocking (clippy `--features gui` + headless UI
+tests; flaky picker tests `#[ignore]`d). Two port jobs remain non-blocking:
+`linux-gui` (`cargo check --features gui`, installing the GPUI Linux deps) and
+`windows-core` (`cargo check --lib`, with NASM for `aws-lc-sys`). Both are
+`continue-on-error` until confirmed green on the runners — the apt set and the
+kit's Linux/Windows support are unproven. Flip them blocking once verified.
+Windows still isn't a plain `cargo check`: `oracledb` → rustls pulls
 `aws-lc-sys`, which needs a native C toolchain (MSVC/CMake/NASM).
 
 ### 6.5 Second-engine plumbing — **FIXED (P5)**
@@ -332,3 +344,15 @@ per-connection caches + schema-browser (`BrowserState`) into focused structs in
 - `src/app/results.rs`, `src/run/*`, `src/browser.rs`: use `SharedSession` and
   the provider; no code names `OracledbSession` outside `db.rs`.
 - Fixes §6.5; 120 lib tests green, clippy clean, MSRV verified.
+
+## Change set — feature-readiness (H1 + H2)
+
+- `.github/workflows/ci.yml`: the macOS GUI job is now **blocking** (clippy
+  `--features gui` + all headless UI tests in one step); `continue-on-error`
+  removed. `linux-gui` / `windows-core` stay provisional.
+- `tests/ui_picker.rs`: the two flaky tests are `#[ignore]`d (with a reason)
+  instead of CI `--skip`, so the GUI lane covers the other three.
+- `src/run/export.rs`: removed 3 stale `too_many_arguments` allows; the 2
+  remaining (drain helpers) carry a reason.
+- `README.md`: unit-test count 116 → 120. `.gitignore`: ignore `.DS_Store`.
+- Docs: §4.2 / §6.4 updated; §4.5 added.

@@ -88,12 +88,12 @@ jobs:
           cargo check --lib
 
   # macOS-only: the GPUI snapshot compiles Metal shaders from its build script,
-  # so this needs the Metal toolchain. Non-blocking until the runner image is
-  # confirmed; flip `continue-on-error` off once it is green.
+  # so this needs the Metal toolchain. Blocking: clippy + headless UI tests are
+  # the GUI regression gate. (The two flaky picker tests are `#[ignore]`d in
+  # tests/ui_picker.rs; see docs/REVIEW.md.)
   gui:
     name: GUI (macOS)
     runs-on: macos-14
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
@@ -103,12 +103,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --features gui --all-targets -- -D warnings
       - name: Headless UI tests
-        run: cargo test --features gui --test menus --test browser_tree --test themes
-      - name: Picker UI tests (skip known flakes)
         run: >
-          cargo test --features gui --test ui_picker --
-          --skip cmd_t_opens_and_focuses_new_query_tab
-          --skip cmd_w_closes_active_query_tab
+          cargo test --features gui
+          --test menus --test browser_tree --test themes --test ui_picker
 
   # Informational: surfaces RustSec advisories in the dependency tree. Kept
   # non-blocking because transitive crates can report advisories we don't own.

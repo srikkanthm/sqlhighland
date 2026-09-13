@@ -78,7 +78,7 @@ to watch on-demand fetching kick in.
 
 ```sh
 cargo check                     # lib only, no Metal toolchain needed
-cargo test --lib                # 116 unit tests (no DB required)
+cargo test --lib                # 120 unit tests (no DB required)
 cargo test --test live          # 11 integration tests, needs Oracle up
 cargo test --features gui --test menus --test ui_picker \
     --test browser_tree --test themes   # headless UI tests

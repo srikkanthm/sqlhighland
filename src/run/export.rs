@@ -44,7 +44,7 @@ fn unix_timestamp() -> u64 {
 /// holding the session lock; polls `cancel` each chunk. Writes to a `.part`
 /// sibling and renames on success so a failed/cancelled export never leaves
 /// a half file behind at the target path.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // drain config is threaded from the UI snapshot
 fn export_drain_blocking(
     session: &SharedSession,
     fetch: &Arc<FetchState>,
@@ -288,7 +288,7 @@ impl SqlHighlandView {
     /// held so scroll-fetching pauses — pages never interleave or duplicate —
     /// and the status bar shows live progress until completion swaps it for
     /// the exported path.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // one-shot UI snapshot; grouping would move the same data
     pub(crate) fn begin_export_drain(
         &mut self,
         tab_id: &str,
@@ -376,7 +376,6 @@ impl SqlHighlandView {
     }
 
     /// Land an export outcome: grid flags and status message.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn finish_export(
         &mut self,
         tab_id: &str,
