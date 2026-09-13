@@ -46,13 +46,13 @@ impl ServiceKind {
 
 /// Password handling per connection. `File` is today's behavior
 /// (plaintext in connections.toml); `Keychain` moves the secret to the
-/// macOS login keychain on save; `Ask` never stores and prompts per run.
+/// OS keychain on save; `Ask` never stores and prompts per run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum PasswordMode {
     /// Legacy: plaintext in the config file.
     #[default]
     File,
-    /// macOS login keychain, keyed by connection id.
+    /// OS keychain, keyed by connection id (macOS today).
     Keychain,
     /// Prompt every time; never persisted.
     Ask,
@@ -103,7 +103,7 @@ impl Environment {
     }
 }
 
-/// Connection parameters for a single Oracle database.
+/// Connection parameters for a single database.
 /// Password is stored in plaintext in v1 (see PLAN.md debt note).
 ///
 /// `Debug` is implemented by hand to redact `password`: a derived `Debug`
@@ -211,7 +211,8 @@ impl std::fmt::Debug for ConnectionConfig {
     }
 }
 
-/// One result column: display name + Oracle type name (e.g. `DB_TYPE_NUMBER`).
+/// One result column: display name + engine type name (e.g. Oracle's
+/// `DB_TYPE_NUMBER`).
 #[derive(Debug, Clone)]
 pub struct ColumnInfo {
     pub name: String,
@@ -398,10 +399,7 @@ mod tests {
             OracleRole::ALL.map(OracleRole::label),
             ["SYSDEFAULT", "SYSDBA", "SYSOPER"]
         );
-        assert_eq!(
-            ServiceKind::ALL.map(ServiceKind::label),
-            ["Service", "SID"]
-        );
+        assert_eq!(ServiceKind::ALL.map(ServiceKind::label), ["Service", "SID"]);
         assert_eq!(
             PasswordMode::ALL.map(PasswordMode::label),
             ["File", "Keychain", "Ask every time"]

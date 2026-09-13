@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::complete::{display_name, is_system_schema};
 use crate::metadata::{MetadataCache, TableKind};
 
-/// Database engine. Only Oracle exists today; the enum (plus [`SchemaProvider`])
-/// is the seam the second engine plugs into. Serde-defaults to Oracle so
+/// Database engine. Oracle ships today; the enum (plus [`SchemaProvider`])
+/// is the seam the next engine plugs into. Serde-defaults to Oracle so
 /// saved connections load unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum DbEngine {
@@ -77,13 +77,7 @@ pub trait SchemaProvider {
     /// Statement that describes an object when run. Tables/views use the
     /// native DESCRIBE (bare for own schema); sequences have no columns,
     /// so they get an `ALL_SEQUENCES` row instead of a zero-row DESCRIBE.
-    fn describe_sql(
-        &self,
-        owner: &str,
-        name: &str,
-        own_schema: &str,
-        kind: TableKind,
-    ) -> String;
+    fn describe_sql(&self, owner: &str, name: &str, own_schema: &str, kind: TableKind) -> String;
     /// Display title for an object (bare for own schema).
     fn object_title(&self, owner: &str, name: &str, own_schema: &str) -> String {
         display_name(Some(owner), name, own_schema)
@@ -136,7 +130,9 @@ impl SchemaProvider for OracleProvider {
             if hidden(&s.owner) {
                 continue;
             }
-            seqs.entry(s.owner.clone()).or_default().push(s.name.clone());
+            seqs.entry(s.owner.clone())
+                .or_default()
+                .push(s.name.clone());
         }
         // Owners: union of all groups; own schema first, rest sorted.
         let mut owners: Vec<String> = tables
@@ -277,11 +273,11 @@ mod tests {
                     name: "EMPVW".into(),
                     kind: TableKind::View,
                 },
-            TableId {
-                owner: "SYS".into(),
-                name: "DUALX".into(),
-                kind: TableKind::Table,
-            },
+                TableId {
+                    owner: "SYS".into(),
+                    name: "DUALX".into(),
+                    kind: TableKind::Table,
+                },
             ],
             ..Default::default()
         };

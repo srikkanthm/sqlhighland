@@ -2,6 +2,11 @@
 
 SQL GUI client in Rust + Zed GPUI, Oracle DB only for v1.
 
+> **Update (later direction):** SQLHighland is engine-first, not Oracle-only —
+> Oracle is the first backend and the driver/schema layers are seams for more.
+> Likewise it is cross-platform: macOS is the current target, with
+> Windows/Linux planned. The v1 scope below reflects the original decision.
+
 Approved 2026-09-09. Scope: **macOS-only, official `oracledb` 26.0.0-beta.x
 pure-Rust thin driver, minimal MVP (connect + query + results),
 basic host:port/service + user/pass.**

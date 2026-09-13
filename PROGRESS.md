@@ -1,6 +1,8 @@
 # SQLHighland — Build Log
 
-Oracle-only SQL GUI client in Rust + GPUI (macOS v1). Started 2026-09-08.
+Cross-platform SQL GUI client in Rust + GPUI (Oracle is the first engine;
+macOS is the current target). Started 2026-09-08. Older entries below say
+"Oracle-only"/"macOS-only", reflecting the original v1 scope.
 Plan: `PLAN.md`. Status: working MVP — connect, edit, run, page through results.
 
 ## Stack (all pinned)

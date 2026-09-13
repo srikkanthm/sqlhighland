@@ -1,18 +1,22 @@
 # SQLHighland
 
-A native Oracle SQL client for macOS, built with Rust + GPUI. Connect to an
-Oracle database, write queries in a syntax-highlighted editor, and page
-through results that fetch on demand as you scroll.
+A native, cross-platform SQL client built with Rust + GPUI. Connect to a
+database, write queries in a syntax-highlighted editor, and page through
+results that fetch on demand as you scroll.
 
-Oracle-only by design. Currently a working MVP under active development —
-see `PROGRESS.md` for the build log and `PLAN.md` for the original plan.
+macOS is the current target (GPUI renders via Metal there); Windows and Linux
+are planned. Oracle is the first supported engine — the driver (`DbClient`)
+and schema (`SchemaProvider`) layers are built as engine seams, so more can
+plug in without reshaping the app. Currently a working MVP under active
+development — see `PROGRESS.md` for the build log and `PLAN.md` for the
+original plan.
 
 ## Features
 
 - **Connections sidebar** — collapsible, resizable, persisted list. Add/Edit
   via dialog; per-row right-click menu (Connect/Disconnect, Edit…, Delete).
   Live connection marked with a green dot. Environment tags (Prod/Dev/QA/UAT)
-  and Oracle role / service-vs-SID / TLS options per connection.
+  plus per-engine connection options (Oracle role / service-vs-SID, TLS).
 - **Query editor** — tree-sitter SQL highlighting, code folding, **Format**
   button (`sqlformat`), **Cmd+Enter** runs the statement under the cursor
   (multi-statement scripts supported client-side).
@@ -28,21 +32,23 @@ see `PROGRESS.md` for the build log and `PLAN.md` for the original plan.
 - **Export** — CSV and native `.xlsx` (with the exported SQL on a `query`
   sheet), uncapped, streamed with constant memory.
 - **Secret storage** — per-connection password mode: plaintext `File` (legacy),
-  macOS login **Keychain**, or **Ask every time**. App state is written
-  owner-only (`0600` files in a `0700` dir) and fsynced.
+  OS keychain (macOS today; Windows/Linux planned), or **Ask every time**. App
+  state is written owner-only (`0600` files in a `0700` dir) and fsynced.
 - **Status bar** — action status left (`Running…` / `N rows · M ms` /
   `Fetching more…`), connection status right.
 
 ## Prerequisites
 
-- macOS with full Xcode (App Store) — GPUI renders via Metal:
+- The current **macOS** build needs full Xcode (App Store) — GPUI renders via
+  Metal:
   ```sh
   sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
   xcodebuild -downloadComponent MetalToolchain
   ```
+  Windows/Linux GUI builds are planned, not yet wired up.
 - Rust ≥ 1.89 via rustup (`rustc 1.98` used here).
-- An Oracle database (19c+). Tested against a local container:
-  `localhost:1521/highlandpdb`, user `system`.
+- A database. Oracle 19c+ is supported today; tested against a local
+  container: `localhost:1521/highlandpdb`, user `system`.
 
 ## Quick start
 

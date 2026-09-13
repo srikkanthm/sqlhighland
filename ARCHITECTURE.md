@@ -6,7 +6,8 @@ How SQLHighland is laid out and how to keep files small as it grows. See
 ## Layering
 
 The crate is split so the database/completion logic builds and tests without
-Xcode/Metal. `src/lib.rs` is the map:
+the GUI's platform toolchain (Xcode/Metal on the current macOS target).
+`src/lib.rs` is the map:
 
 - **GUI-free core** (no `gui` feature needed): `db`, `config`, `model`,
   `session`, `metadata`, `schema`, `complete`, `sql`, `export`, `filetab`,
