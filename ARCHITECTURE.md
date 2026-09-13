@@ -35,9 +35,19 @@ src/
     substitute.rs &name substitution and :name binds
     script.rs     @/@@/START directives + include expansion
     tests.rs      unit tests
-  complete.rs     completion engine (types + re-exported submodules)
-  complete/tests.rs
-  ...             one module per remaining concern (db, config, run, ...)
+  complete/       completion engine (types + re-exported submodules)
+    mod (complete.rs) shared types + re-exports + tests decl
+    context.rs    caret-context classification
+    catalog.rs    scope tables + hover/describe cards
+    aliases.rs    dotted names, alias maps, JOIN…ON detection
+    ranking.rs    keyword/function tables + candidate ranking
+    tests.rs      unit tests
+  run/            query/script/export pipeline
+    mod (run.rs)  shared imports + re-exports
+    query.rs      run entry gates, SQL executor, cancellation
+    script.rs     `@` gates, buffer-as-script, sequential runner
+    export.rs     streaming CSV/XLSX drain
+  ...             one module per remaining concern (db, config, ...)
 ```
 
 ## The split pattern
@@ -80,9 +90,9 @@ cargo test --lib                            # core unit tests
 cargo test --features gui --test menus --test browser_tree --test themes
 ```
 
-## Remaining large files (next extraction targets)
+## Remaining large files
 
-- `complete.rs` (~1,500) — split into `complete/{context,cards,aliases,
-  ranking}.rs`. Its items are interleaved, so plan ranges carefully.
-- `run.rs` (~1,300) — split executors vs. export drain vs. script gates.
-- `db.rs` (~830) / `settings_dialog.rs` — under the threshold; leave alone.
+Everything is now under ~1,000 lines. The largest are `app/render.rs`
+(~1,000) and `app/tabs.rs` (~830), each a single cohesive concern; `db.rs`
+(~830) is one driver adapter. Split further only if a responsibility seam
+appears (e.g. `render.rs` could become `app/render/{mod,editor,grid}.rs`).
