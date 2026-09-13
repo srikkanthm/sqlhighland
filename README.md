@@ -32,7 +32,8 @@ development — see [`docs/PROGRESS.md`](docs/PROGRESS.md) for the build log and
 - **Export** — CSV and native `.xlsx` (with the exported SQL on a `query`
   sheet), uncapped, streamed with constant memory.
 - **Secret storage** — per-connection password mode: plaintext `File` (legacy),
-  OS keychain (macOS today; Windows/Linux planned), or **Ask every time**. App
+  OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret
+  Service), or **Ask every time**. App
   state is written owner-only (`0600` files in a `0700` dir) and fsynced.
 - **Status bar** — action status left (`Running…` / `N rows · M ms` /
   `Fetching more…`), connection status right.
@@ -67,7 +68,7 @@ cargo build --release --features gui
 On first launch add a connection with **+** in the sidebar
 (e.g. host `localhost`, port `1521`, service `highlandpdb`, user `system`).
 Connections persist to `~/.config/sqlhighland/connections.toml`. Passwords can
-be kept in the macOS login keychain or prompted per run; the legacy plaintext
+be kept in the OS keychain or prompted per run; the legacy plaintext
 `File` mode stores the secret owner-only (`0600`).
 
 Try: `SELECT level AS n FROM dual CONNECT BY level <= 5000;` then scroll

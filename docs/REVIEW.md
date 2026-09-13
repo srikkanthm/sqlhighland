@@ -14,8 +14,9 @@ docs in §4.3 are fixed, the Tier 1 hygiene items (§3 formatting, §4.1, §4.2,
 zeroization, tab-id path safety), the Tier 3 remainder (§3 lock policy and
 logging, plus an MSRV CI job), cross-platform P0 (§6.1 home-dir resolution),
 and port hardening P1/P2 (§6.2 Windows ACLs, §6.4 Linux/Windows check jobs) are
-fixed — see the change sets at the end. Later change sets add P4 (view-state
-grouping, §6.6). §6 tracks any remaining cross-platform / second-engine work.
+fixed — see the change sets at the end. Later change sets add P3 (cross-platform
+keychain backends, §6.3) and P4 (view-state grouping, §6.6). §6 tracks any
+remaining cross-platform / second-engine work.
 
 ## 1. Security
 
@@ -181,13 +182,18 @@ and grants the current user via `icacls`, re-applied to the temp file with the
 handle closed so the renamed target is owner-only. Best-effort (failures are
 ignored, as on Unix); verified by cross-compiling the module for
 `x86_64-pc-windows-msvc` (`rustc --emit=metadata`), not by a runtime ACL test.
-The Keychain path still can't be selected there (stub returns "unsupported")
-until a backend exists — see §6.3.
+Windows also now has a real keychain backend — see §6.3.
 
-### 6.3 Keychain backends — open
-macOS only; Windows Credential Manager and Linux Secret Service are stubs.
-`PasswordMode::default_for_new()` returns `Ask` off Apple, so this degrades
-safely (prompt per run) rather than failing.
+### 6.3 Keychain backends — **FIXED (P3)**
+Switched to the `keyring` crate (v4, `v1` API), which selects the native store
+per platform: macOS Keychain Services, Windows Credential Manager, and Linux
+Secret Service (D-Bus). The direct `security-framework` dependency and our
+per-platform modules/stubs are gone; the macOS mapping (service + account
+generic password) is unchanged, so existing entries still resolve.
+`PasswordMode::default_for_new()` now returns `Keychain` on macOS *and*
+Windows, and `Ask` elsewhere (a headless Linux box may lack a Secret Service).
+Compilation of the off-macOS stores is covered by the provisional
+`windows-core` / `linux-gui` CI jobs; runtime is untested here.
 
 ### 6.4 Port CI — **PARTIALLY FIXED (P2)**
 Added two non-blocking jobs to `.github/workflows/ci.yml`: `linux-gui`
@@ -300,3 +306,13 @@ per-connection caches + schema-browser (`BrowserState`) into focused structs in
   drops from ~44 to 21 fields; call sites updated across `app/*`, dialogs,
   `browser`, `sidebar`, and `run`.
 - Fixes §6.6; 119 lib tests green, clippy clean, GUI UI tests pass.
+
+## Change set — cross-platform keychain (P3)
+
+- `Cargo.toml`: add `keyring = "=4.2.0"` (`v1` API); remove the Apple-only
+  `security-framework` dependency.
+- `src/keychain.rs`: rewritten on `keyring::Entry` — one cross-platform
+  implementation for macOS Keychain / Windows Credential Manager / Linux
+  Secret Service, replacing the Apple module and the non-Apple stubs.
+- `src/model.rs`: `default_for_new()` now prefers `Keychain` on Windows too.
+- Fixes §6.3; 119 lib tests green, clippy clean, MSRV (1.89) verified.
