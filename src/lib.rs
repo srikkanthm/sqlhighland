@@ -15,3 +15,7 @@ pub mod sql;
 pub mod app;
 #[cfg(feature = "gui")]
 pub mod guitheme;
+#[cfg(feature = "gui")]
+pub mod settings_dialog;
+#[cfg(feature = "gui")]
+pub mod connection_dialog;

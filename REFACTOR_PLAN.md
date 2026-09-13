@@ -41,11 +41,27 @@ keeps the per-step log.
 
 ## Phase 1 — dialogs out (~1,100 lines)
 
-- `settings_dialog.rs` (~700): the giant settings builder + pick
-  rows + prefs mapping. Needs `Preferences`, view flags, toggle.
-- `connection_dialog.rs` (~400): form state + `save_from_dialog` +
-  `dialog_field`/`dialog_pills` helpers. The 7 `pending_*` fields
-  move into a `ConnectionDialogState` struct.
+Status: **done** (2026-09-12), uncommitted at time of writing.
+`app.rs` 8,019 → ~6,830.
+
+- `settings_dialog.rs` (~765 lines): `open_settings`,
+  `take_settings_toggle`, `note_dialog_open_for_settings`,
+  `save_prefs_status`, `open_settings_dialog`, `settings_pick_row`.
+  New `pub(crate)`: `complete_auto`, `show_system`, `dialog_seq`,
+  `settings_seq`, `status`, `meta` fields; `open_settings` method.
+  `main.rs` untouched (paths resolve through the type).
+- `connection_dialog.rs` (~586 lines): `form_config`, `fill_form`,
+  `persist` (moved with its block), `start_add`, `start_edit`,
+  `open_connection_dialog`, `save_from_dialog`, `dialog_field`,
+  `DialogPick`, `dialog_pills`. New `pub(crate)`: `connections`,
+  `editing`, all `pending_*`, `password_snapshot`, all form entities,
+  `note_dialog_open`, `env_color`; `start_add`/`start_edit` methods.
+  `dialog_field` shared with the password prompt left in `app.rs`.
+- Two tab-command fns swept up in the cut were moved back to
+  `app.rs`. Verified: temp headless probe (settings open/toggle,
+  connection dialog + pills render — since removed), clean clippy,
+  112 lib + menus/themes/browser_tree green (2 pre-existing
+  headless flakes excluded).
 
 ## Phase 2 — flows out (~1,100 lines)
 

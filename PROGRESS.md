@@ -695,3 +695,12 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   are lease-illegal mid-render).
 - Verified: clean clippy, 112 lib + menus/themes/browser_tree green,
   GUI builds. See REFACTOR_PLAN.md for Phases 1–3.
+
+## Refactor Phase 1 — dialogs extracted (2026-09-12, uncommitted)
+
+- settings_dialog.rs (~765 lines) + connection_dialog.rs (~586):
+  mechanical moves, no behavior change. app.rs 8,019 → ~6,830.
+  Cross-module access via pub(crate) fields/methods; main.rs paths
+  unchanged. Two tab-command fns swept up in the cut moved back.
+- Verified: temp headless probe for both dialogs (since removed),
+  clean clippy, 112 lib + menus/themes/browser_tree green.
