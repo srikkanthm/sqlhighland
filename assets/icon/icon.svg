@@ -1,60 +1,66 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-<title>03 Scenic Mountain</title>
+<title>SQLHighland</title>
+<defs>
+  <linearGradient id="db" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0%" stop-color="#52d4ff"/>
+    <stop offset="100%" stop-color="#1886dd"/>
+  </linearGradient>
+  <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0%" stop-color="#37a9e8"/>
+    <stop offset="100%" stop-color="#07172f"/>
+  </linearGradient>
+  <clipPath id="squircle"><path d="M 608.8200 100.0000 c 121.3788 0 182.0682 0 226.6512 27.3205 a 185.4000 185.4000 0 0 1 61.2083 61.2083 c 27.3205 44.5830 27.3205 105.2724 27.3205 226.6512 L 924.0000 608.8200 c 0 121.3788 0 182.0682 -27.3205 226.6512 a 185.4000 185.4000 0 0 1 -61.2083 61.2083 c -44.5830 27.3205 -105.2724 27.3205 -226.6512 27.3205 L 415.1800 924.0000 c -121.3788 0 -182.0682 0 -226.6512 -27.3205 a 185.4000 185.4000 0 0 1 -61.2083 -61.2083 c -27.3205 -44.5830 -27.3205 -105.2724 -27.3205 -226.6512 L 100.0000 415.1800 c 0 -121.3788 0 -182.0682 27.3205 -226.6512 a 185.4000 185.4000 0 0 1 61.2083 -61.2083 c 44.5830 -27.3205 105.2724 -27.3205 226.6512 -27.3205 Z"/></clipPath>
+</defs>
 
-      <defs>
-        <linearGradient id="db" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stop-color="#52d4ff"/>
-          <stop offset="100%" stop-color="#1886dd"/>
-        </linearGradient>
-        <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stop-color="#37a9e8"/>
-          <stop offset="100%" stop-color="#07172f"/>
-        </linearGradient>
-      </defs>
-<rect x="24" y="24" width="976" height="976" rx="178" fill="url(#background)"/>
+<!-- Apple macOS icon grid: 824x824 continuous-corner rounded square (r=185.4) -->
+<path d="M 608.8200 100.0000 c 121.3788 0 182.0682 0 226.6512 27.3205 a 185.4000 185.4000 0 0 1 61.2083 61.2083 c 27.3205 44.5830 27.3205 105.2724 27.3205 226.6512 L 924.0000 608.8200 c 0 121.3788 0 182.0682 -27.3205 226.6512 a 185.4000 185.4000 0 0 1 -61.2083 61.2083 c -44.5830 27.3205 -105.2724 27.3205 -226.6512 27.3205 L 415.1800 924.0000 c -121.3788 0 -182.0682 0 -226.6512 -27.3205 a 185.4000 185.4000 0 0 1 -61.2083 -61.2083 c -27.3205 -44.5830 -27.3205 -105.2724 -27.3205 -226.6512 L 100.0000 415.1800 c 0 -121.3788 0 -182.0682 27.3205 -226.6512 a 185.4000 185.4000 0 0 1 61.2083 -61.2083 c 44.5830 -27.3205 105.2724 -27.3205 226.6512 -27.3205 Z" fill="url(#background)"/>
 
-        <path d="M0 520 Q150 410 310 490 T610 470 T1024 440 V1024 H0Z" fill="#123e65"/>
-        <path d="M0 610 Q180 500 350 590 T690 550 T1024 520 V1024 H0Z" fill="#0b314f"/>
-        <g fill="#09283e">
-          <path d="M80 610 l35-120 35 120z"/><path d="M150 620 l40-145 40 145z"/>
-          <path d="M820 600 l40-140 40 140z"/><path d="M900 620 l32-120 32 120z"/>
-        </g>
+<g clip-path="url(#squircle)">
+  <g transform="translate(100 100) scale(0.8046875)">
+    <path d="M0 520 Q150 410 310 490 T610 470 T1024 440 V1024 H0Z" fill="#123e65"/>
+    <path d="M0 610 Q180 500 350 590 T690 550 T1024 520 V1024 H0Z" fill="#0b314f"/>
+    <g fill="#09283e">
+      <path d="M80 610 l35-120 35 120z"/><path d="M150 620 l40-145 40 145z"/>
+      <path d="M820 600 l40-140 40 140z"/><path d="M900 620 l32-120 32 120z"/>
+    </g>
 
+    <path d="M145 390 L375 180 L445 240 L535 125 L680 275 L735 215 L880 390 L750 335 L680 285 L620 355 L535 205 L450 305 L375 260 Z"
+          fill="#2b83c7"/>
+    <path d="M535 125 L680 275 L620 355 L535 205 L490 290 Z" fill="#83d0ff" opacity=".72"/>
+    <path d="M375 180 L445 240 L410 300 L325 350 Z" fill="#ffffff" opacity=".95"/>
 
-        <path d="M145 390 L375 180 L445 240 L535 125 L680 275 L735 215 L880 390 L750 335 L680 285 L620 355 L535 205 L450 305 L375 260 Z"
-              fill="#2b83c7"/>
-        <path d="M535 125 L680 275 L620 355 L535 205 L490 290 Z" fill="#83d0ff" opacity=".72"/>
-        <path d="M375 180 L445 240 L410 300 L325 350 Z" fill="#ffffff" opacity=".95"/>
+    <g>
+      <path d="M250 390 C250 350 350 320 465 320 C580 320 680 350 680 390 V650 C680 690 580 720 465 720 C350 720 250 690 250 650Z"
+            fill="url(#db)"/>
+      <ellipse cx="465" cy="390" rx="215" ry="70" fill="#52d4ff"/>
+      <path d="M250 485 C250 525 350 555 465 555 C580 555 680 525 680 485"
+            fill="none" stroke="#07172f" stroke-width="18"/>
+      <path d="M250 585 C250 625 350 655 465 655 C580 655 680 625 680 585"
+            fill="none" stroke="#07172f" stroke-width="18"/>
+    </g>
 
+    <g>
+      <rect x="495" y="445" width="390" height="285" rx="38"
+            fill="#17263a" stroke="#8092b5" stroke-width="10"/>
+      <path d="M500 525 H880" stroke="#8092b5" stroke-width="8" opacity=".6"/>
+      <circle cx="545" cy="485" r="14" fill="#ff5f57"/>
+      <circle cx="590" cy="485" r="14" fill="#ffbd2e"/>
+      <circle cx="635" cy="485" r="14" fill="#28c840"/>
+      <path d="M550 562 L585 595 L550 628" fill="none" stroke="#55d9ff" stroke-width="13"
+            stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="615" y="565" width="205" height="18" rx="9" fill="#2baaf3"/>
+      <rect x="615" y="608" width="160" height="18" rx="9" fill="#5be1ff"/>
+      <rect x="615" y="651" width="125" height="18" rx="9" fill="#9876ed"/>
+    </g>
 
-      <g>
-        <path d="M250 390 C250 350 350 320 465 320 C580 320 680 350 680 390 V650 C680 690 580 720 465 720 C350 720 250 690 250 650Z"
-              fill="url(#db)" stroke="none" stroke-width="18"/>
-        <ellipse cx="465" cy="390" rx="215" ry="70" fill="#52d4ff" stroke="none" stroke-width="8"/>
-        <path d="M250 485 C250 525 350 555 465 555 C580 555 680 525 680 485"
-              fill="none" stroke="#07172f" stroke-width="18"/>
-        <path d="M250 585 C250 625 350 655 465 655 C580 655 680 625 680 585"
-              fill="none" stroke="#07172f" stroke-width="18"/>
-      </g>
-
-      <g>
-        <rect x="495" y="445" width="390" height="285" rx="38"
-              fill="#17263a" stroke="#8092b5" stroke-width="10"/>
-        <path d="M500 525 H880" stroke="#8092b5" stroke-width="8" opacity=".6"/>
-        <circle cx="545" cy="485" r="14" fill="#ff5f57"/>
-        <circle cx="590" cy="485" r="14" fill="#ffbd2e"/>
-        <circle cx="635" cy="485" r="14" fill="#28c840"/>
-        <path d="M550 562 L585 595 L550 628" fill="none" stroke="#55d9ff" stroke-width="13"
-              stroke-linecap="round" stroke-linejoin="round"/>
-        <rect x="615" y="565" width="205" height="18" rx="9" fill="#2baaf3"/>
-        <rect x="615" y="608" width="160" height="18" rx="9" fill="#5be1ff"/>
-        <rect x="615" y="651" width="125" height="18" rx="9" fill="#9876ed"/>
-      </g>
-
-        <text x="512" y="870" text-anchor="middle"
+    <text x="512" y="870" text-anchor="middle"
           font-family="Inter, SF Pro Display, Arial, sans-serif"
           font-size="112" font-weight="800" letter-spacing="-5">
-          <tspan fill="#35cfff">sql</tspan><tspan fill="#ffffff">highland</tspan>
-        </text>
-<rect x="25" y="25" width="974" height="974" rx="177" fill="none" stroke="#ffffff" stroke-opacity=".12" stroke-width="3"/>
+      <tspan fill="#35cfff">sql</tspan><tspan fill="#ffffff">highland</tspan>
+    </text>
+  </g>
+</g>
+
+<!-- hairline rim light inside the squircle edge -->
+<path d="M 608.8200 100.0000 c 121.3788 0 182.0682 0 226.6512 27.3205 a 185.4000 185.4000 0 0 1 61.2083 61.2083 c 27.3205 44.5830 27.3205 105.2724 27.3205 226.6512 L 924.0000 608.8200 c 0 121.3788 0 182.0682 -27.3205 226.6512 a 185.4000 185.4000 0 0 1 -61.2083 61.2083 c -44.5830 27.3205 -105.2724 27.3205 -226.6512 27.3205 L 415.1800 924.0000 c -121.3788 0 -182.0682 0 -226.6512 -27.3205 a 185.4000 185.4000 0 0 1 -61.2083 -61.2083 c -27.3205 -44.5830 -27.3205 -105.2724 -27.3205 -226.6512 L 100.0000 415.1800 c 0 -121.3788 0 -182.0682 27.3205 -226.6512 a 185.4000 185.4000 0 0 1 61.2083 -61.2083 c 44.5830 -27.3205 105.2724 -27.3205 226.6512 -27.3205 Z" fill="none" stroke="#ffffff" stroke-opacity=".10" stroke-width="3"/>
 </svg>

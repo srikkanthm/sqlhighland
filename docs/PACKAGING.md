@@ -59,9 +59,12 @@ the repo also accepts a standalone `Packager.toml`/`packager.json`.
 
 ## 4. Icon
 
-Source of truth is `assets/icon/icon.svg`. The generated `icon-1024.png` and
-`icon.icns` are checked in so packaging needs no extra tooling; regenerate
-them only when the SVG changes:
+Source of truth is `assets/icon/icon.svg`, drawn on Apple's macOS icon grid:
+a 1024×1024 canvas with the artwork in a centered **824×824 continuous-corner
+rounded square** (corner radius 185.4, Figma-style corner smoothing 0.7) and a
+100px transparent margin on every side. The scene is clipped to that shape.
+The generated `icon-1024.png` and `icon.icns` are checked in so packaging needs
+no extra tooling; regenerate them only when the SVG changes:
 
 ```sh
 brew install librsvg
