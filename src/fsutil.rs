@@ -79,6 +79,13 @@ pub fn write_atomic(path: &Path, text: &str, secret: bool) -> anyhow::Result<()>
         .with_context(|| format!("syncing {}", tmp.display()))?;
     drop(file);
 
+    // Re-apply with the handle closed: Windows can't change ACLs on an open
+    // file, so the final (renamed) file is restricted here. Unix already set
+    // 0600 above; this is a harmless no-op there.
+    if secret {
+        let _ = restrict(&tmp, 0o600);
+    }
+
     std::fs::rename(&tmp, path).with_context(|| format!("moving {}", path.display()))?;
     // Make the rename durable, not just the file contents.
     if let Some(parent) = path.parent() {
@@ -89,18 +96,54 @@ pub fn write_atomic(path: &Path, text: &str, secret: bool) -> anyhow::Result<()>
     Ok(())
 }
 
-/// Best-effort tighten of an existing path's permissions (e.g. a config
-/// file written by an older, umask-respecting version). Missing paths and
-/// non-Unix platforms are ignored.
+/// Best-effort tighten of an existing path to its owner (e.g. a config file
+/// written by an older version). Missing paths and unsupported platforms are
+/// ignored: callers treat this as advisory, never as a hard failure.
+///
+/// Unix maps `mode` to file permission bits; Windows has no owner-only mode
+/// bits, so it drops inherited ACEs and grants the current user via `icacls`.
 pub fn restrict(path: &Path, mode: u32) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
+    imp::restrict(path, mode)
+}
+
+#[cfg(unix)]
+mod imp {
+    use std::path::Path;
+
+    pub fn restrict(path: &Path, mode: u32) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
     }
-    #[cfg(not(unix))]
-    {
-        let _ = (path, mode);
+}
+
+#[cfg(windows)]
+mod imp {
+    use std::path::Path;
+
+    /// Windows counterpart of `chmod 0600`: remove inherited ACEs and grant
+    /// the current user full control. Best-effort — callers ignore failures
+    /// (the write itself has already succeeded).
+    pub fn restrict(path: &Path, _mode: u32) -> std::io::Result<()> {
+        let user = match std::env::var("USERNAME") {
+            Ok(u) if !u.is_empty() => u,
+            _ => return Ok(()),
+        };
+        // Capture output so `icacls` never writes to the app's console.
+        let _ = std::process::Command::new("icacls")
+            .arg(path)
+            .arg("/inheritance:r")
+            .arg("/grant:r")
+            .arg(format!("{user}:(F)"))
+            .output();
+        Ok(())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+mod imp {
+    use std::path::Path;
+
+    pub fn restrict(_path: &Path, _mode: u32) -> std::io::Result<()> {
         Ok(())
     }
 }
