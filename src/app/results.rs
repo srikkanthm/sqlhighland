@@ -30,7 +30,7 @@ pub(crate) fn to_shared(rows: Vec<Vec<Option<String>>>) -> Vec<Vec<Option<Shared
 
 /// Links one open server-side cursor to a tab's grid.
 pub(crate) struct FetchState {
-    pub(crate) session: Arc<Mutex<OracledbSession>>,
+    pub(crate) session: SharedSession,
     pub(crate) query_id: u64,
     pub(crate) chunk: usize,
     pub(crate) cap: usize,

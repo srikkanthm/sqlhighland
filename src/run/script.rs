@@ -263,7 +263,7 @@ impl SqlHighlandView {
         });
         cx.notify();
 
-        let session = self.pool.get_or_create(&conn_id);
+        let session = self.pool.get_or_create(&conn_id, cfg.engine);
         let bg = cx.background_executor().clone();
         let tab_id = tab_id.to_string();
         let conn_id_bg = conn_id.clone();

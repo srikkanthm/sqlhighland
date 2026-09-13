@@ -163,7 +163,7 @@ impl SqlHighlandView {
         });
         cx.notify();
 
-        let session = self.pool.get_or_create(&conn_id);
+        let session = self.pool.get_or_create(&conn_id, cfg.engine);
         let session_bg = session.clone();
         let bg = cx.background_executor().clone();
         let tab_id = tab_id.to_string();
@@ -378,11 +378,7 @@ impl SqlHighlandView {
 
     /// Mark other tabs' fetches on the same session exhausted: a new query
     /// or execute on a shared session kills their open server-side cursor.
-    pub(crate) fn mark_siblings_exhausted(
-        &self,
-        tab_id: &str,
-        session: &Arc<Mutex<OracledbSession>>,
-    ) {
+    pub(crate) fn mark_siblings_exhausted(&self, tab_id: &str, session: &SharedSession) {
         for t in &self.tabs {
             if t.id == tab_id {
                 continue;

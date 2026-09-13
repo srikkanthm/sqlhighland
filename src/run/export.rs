@@ -46,7 +46,7 @@ fn unix_timestamp() -> u64 {
 /// a half file behind at the target path.
 #[allow(clippy::too_many_arguments)]
 fn export_drain_blocking(
-    session: &Arc<Mutex<OracledbSession>>,
+    session: &SharedSession,
     fetch: &Arc<FetchState>,
     query_id: u64,
     columns: &[String],
@@ -296,7 +296,7 @@ impl SqlHighlandView {
         path: std::path::PathBuf,
         columns: Vec<String>,
         query_id: u64,
-        session: Arc<Mutex<OracledbSession>>,
+        session: SharedSession,
         sql: String,
         cx: &mut Context<Self>,
     ) {

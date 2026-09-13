@@ -21,7 +21,7 @@ use crate::complete::{
 };
 use crate::config::{CompleteMode, Preferences, SavedConfig, SavedTab, TabsManifest};
 use crate::conn_picker::{PendingPick, PickAfter};
-use crate::db::{DbClient, OracledbSession};
+use crate::db::SharedSession;
 use crate::filetab::{self, FileStamp};
 use crate::metadata::SharedCache;
 use crate::model::{

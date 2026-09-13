@@ -1,9 +1,12 @@
-//! Per-connection Oracle dictionary cache for autocomplete.
+//! Per-connection dictionary cache for autocomplete, hover, and the schema
+//! browser.
 //!
-//! GUI-free: blocking fetchers take `&mut impl DbClient` (real session on the
-//! background executor, fakes in tests). The view owns
+//! GUI-free: blocking fetchers take `&mut dyn DbClient` (a real session on the
+//! background executor, fakes in tests) and are reached through the
+//! engine-agnostic [`MetadataProvider`] seam ([`provider_for`]). The view owns
 //! `HashMap<connection_id, Arc<Mutex<MetadataCache>>>` beside the session
-//! pool; the completion provider only ever clones an `Arc` snapshot.
+//! pool; the completion provider only ever clones an `Arc` snapshot. The
+//! Oracle dictionary SQL lives in the `*_blocking` fetchers.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -11,6 +14,7 @@ use std::time::Instant;
 
 use crate::complete::{ForeignKey, SYSTEM_SCHEMAS};
 use crate::db::DbClient;
+use crate::schema::DbEngine;
 
 /// Cap per dictionary query (protects huge schemas; highland-size DBs never
 /// come close).
@@ -139,7 +143,7 @@ pub fn system_filter_sql(owner_col: &str, include_system: bool, own_schema: &str
 /// Fetch tables+views as `(owner, name, kind)` triples. `own_schema`
 /// (connected user) is always exempt from the system filter.
 pub fn fetch_tables_blocking(
-    db: &mut impl DbClient,
+    db: &mut dyn DbClient,
     include_system: bool,
     own_schema: &str,
 ) -> Result<Vec<TableId>, crate::db::DbError> {
@@ -174,7 +178,7 @@ pub fn fetch_tables_blocking(
 /// Fetch columns grouped by `(OWNER, TABLE)` (uppercased keys), left-joined
 /// to `ALL_COL_COMMENTS` for popup detail text.
 pub fn fetch_columns_blocking(
-    db: &mut impl DbClient,
+    db: &mut dyn DbClient,
     include_system: bool,
     own_schema: &str,
 ) -> Result<HashMap<(String, String), Vec<ColumnMeta>>, crate::db::DbError> {
@@ -208,7 +212,7 @@ pub fn fetch_columns_blocking(
 /// Fetch referential constraints, grouped per constraint (composite keys
 /// stay aligned by position). Filtered on the constrained table's owner.
 pub fn fetch_fks_blocking(
-    db: &mut impl DbClient,
+    db: &mut dyn DbClient,
     include_system: bool,
     own_schema: &str,
 ) -> Result<Vec<ForeignKey>, crate::db::DbError> {
@@ -266,7 +270,7 @@ pub fn fetch_fks_blocking(
 
 /// Fetch sequences as `(owner, name)` pairs.
 pub fn fetch_sequences_blocking(
-    db: &mut impl DbClient,
+    db: &mut dyn DbClient,
     include_system: bool,
     own_schema: &str,
 ) -> Result<Vec<TableId>, crate::db::DbError> {
@@ -287,6 +291,85 @@ pub fn fetch_sequences_blocking(
             _ => None,
         })
         .collect())
+}
+
+/// Engine-specific dictionary fetching for autocomplete, hover, and the
+/// schema browser. The Oracle provider is the only implementation today; a
+/// second engine supplies its own and a [`DbEngine`] arm in [`provider_for`],
+/// so `browser.rs` never names a specific engine.
+pub trait MetadataProvider: Send + Sync {
+    fn fetch_tables(
+        &self,
+        db: &mut dyn DbClient,
+        include_system: bool,
+        own_schema: &str,
+    ) -> Result<Vec<TableId>, crate::db::DbError>;
+    fn fetch_columns(
+        &self,
+        db: &mut dyn DbClient,
+        include_system: bool,
+        own_schema: &str,
+    ) -> Result<HashMap<(String, String), Vec<ColumnMeta>>, crate::db::DbError>;
+    fn fetch_fks(
+        &self,
+        db: &mut dyn DbClient,
+        include_system: bool,
+        own_schema: &str,
+    ) -> Result<Vec<ForeignKey>, crate::db::DbError>;
+    fn fetch_sequences(
+        &self,
+        db: &mut dyn DbClient,
+        include_system: bool,
+        own_schema: &str,
+    ) -> Result<Vec<TableId>, crate::db::DbError>;
+}
+
+/// Oracle dictionary provider: delegates to the `*_blocking` fetchers below.
+pub struct OracleMetadata;
+
+impl MetadataProvider for OracleMetadata {
+    fn fetch_tables(
+        &self,
+        db: &mut dyn DbClient,
+        include_system: bool,
+        own_schema: &str,
+    ) -> Result<Vec<TableId>, crate::db::DbError> {
+        fetch_tables_blocking(db, include_system, own_schema)
+    }
+
+    fn fetch_columns(
+        &self,
+        db: &mut dyn DbClient,
+        include_system: bool,
+        own_schema: &str,
+    ) -> Result<HashMap<(String, String), Vec<ColumnMeta>>, crate::db::DbError> {
+        fetch_columns_blocking(db, include_system, own_schema)
+    }
+
+    fn fetch_fks(
+        &self,
+        db: &mut dyn DbClient,
+        include_system: bool,
+        own_schema: &str,
+    ) -> Result<Vec<ForeignKey>, crate::db::DbError> {
+        fetch_fks_blocking(db, include_system, own_schema)
+    }
+
+    fn fetch_sequences(
+        &self,
+        db: &mut dyn DbClient,
+        include_system: bool,
+        own_schema: &str,
+    ) -> Result<Vec<TableId>, crate::db::DbError> {
+        fetch_sequences_blocking(db, include_system, own_schema)
+    }
+}
+
+/// The dictionary provider for an engine. Add a match arm per [`DbEngine`].
+pub fn provider_for(engine: DbEngine) -> &'static dyn MetadataProvider {
+    match engine {
+        DbEngine::Oracle => &OracleMetadata,
+    }
 }
 
 #[cfg(test)]
@@ -449,6 +532,18 @@ mod tests {
         assert_eq!(t[0].kind, TableKind::Table);
         assert_eq!(t[2].name, "EMPVW");
         assert_eq!(t[2].kind, TableKind::View);
+    }
+
+    #[test]
+    fn provider_for_dispatches_by_engine() {
+        // The browser only names the provider, never a concrete engine.
+        let mut db = fake();
+        let provider = provider_for(DbEngine::Oracle);
+        assert_eq!(provider.fetch_tables(&mut db, true, "").unwrap().len(), 3);
+        assert_eq!(
+            provider.fetch_sequences(&mut db, true, "").unwrap().len(),
+            1
+        );
     }
 
     #[test]

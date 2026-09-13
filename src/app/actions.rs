@@ -69,7 +69,13 @@ impl SqlHighlandView {
             cx.notify();
             return;
         };
-        let session = self.pool.get_or_create(&conn_id);
+        let engine = self
+            .connections
+            .iter()
+            .find(|c| c.id == conn_id)
+            .map(|c| c.engine)
+            .unwrap_or_default();
+        let session = self.pool.get_or_create(&conn_id, engine);
         let session_bg = session.clone();
         let bg = cx.background_executor().clone();
         let view = cx.entity().downgrade();

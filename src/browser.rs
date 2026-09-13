@@ -11,11 +11,7 @@ use gpui_kit::component::tree::{TreeEvent, TreeItem, TreeState};
 use gpui_kit::*;
 
 use crate::app::SqlHighlandView;
-use crate::db::DbClient;
-use crate::metadata::{
-    fetch_columns_blocking, fetch_fks_blocking, fetch_sequences_blocking, fetch_tables_blocking,
-    MetadataCache,
-};
+use crate::metadata::MetadataCache;
 use crate::schema::{OracleProvider, SchemaProvider as _};
 use crate::session::lock;
 
@@ -279,7 +275,9 @@ impl SqlHighlandView {
         lock(&cache).loading = true;
         self.status = "Loading suggestions…".into();
         cx.notify();
-        let session = self.pool.get_or_create(conn_id);
+        let session = self.pool.get_or_create(conn_id, cfg.engine);
+        // Engine-specific dictionary fetcher (&'static, Send+Sync).
+        let provider = crate::metadata::provider_for(cfg.engine);
         let bg = cx.background_executor().clone();
         let view = cx.entity().downgrade();
         let conn_bg = conn_id.to_string();
@@ -314,13 +312,17 @@ impl SqlHighlandView {
                         }
                     }
                     Parts {
-                        tables: fetch_tables_blocking(&mut *s, include_system, &own_schema)
+                        tables: provider
+                            .fetch_tables(&mut **s, include_system, &own_schema)
                             .map_err(|e| e.to_string()),
-                        columns: fetch_columns_blocking(&mut *s, include_system, &own_schema)
+                        columns: provider
+                            .fetch_columns(&mut **s, include_system, &own_schema)
                             .map_err(|e| e.to_string()),
-                        sequences: fetch_sequences_blocking(&mut *s, include_system, &own_schema)
+                        sequences: provider
+                            .fetch_sequences(&mut **s, include_system, &own_schema)
                             .map_err(|e| e.to_string()),
-                        fks: fetch_fks_blocking(&mut *s, include_system, &own_schema)
+                        fks: provider
+                            .fetch_fks(&mut **s, include_system, &own_schema)
                             .map_err(|e| e.to_string()),
                     }
                 })

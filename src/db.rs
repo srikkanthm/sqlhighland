@@ -4,6 +4,7 @@
 //! stays in this module. All calls are blocking — callers must run them on a
 //! GPUI background executor, never on the UI thread.
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::model::{ColumnInfo, ConnectionConfig, QueryResult};
@@ -27,22 +28,84 @@ pub struct FetchPage {
     pub current: bool,
 }
 
-pub trait DbClient {
+/// One database driver behind the app. Implementations own a connection plus
+/// (optionally) a single open server-side cursor for incremental fetching.
+///
+/// `Send`, because blocking calls run on the background executor. The app keeps
+/// sessions as `Box<dyn DbClient>` (see [`SharedSession`]), so a second engine
+/// only needs to implement this trait and be constructed in `SessionPool` for
+/// its [`DbEngine`](crate::schema::DbEngine) variant.
+pub trait DbClient: Send {
     fn connect(&mut self, cfg: &ConnectionConfig) -> Result<(), DbError>;
     fn is_connected(&self) -> bool;
     fn disconnect(&mut self);
+
+    /// Generation of the currently open cursor (0 = none). Fetch completions
+    /// compare it to discard stale pages (see [`FetchPage::current`]).
+    fn query_id(&self) -> u64 {
+        0
+    }
+
+    /// Execute and pull the first page, holding the cursor open for more.
+    /// Returns the columns, the first page, and the new generation id.
+    ///
+    /// Backends without incremental fetching can leave the default (which
+    /// errors) and override `run_query` instead.
+    fn start_query(
+        &mut self,
+        sql: &str,
+        first_n: usize,
+        binds: &[BindParam],
+    ) -> Result<(Vec<ColumnInfo>, FetchPage, u64), DbError> {
+        let _ = (sql, first_n, binds);
+        Err(DbError(
+            "incremental queries are not supported by this backend".to_string(),
+        ))
+    }
+
+    /// Pull the next page from the open cursor (default: unsupported — see
+    /// [`DbClient::start_query`]).
+    fn fetch_more(&mut self, query_id: u64, n: usize) -> Result<FetchPage, DbError> {
+        let _ = (query_id, n);
+        Err(DbError(
+            "incremental queries are not supported by this backend".to_string(),
+        ))
+    }
+
+    /// Release the open cursor, if any (default no-op).
+    fn close_cursor(&mut self) {}
+
+    /// Convenience for non-incremental callers: run to `max_rows`, then close
+    /// the cursor. Engines with incremental fetching get this for free.
     fn run_query(
         &mut self,
         sql: &str,
         max_rows: usize,
         binds: &[BindParam],
-    ) -> Result<QueryResult, DbError>;
+    ) -> Result<QueryResult, DbError> {
+        let started = Instant::now();
+        let (columns, page, _) = self.start_query(sql, max_rows, binds)?;
+        self.close_cursor();
+        Ok(QueryResult {
+            columns,
+            rows: page.rows,
+            elapsed_ms: started.elapsed().as_millis(),
+            truncated: !page.exhausted,
+        })
+    }
+
     /// Execute a non-query statement (DML/DDL/PL/SQL). Returns rows affected.
     /// The driver does not autocommit — call `commit` explicitly.
     fn exec(&mut self, sql: &str, binds: &[BindParam]) -> Result<(u64, u128), DbError>;
     fn commit(&mut self) -> Result<(), DbError>;
     fn rollback(&mut self) -> Result<(), DbError>;
 }
+
+/// Shared, thread-safe session handle: one per saved connection, used from the
+/// UI thread and the background executor. A trait object keeps the app
+/// engine-agnostic (`Arc<Mutex<Box<dyn DbClient>>>` is `Send + Sync` because
+/// `DbClient: Send`).
+pub type SharedSession = Arc<Mutex<Box<dyn DbClient>>>;
 
 /// One native bind value. `name` is the placeholder without the colon
 /// (`"id"` for `:id`, `"1"` for `:1`); all values are sent as strings
@@ -375,24 +438,26 @@ impl DbClient for OracledbSession {
         self.conn = None;
     }
 
-    /// Convenience for non-incremental callers (and tests): run to `max_rows`
-    /// like the old implementation, then close the cursor.
-    fn run_query(
+    fn query_id(&self) -> u64 {
+        self.query_id
+    }
+
+    fn start_query(
         &mut self,
         sql: &str,
-        max_rows: usize,
+        first_n: usize,
         binds: &[BindParam],
-    ) -> Result<QueryResult, DbError> {
-        let started = Instant::now();
-        let (columns, page, _) = self.start_query(sql, max_rows, binds)?;
+    ) -> Result<(Vec<ColumnInfo>, FetchPage, u64), DbError> {
+        OracledbSession::start_query(self, sql, first_n, binds)
+    }
+
+    fn fetch_more(&mut self, query_id: u64, n: usize) -> Result<FetchPage, DbError> {
+        OracledbSession::fetch_more(self, query_id, n)
+    }
+
+    fn close_cursor(&mut self) {
         self.cursor = None;
         self.pending = None;
-        Ok(QueryResult {
-            columns,
-            rows: page.rows,
-            elapsed_ms: started.elapsed().as_millis(),
-            truncated: !page.exhausted,
-        })
     }
 
     fn exec(&mut self, sql: &str, binds: &[BindParam]) -> Result<(u64, u128), DbError> {

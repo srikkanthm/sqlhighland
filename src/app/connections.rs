@@ -147,7 +147,7 @@ impl SqlHighlandView {
         self.status = format!("Connecting to {}…", cfg.connect_string()).into();
         cx.notify();
 
-        let session = self.pool.get_or_create(&cfg.id);
+        let session = self.pool.get_or_create(&cfg.id, cfg.engine);
         let conn_id = cfg.id.clone();
         let bg = cx.background_executor().clone();
         let view = cx.entity().downgrade();

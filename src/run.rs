@@ -15,9 +15,7 @@ use crate::app::{
 use crate::bind_dialog::PendingBind;
 use crate::config::Preferences;
 use crate::conn_picker::{PendingPick, PickAfter};
-use crate::db::{
-    is_describe_statement, BindParam, DbClient, FetchPage, OracledbSession, FETCH_CHUNK,
-};
+use crate::db::{is_describe_statement, BindParam, FetchPage, SharedSession, FETCH_CHUNK};
 use crate::export::{csv_header_line_with, csv_line_with, sheet_name, XlsxBuilder};
 use crate::model::ColumnInfo;
 use crate::session::lock;

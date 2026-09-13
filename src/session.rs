@@ -1,13 +1,18 @@
-//! One live Oracle session per saved connection, shared by tabs.
+//! One live session per saved connection, shared by tabs.
 //!
 //! Sessions are created lazily and keyed by connection id. Two tabs bound to
 //! the same connection share its session (and its single open cursor — the
 //! generation guards in `db.rs` keep paging honest when they interleave).
+//!
+//! The pool is engine-agnostic: it stores `Box<dyn DbClient>` and constructs
+//! the concrete session for a connection's [`DbEngine`](crate::schema::DbEngine)
+//! lazily, so a second engine plugs in by adding an arm to [`new_session`].
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::db::{DbClient, OracledbSession};
+use crate::db::{DbClient, OracledbSession, SharedSession};
+use crate::schema::DbEngine;
 
 /// Poison-tolerant guard for session-adjacent locks (session, grid data,
 /// metadata cache): a panic while holding one must degrade to stale data
@@ -17,9 +22,17 @@ pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Construct the session for an engine. Add a match arm per
+/// [`DbEngine`] variant (the compiler enforces it).
+fn new_session(engine: DbEngine) -> Box<dyn DbClient> {
+    match engine {
+        DbEngine::Oracle => Box::new(OracledbSession::new()),
+    }
+}
+
 #[derive(Default)]
 pub struct SessionPool {
-    sessions: HashMap<String, Arc<Mutex<OracledbSession>>>,
+    sessions: HashMap<String, SharedSession>,
 }
 
 impl SessionPool {
@@ -28,10 +41,10 @@ impl SessionPool {
     }
 
     /// Get the session for a connection, creating it on first use.
-    pub fn get_or_create(&mut self, connection_id: &str) -> Arc<Mutex<OracledbSession>> {
+    pub fn get_or_create(&mut self, connection_id: &str, engine: DbEngine) -> SharedSession {
         self.sessions
             .entry(connection_id.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(OracledbSession::new())))
+            .or_insert_with(|| Arc::new(Mutex::new(new_session(engine))))
             .clone()
     }
 
@@ -71,8 +84,8 @@ mod tests {
     #[test]
     fn same_id_returns_shared_session() {
         let mut pool = SessionPool::new();
-        let a = pool.get_or_create("db1");
-        let b = pool.get_or_create("db1");
+        let a = pool.get_or_create("db1", DbEngine::default());
+        let b = pool.get_or_create("db1", DbEngine::default());
         assert!(Arc::ptr_eq(&a, &b));
         assert_eq!(pool.len(), 1);
         assert!(!pool.is_live("db1")); // created, not connected
@@ -81,7 +94,7 @@ mod tests {
     #[test]
     fn remove_drops_session() {
         let mut pool = SessionPool::new();
-        pool.get_or_create("db1");
+        pool.get_or_create("db1", DbEngine::default());
         pool.remove("db1");
         assert!(pool.is_empty());
         assert!(!pool.is_live("db1"));
