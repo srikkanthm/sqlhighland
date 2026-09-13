@@ -823,3 +823,26 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - Verified: clean `clippy --all-targets`, fmt, 122 lib + menus/themes/
   browser_tree green, live cancel test green, fork pushed + re-pinned by
   commit.
+
+## macOS packaging with cargo-packager (2026-09-13)
+
+- Bundle a native `.app` + `.dmg` via CrabNebula's `cargo-packager`
+  (installed with `cargo install cargo-packager --locked`; not a repo dep).
+  Config in `[package.metadata.packager]` (Cargo.toml):
+  `product-name`, `identifier = com.srikkanthm.sqlhighland`,
+  `category = DeveloperTool`, `formats = ["app", "dmg"]`, `out-dir = dist`,
+  `icons`, and `before-packaging-command = "cargo build --release --features
+  gui"` (the binary is gui-gated). `macos.minimum-system-version = 11.0`.
+- App icon derived from a hand-authored `assets/icon/icon.svg` (scenic
+  mountain + database + code window): rasterized with `rsvg-convert` to a
+  1024² PNG, converted to `icon.icns` via an `icon.iconset` + `iconutil`;
+  generated PNG/ICNS checked in so packaging needs no librsvg.
+- Apple Silicon (arm64) **only** by design — no Intel or universal build, so
+  no `target-triple` override is needed.
+- Verified: `cargo packager --release` produced `dist/SQLHighland.app` (37 MB)
+  and `dist/SQLHighland_0.1.0_aarch64.dmg` (13 MB); `plutil` shows the
+  expected Info.plist keys (bundle id, executable `sqlhighland`,
+  `LSMinimumSystemVersion`, `LSApplicationCategoryType`, icon), the bundle
+  launches, and the DMG mounts with the app + `Applications` symlink.
+- Output is **unsigned** (Gatekeeper warns off-machine). Signing/notarization
+  and the icon/verify recipes: `docs/PACKAGING.md`.

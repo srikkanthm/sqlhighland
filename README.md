@@ -46,6 +46,7 @@ development — see [`docs/PROGRESS.md`](docs/PROGRESS.md) for the build log and
 
 ## Prerequisites
 
+- An **Apple Silicon** Mac (arm64). Intel Macs are not supported.
 - The current **macOS** build needs full Xcode (App Store) — GPUI renders via
   Metal:
   ```sh
@@ -99,6 +100,24 @@ pinned git patch to `srikkanthm/rust-oracledb` (adds plain-TCP cancellation;
 see [`docs/CANCELLATION.md`](docs/CANCELLATION.md)), `gpui-pre 0.3.4`,
 `gpui-kit 0.6.1`.
 
+## Packaging (macOS)
+
+Bundle a native `.app` + `.dmg` with
+[cargo-packager](https://github.com/crabnebula-dev/cargo-packager):
+
+```sh
+cargo install cargo-packager --locked
+cargo packager --release
+```
+
+Artifacts land in `dist/` (git-ignored): `SQLHighland.app` and
+`SQLHighland_<version>_<arch>.dmg`. Builds target **Apple Silicon
+(arm64) only** — no Intel or universal binary. Config is in
+`[package.metadata.packager]` (Cargo.toml); the app icon source is
+`assets/icon/icon.svg`. The current output is unsigned — see
+[`docs/PACKAGING.md`](docs/PACKAGING.md) for signing/notarization and the
+icon pipeline.
+
 ## Troubleshooting
 
 - `xcrun: error: unable to find utility "metal"` → Xcode isn't selected
@@ -124,6 +143,7 @@ see [`docs/CANCELLATION.md`](docs/CANCELLATION.md)), `gpui-pre 0.3.4`,
 - [`docs/HISTORY.md`](docs/HISTORY.md) — original plan, shipped feature designs, completed refactor.
 - [`docs/REVIEW.md`](docs/REVIEW.md) — code, security, and organization review with fix status.
 - [`docs/CANCELLATION.md`](docs/CANCELLATION.md) — forked-driver query cancellation and upstream revert guide.
+- [`docs/PACKAGING.md`](docs/PACKAGING.md) — macOS `.app`/`.dmg` bundling, icon pipeline, signing notes.
 - [`docs/AUTOCOMPLETE_ISSUE.md`](docs/AUTOCOMPLETE_ISSUE.md) — open: autocomplete intermittently dies (diagnosis + proposed fix).
 
 ## Roadmap

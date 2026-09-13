@@ -45,6 +45,22 @@ default = []
 # Build/run the desktop app with: cargo run --features gui
 gui = ["dep:gpui", "dep:gpui-kit", "dep:gpui-kit-assets", "dep:lsp-types"]
 
+# Desktop packaging via cargo-packager (https://github.com/crabnebula-dev/cargo-packager).
+#   cargo install cargo-packager --locked
+#   cargo packager --release
+# The app binary is gui-gated, hence the explicit feature in the build step.
+[package.metadata.packager]
+product-name = "SQLHighland"
+identifier = "com.srikkanthm.sqlhighland"
+category = "DeveloperTool"
+before-packaging-command = "cargo build --release --features gui"
+formats = ["app", "dmg"]
+out-dir = "dist"
+icons = ["assets/icon/icon.icns"]
+
+[package.metadata.packager.macos]
+minimum-system-version = "11.0"
+
 # Plain-TCP query cancellation, added on top of upstream `main` in this fork.
 # Pinned to an exact commit so builds are reproducible; bump the rev when the
 # fork changes.
