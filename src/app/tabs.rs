@@ -603,9 +603,7 @@ impl SqlHighlandView {
         }
         let tab_id = self.active_tab().id.clone();
         let suggested = format!("{}.sql", file_stem(&self.active_tab().name));
-        let dir = std::env::var("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let dir = crate::fsutil::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
         let view = cx.entity().downgrade();
         cx.spawn_in(window, async move |_, cx| {
             let rx = match cx.update(|_, cx| cx.prompt_for_new_path(&dir, Some(&suggested))) {

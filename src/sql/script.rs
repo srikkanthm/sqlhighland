@@ -240,14 +240,14 @@ fn strip_line_comment(s: &str) -> &str {
 /// relative against `base_dir`.
 fn resolve_script_path(raw: &str, base_dir: &std::path::Path) -> std::path::PathBuf {
     let expanded = if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
-        match std::env::var("HOME") {
-            Ok(home) => std::path::PathBuf::from(home).join(rest),
-            Err(_) => std::path::PathBuf::from(raw),
+        match crate::fsutil::home_dir() {
+            Some(home) => home.join(rest),
+            None => std::path::PathBuf::from(raw),
         }
     } else if raw == "~" {
-        match std::env::var("HOME") {
-            Ok(home) => std::path::PathBuf::from(home),
-            Err(_) => std::path::PathBuf::from(raw),
+        match crate::fsutil::home_dir() {
+            Some(home) => home,
+            None => std::path::PathBuf::from(raw),
         }
     } else {
         std::path::PathBuf::from(raw)

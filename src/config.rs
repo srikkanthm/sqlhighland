@@ -32,12 +32,20 @@ fn tighten_owned(path: &std::path::Path) {
 }
 
 /// Base config dir. Overridable via `SQLHIGHLAND_CONFIG_DIR` (tests).
+///
+/// Windows uses `%APPDATA%\sqlhighland`; everywhere else `~/.config/sqlhighland`.
 fn base_dir() -> anyhow::Result<PathBuf> {
     if let Ok(dir) = std::env::var("SQLHIGHLAND_CONFIG_DIR") {
         return Ok(PathBuf::from(dir));
     }
-    let home = std::env::var("HOME").context("HOME is not set")?;
-    Ok(PathBuf::from(home).join(".config").join("sqlhighland"))
+    // Windows-only in practice; checked unconditionally so the branch compiles
+    // and is exercised on every platform.
+    if let Some(appdata) = std::env::var_os("APPDATA").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(appdata).join("sqlhighland"));
+    }
+    let home = crate::fsutil::home_dir()
+        .context("could not determine the home directory (HOME/USERPROFILE unset)")?;
+    Ok(home.join(".config").join("sqlhighland"))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

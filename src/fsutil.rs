@@ -11,6 +11,34 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
+/// The current user's home directory, cross-platform and dependency-free.
+///
+/// `HOME` is honoured first (Unix, and Windows shells that set it), then
+/// `USERPROFILE` and `HOMEDRIVE`+`HOMEPATH` on Windows. Returns `None` when
+/// none are set, so callers can degrade (e.g. fall back to the cwd) instead
+/// of relying on a Unix-only variable.
+pub fn home_dir() -> Option<PathBuf> {
+    home_dir_from(|key| std::env::var_os(key))
+}
+
+/// Precedence split out from [`home_dir`] so it is unit-testable on any
+/// platform without mutating process-global environment.
+fn home_dir_from(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    if let Some(home) = env("HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(home));
+    }
+    if let Some(profile) = env("USERPROFILE").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(profile));
+    }
+    if let (Some(mut drive), Some(path)) = (env("HOMEDRIVE"), env("HOMEPATH")) {
+        if !drive.is_empty() && !path.is_empty() {
+            drive.push(path);
+            return Some(PathBuf::from(drive));
+        }
+    }
+    None
+}
+
 /// Atomically replace `path` with `text`.
 ///
 /// The text is written to a sibling temp file, flushed with `fsync`, then
@@ -88,6 +116,48 @@ fn temp_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_dir_prefers_home() {
+        // Process-global env, so only assert when HOME is actually set; on
+        // Windows-only environments the USERPROFILE fallback covers the rest.
+        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+            assert_eq!(home_dir(), Some(PathBuf::from(home)));
+        }
+    }
+
+    #[test]
+    fn home_dir_precedence_is_cross_platform() {
+        use std::collections::HashMap;
+        use std::ffi::OsString;
+
+        let probe = |pairs: &[(&str, &str)]| {
+            let map: HashMap<String, OsString> = pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), OsString::from(v)))
+                .collect();
+            home_dir_from(move |key| map.get(key).cloned())
+        };
+
+        // HOME wins (Unix, and Windows shells that export it).
+        assert_eq!(
+            probe(&[("HOME", "/home/u"), ("USERPROFILE", "C:\\Users\\u")]),
+            Some(PathBuf::from("/home/u"))
+        );
+        // Windows: USERPROFILE when HOME is absent.
+        assert_eq!(
+            probe(&[("USERPROFILE", "C:\\Users\\u")]),
+            Some(PathBuf::from("C:\\Users\\u"))
+        );
+        // Legacy Windows fallback: HOMEDRIVE + HOMEPATH.
+        assert_eq!(
+            probe(&[("HOMEDRIVE", "C:"), ("HOMEPATH", "\\Users\\u")]),
+            Some(PathBuf::from("C:\\Users\\u"))
+        );
+        // Empty values are ignored; nothing set → None.
+        assert_eq!(probe(&[("HOME", ""), ("USERPROFILE", "")]), None);
+        assert_eq!(probe(&[]), None);
+    }
 
     #[test]
     fn write_atomic_round_trips_and_leaves_no_temp() {
