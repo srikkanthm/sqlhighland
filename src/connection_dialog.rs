@@ -501,28 +501,6 @@ impl SqlHighlandView {
                                 ),
                         ),
                 )
-                .child({
-                    let cell = test_cell.clone();
-                    let state = cell.borrow();
-                    match &*state {
-                        TestState::Idle => div().into_any_element(),
-                        TestState::Testing => div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child("Testing connection…")
-                            .into_any_element(),
-                        TestState::Ok => div()
-                            .text_xs()
-                            .text_color(cx.theme().success)
-                            .child("Connected successfully")
-                            .into_any_element(),
-                        TestState::Err(msg) => div()
-                            .text_xs()
-                            .text_color(cx.theme().danger)
-                            .child(msg.clone())
-                            .into_any_element(),
-                    }
-                })
                 .footer(
                     h_flex()
                         .gap_2()
@@ -542,6 +520,32 @@ impl SqlHighlandView {
                                         })
                                         .ok();
                                 })
+                        })
+                        .child({
+                            // Result sits right next to the button (no extra
+                            // row above the footer).
+                            let cell = test_cell.clone();
+                            let state = cell.borrow();
+                            match &*state {
+                                TestState::Idle => div().into_any_element(),
+                                TestState::Testing => div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child("Testing…")
+                                    .into_any_element(),
+                                TestState::Ok => div()
+                                    .text_xs()
+                                    .text_color(cx.theme().success)
+                                    .child("Success")
+                                    .into_any_element(),
+                                TestState::Err(msg) => div()
+                                    .text_xs()
+                                    .text_color(cx.theme().danger)
+                                    .max_w(px(200.))
+                                    .overflow_hidden()
+                                    .child(msg.clone())
+                                    .into_any_element(),
+                            }
                         })
                         .child(div().flex_1())
                         .child(
