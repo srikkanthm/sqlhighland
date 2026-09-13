@@ -18,6 +18,22 @@ the GUI's platform toolchain (Xcode/Metal on the current macOS target).
 
 The binary (`main.rs`) is a thin launcher over `app::SqlHighlandView`.
 
+## Engine & platform seams
+
+A second database engine plugs in without touching the UI/run plumbing:
+
+- `DbClient` (`db.rs`) — the driver: connect/exec/txn plus the incremental
+  cursor API (`start_query`/`fetch_more`/`close_cursor`, default `run_query`).
+  Sessions are `SharedSession = Arc<Mutex<Box<dyn DbClient>>>`.
+- `SessionPool::get_or_create(id, engine)` (`session.rs`) — constructs the
+  concrete session per `DbEngine` via `new_session` (one match arm per engine).
+- `MetadataProvider` / `provider_for(engine)` (`metadata.rs`) — dictionary
+  fetching; `browser.rs` names only the provider.
+- `SchemaProvider` (`schema.rs`) — tree shaping + describe SQL.
+
+Platform seams: `keychain` (OS keychain via the `keyring` crate) and `fsutil`
+(owner-only perms: Unix mode bits, Windows `icacls`).
+
 ## Module map
 
 ```

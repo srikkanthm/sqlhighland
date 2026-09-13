@@ -15,8 +15,8 @@ zeroization, tab-id path safety), the Tier 3 remainder (§3 lock policy and
 logging, plus an MSRV CI job), cross-platform P0 (§6.1 home-dir resolution),
 and port hardening P1/P2 (§6.2 Windows ACLs, §6.4 Linux/Windows check jobs) are
 fixed — see the change sets at the end. Later change sets add P3 (cross-platform
-keychain backends, §6.3) and P4 (view-state grouping, §6.6). §6 tracks any
-remaining cross-platform / second-engine work.
+keychain backends, §6.3), P4 (view-state grouping, §6.6), and P5 (second-engine
+plumbing, §6.5). §6 tracks any remaining cross-platform / second-engine work.
 
 ## 1. Security
 
@@ -204,14 +204,16 @@ and the kit's Linux/Windows support are unproven. Flip them blocking once
 verified. Windows still isn't a plain `cargo check`: `oracledb` → rustls pulls
 `aws-lc-sys`, which needs a native C toolchain (MSVC/CMake/NASM).
 
-### 6.5 Second-engine plumbing — open
-`DbClient` / `SchemaProvider` / `DbEngine` are real seams, but the session layer
-is Oracle-concrete: `SessionPool` = `HashMap<String, Arc<Mutex<OracledbSession>>>`
-(`session.rs`), `FetchState.session` (`app/results.rs`), and the run/export
-signatures (`run/query.rs`, `run/export.rs`). The `DbClient` trait has no
-incremental-cursor API (`start_query`/`fetch_more` live on `OracledbSession`),
-and the metadata fetchers are Oracle dictionary SQL. A second engine needs its
-own cursor + metadata + dialect module.
+### 6.5 Second-engine plumbing — **FIXED (P5)**
+The session layer is engine-agnostic: `DbClient` carries the incremental cursor
+API (`start_query` / `fetch_more` / `close_cursor`, with a default `run_query`),
+sessions are `SharedSession = Arc<Mutex<Box<dyn DbClient>>>`, and
+`SessionPool::get_or_create(id, engine)` constructs the concrete session per
+`DbEngine` (the `new_session` match). Metadata fetching sits behind a
+`MetadataProvider` trait reached via `provider_for(engine)`, so `browser.rs`
+names only the provider, never Oracle. A second engine implements `DbClient` +
+`MetadataProvider` (and its `SchemaProvider`), plus its own dialect module — no
+changes to the run / export / browser plumbing.
 
 ### 6.6 View-state breadth — **FIXED (P4)**
 `SqlHighlandView` dropped from ~44 fields to 21 by grouping the connection
@@ -316,3 +318,17 @@ per-connection caches + schema-browser (`BrowserState`) into focused structs in
   Secret Service, replacing the Apple module and the non-Apple stubs.
 - `src/model.rs`: `default_for_new()` now prefers `Keychain` on Windows too.
 - Fixes §6.3; 119 lib tests green, clippy clean, MSRV (1.89) verified.
+
+## Change set — engine seams (P5)
+
+- `src/db.rs`: `DbClient` gains the incremental cursor API (`start_query`,
+  `fetch_more`, `close_cursor`, default `query_id`/`run_query`) and a `Send`
+  bound; new `SharedSession = Arc<Mutex<Box<dyn DbClient>>>`.
+- `src/session.rs`: `SessionPool` stores `SharedSession` and builds the
+  concrete session per `DbEngine` via `new_session`; `get_or_create` takes the
+  engine.
+- `src/metadata.rs`: `MetadataProvider` trait + `OracleMetadata` impl +
+  `provider_for(engine)`; fetchers take `&mut dyn DbClient`.
+- `src/app/results.rs`, `src/run/*`, `src/browser.rs`: use `SharedSession` and
+  the provider; no code names `OracledbSession` outside `db.rs`.
+- Fixes §6.5; 120 lib tests green, clippy clean, MSRV verified.
