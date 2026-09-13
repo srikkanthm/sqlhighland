@@ -844,5 +844,7 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   expected Info.plist keys (bundle id, executable `sqlhighland`,
   `LSMinimumSystemVersion`, `LSApplicationCategoryType`, icon), the bundle
   launches, and the DMG mounts with the app + `Applications` symlink.
-- Output is **unsigned** (Gatekeeper warns off-machine). Signing/notarization
-  and the icon/verify recipes: `docs/PACKAGING.md`.
+- Output is **unsigned by design** — signing/notarization is intentionally out
+  of scope. Distribution to other Macs needs a Gatekeeper unlock
+  (right-click → Open, or `xattr -dr com.apple.quarantine`). Signing steps (if
+  ever needed) + the icon/verify recipes: `docs/PACKAGING.md`.

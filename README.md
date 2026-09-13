@@ -114,9 +114,9 @@ Artifacts land in `dist/` (git-ignored): `SQLHighland.app` and
 `SQLHighland_<version>_<arch>.dmg`. Builds target **Apple Silicon
 (arm64) only** — no Intel or universal binary. Config is in
 `[package.metadata.packager]` (Cargo.toml); the app icon source is
-`assets/icon/icon.svg`. The current output is unsigned — see
-[`docs/PACKAGING.md`](docs/PACKAGING.md) for signing/notarization and the
-icon pipeline.
+`assets/icon/icon.svg`. Output is intentionally **unsigned** — see
+[`docs/PACKAGING.md`](docs/PACKAGING.md) for the Gatekeeper/`xattr` note, the
+icon pipeline, and signing steps if ever needed.
 
 ## Troubleshooting
 

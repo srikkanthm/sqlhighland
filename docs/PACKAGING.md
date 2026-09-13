@@ -4,7 +4,7 @@ How SQLHighland is bundled into a native `.app` and `.dmg` using
 [CrabNebula's `cargo-packager`](https://github.com/crabnebula-dev/cargo-packager).
 
 Status: produces a working **unsigned** arm64 `.app` + `.dmg` today. Code
-signing / notarization is not wired up yet (§5).
+signing / notarization is **intentionally out of scope** (§5).
 
 ---
 
@@ -82,16 +82,37 @@ rm -rf icon.iconset
 The packager writes the icon into `SQLHighland.app/Contents/Resources/icon.icns`
 and sets `CFBundleIconFile`.
 
-## 5. Signing & notarization (not configured)
+## 5. Signing & notarization — intentionally out of scope
 
-The produced app is **unsigned**. On another Mac, Gatekeeper will refuse the
-first launch: right-click → Open, or clear the quarantine flag:
+SQLHighland ships **unsigned** by design: no Developer ID, no hardened runtime,
+no notarization, and none planned for now. That is fine for local use and
+self-built artifacts, but an unsigned app downloaded to another Mac is
+quarantined by Gatekeeper and blocked on first launch.
 
-```sh
-xattr -dr com.apple.quarantine /Applications/SQLHighland.app
-```
+### Running an unsigned build on another Mac
 
-To ship properly signed outside your machine you need an Apple Developer ID:
+When a `.dmg`/`.app` is downloaded (browser, AirDrop, etc.), macOS tags it with
+the `com.apple.quarantine` extended attribute, and Gatekeeper refuses the first
+launch. Two ways past it:
+
+- Right-click (Control-click) the app → **Open**, then confirm in the dialog.
+  Per-app, needed only once.
+- Or delete the quarantine attribute from the installed app:
+
+  ```sh
+  xattr -dr com.apple.quarantine /Applications/SQLHighland.app
+  ```
+
+  `-d` deletes the attribute and `-r` recurses into the bundle — the quarantine
+  flag lands on the bundle *and* its nested executables, so the recursive form
+  is what actually clears it. Use `xattr -lr /Applications/SQLHighland.app` to
+  inspect attributes without changing anything.
+
+> Only do this for a build you trust — it bypasses Gatekeeper's malware check.
+
+### If signing is ever wanted
+
+The packager supports it with no code changes:
 
 - `macos.signing-identity = "Developer ID Application: NAME (TEAMID)"`
 - `macos.entitlements = "path/to/entitlements.plist"` (hardened runtime;
@@ -102,7 +123,7 @@ To ship properly signed outside your machine you need an Apple Developer ID:
 
 The certificate bytes / password (`signing-certificate`,
 `signing-certificate-password`) can only be passed through the CLI, never the
-config file. None of this is set up yet.
+config file.
 
 ## 6. Architecture: Apple Silicon only
 
