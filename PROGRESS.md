@@ -660,3 +660,18 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   (toggle, dialog open, zoom steps, height bounds +48, pane copy
   exact-match, dismiss states); clean `clippy`, 108 lib +
   menus/themes/browser_tree green.
+
+## Autocomplete scope-nesting fixes (2026-09-12)
+
+- `@`-line with a quoted path killed every popup below it: word_prefix
+  treated any earlier `"` as opening a quoted identifier, swallowing
+  the whole buffer tail as the "prefix" (reproduced as
+  `(";\nSELECT * FROM em", 27)`). Fixed with line-scoped,
+  escape-aware parity.
+- Same family in is_trivia_position (gates completion+hover+define):
+  apostrophes in `--` comments, quotes in closed `/* */` blocks, and
+  `--`/`/*`/`"` inside string literals each vetoed all later popups.
+  Both now share one scope-aware lexer (scan_head); genuinely open
+  quotes behave exactly as before.
+- Verified: 7 new unit tests (fail-before/pass-after), 110 lib +
+  menus/themes/browser_tree green, clean clippy, GUI builds.

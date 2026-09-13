@@ -98,7 +98,11 @@ pub fn word_prefix(text: &str, offset: usize) -> (String, usize) {
     let offset = offset.min(text.len());
     let head = &text[..offset];
     // Quoted: cursor inside `"...` — take back to the opening quote.
-    if let Some(q) = head.rfind('"') {
+    // The opener comes from the scope-aware scan (not a bare rfind):
+    // a closed pair — on this line or an earlier one, e.g. an @-script
+    // `"path"` — must never claim the prefix. It used to swallow the
+    // whole buffer tail and kill every popup below line 1.
+    if let Some(q) = scan_head(head).1 {
         let inner = &head[q + 1..];
         if inner.chars().all(|c| c != '"') && !inner.is_empty() {
             return (inner.to_string(), q + 1);
@@ -116,6 +120,80 @@ pub fn word_prefix(text: &str, offset: usize) -> (String, usize) {
         .map(|(i, _)| i)
         .unwrap_or(offset);
     (head[start..].to_string(), start)
+}
+
+/// Lexer scopes for scanning a buffer head with correct nesting:
+///
+/// - quotes inside comments never count (apostrophes in `-- don't`),
+/// - comment markers inside strings never count (`'--'`, `'/*'`),
+/// - `''` / `""` are single escaped quotes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HeadScope {
+    Code,
+    LineComment,
+    BlockComment,
+    SingleString,
+    DoubleString,
+}
+
+/// Scan `head` (text before the cursor): whether the cursor sits inside
+/// trivia (comment/string — no suggestions/cards there), plus the byte
+/// offset of a `"` opening an unterminated quoted identifier, if any.
+///
+/// A single pass serves both questions so they can never disagree about
+/// scope. Byte-stepping is safe: only ASCII markers are compared, and
+/// ASCII bytes never appear inside multi-byte UTF-8 sequences.
+fn scan_head(head: &str) -> (bool, Option<usize>) {
+    let b = head.as_bytes();
+    let mut i = 0;
+    let mut scope = HeadScope::Code;
+    let mut open_double: Option<usize> = None;
+    while i < b.len() {
+        match scope {
+            HeadScope::Code => match b[i] {
+                b'\'' => scope = HeadScope::SingleString,
+                b'"' => {
+                    open_double = Some(i);
+                    scope = HeadScope::DoubleString;
+                }
+                b'-' if b.get(i + 1) == Some(&b'-') => scope = HeadScope::LineComment,
+                b'/' if b.get(i + 1) == Some(&b'*') => scope = HeadScope::BlockComment,
+                _ => {}
+            },
+            HeadScope::LineComment => {
+                if b[i] == b'\n' {
+                    scope = HeadScope::Code;
+                }
+            }
+            HeadScope::BlockComment => {
+                if b[i] == b'*' && b.get(i + 1) == Some(&b'/') {
+                    scope = HeadScope::Code;
+                    i += 1;
+                }
+            }
+            HeadScope::SingleString => {
+                if b[i] == b'\'' {
+                    if b.get(i + 1) == Some(&b'\'') {
+                        i += 1;
+                    } else {
+                        scope = HeadScope::Code;
+                    }
+                }
+            }
+            HeadScope::DoubleString => {
+                if b[i] == b'"' {
+                    if b.get(i + 1) == Some(&b'"') {
+                        i += 1;
+                    } else {
+                        scope = HeadScope::Code;
+                        open_double = None;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    (scope != HeadScope::Code, open_double)
 }
 
 /// Full word under byte `offset`: returns (word, start). Hover semantics —
@@ -397,38 +475,13 @@ pub fn allows_empty_prefix(text: &str, offset: usize) -> bool {
     )
 }
 /// True when `offset` sits inside a string literal, quoted identifier, or
-/// comment — positions where suggestions must never trigger. Scans the
-/// current line for `--` and the whole head for unclosed `'`/`"`/`/*`.
+/// comment — positions where suggestions must never trigger. A single
+/// scope-aware scan: quotes inside comments never count (apostrophes in
+/// `-- don't`), comment markers inside strings never count (`'--'`,
+/// `'/*'`), and `''` / `""` are escaped quotes.
 pub fn is_trivia_position(text: &str, offset: usize) -> bool {
     let offset = offset.min(text.len());
-    let head = &text[..offset];
-    // Line comment: `--` after the last newline with no newline after it.
-    let line_start = head.rfind('\n').map(|i| i + 1).unwrap_or(0);
-    if head[line_start..].contains("--") {
-        return true;
-    }
-    // Block comment: unclosed `/*`.
-    let opens = head.matches("/*").count();
-    let closes = head.matches("*/").count();
-    if opens > closes {
-        return true;
-    }
-    // String / quoted identifier: odd unescaped quote count.
-    let mut singles = 0u32;
-    let mut doubles = 0u32;
-    let mut chars = head.chars();
-    while let Some(c) = chars.next() {
-        if c == '\'' {
-            if chars.clone().next() == Some('\'') {
-                chars.next();
-            } else {
-                singles += 1;
-            }
-        } else if c == '"' {
-            doubles += 1;
-        }
-    }
-    singles % 2 == 1 || doubles % 2 == 1
+    scan_head(&text[..offset]).0
 }
 /// Column names (uppercase) appearing in more than one scope table.
 /// Inserting those bare is ambiguous SQL — callers qualify them.
@@ -1476,6 +1529,35 @@ mod tests {
     }
 
     #[test]
+    fn prefix_ignores_closed_quotes_on_earlier_lines() {
+        // @-script path on line 1 must not claim prefixes below it.
+        let text = "@\"/Users/srikanth/test.sql\";\nSELECT * FROM em";
+        assert_eq!(
+            word_prefix(text, text.len()),
+            ("em".to_string(), 43)
+        );
+        // Same-line closed pair: the completed "B" is not an open quote.
+        let text = "SELECT \"B\" FROM emp WHERE x = em";
+        assert_eq!(
+            word_prefix(text, text.len()),
+            ("em".to_string(), 30)
+        );
+        // Genuinely open quotes still win, on any line.
+        let text = "@\"/x.sql\";\nSELECT \"Mixed";
+        assert_eq!(
+            word_prefix(text, text.len()),
+            ("Mixed".to_string(), 19)
+        );
+        // Escaped "" pairs don't confuse parity.
+        assert_eq!(word_prefix("SELECT \"A\"\"B", 13), ("B".to_string(), 11));
+        // Quotes inside comments/single-quoted strings never claim prefixes.
+        let text = "/* say \"hi */ SELECT em";
+        assert_eq!(word_prefix(text, text.len()), ("em".to_string(), 21));
+        let text = "SELECT 'a\"b' || em";
+        assert_eq!(word_prefix(text, text.len()), ("em".to_string(), 16));
+    }
+
+    #[test]
     fn word_at_extends_past_cursor() {
         // Mid-word pointer (the hover case): full word, same start.
         assert_eq!(
@@ -1753,6 +1835,29 @@ mod tests {
         assert!(!is_trivia_position("SELECT /* shut */ 1", 18));
         assert!(!is_trivia_position("SELECT emp", 10));
         assert!(is_trivia_position("SELECT \"AB", 10));
+    }
+
+    #[test]
+    fn trivia_respects_scope_nesting() {
+        // Apostrophe in a line comment must not poison later lines.
+        let text = "-- don't do this\nSELECT em";
+        assert!(!is_trivia_position(text, text.len()));
+        // Quotes inside a closed block comment never count.
+        let text = "/* it's \"quoted\" */\nSELECT em";
+        assert!(!is_trivia_position(text, text.len()));
+        // Comment markers inside strings never count.
+        let text = "SELECT '--' || em";
+        assert!(!is_trivia_position(text, text.len()));
+        let text = "SELECT '/*' || em";
+        assert!(!is_trivia_position(text, text.len()));
+        // A quote inside a single-quoted string is content, not scope.
+        let text = "SELECT 'a\"b' || em";
+        assert!(!is_trivia_position(text, text.len()));
+        // ...but real scopes still gate.
+        let text = "-- don't\nSELECT 'open";
+        assert!(is_trivia_position(text, text.len()));
+        let text = "SELECT 'it''s' || 'open";
+        assert!(is_trivia_position(text, text.len()));
     }
 
     #[test]
