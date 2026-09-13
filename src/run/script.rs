@@ -307,6 +307,9 @@ impl SqlHighlandView {
             // Developer parity: scripts never show a grid). Capped so a
             // 500-statement migration doesn't explode the layout.
             let mut trail: Vec<String> = Vec::new();
+            // Interrupt handle captured from the (possibly lazily connected)
+            // session, so later statements in the script can be cancelled.
+            let mut cancel_token: Option<Arc<dyn crate::db::CancelToken>> = None;
             for (i, stmt) in statements.iter().enumerate() {
                 // Cancel/close checkpoint between statements.
                 let cont = view
@@ -331,7 +334,7 @@ impl SqlHighlandView {
                 let cfg_c = cfg.clone();
                 let session_bg = session.clone();
                 let bg_c = bg.clone();
-                let (result, ms) = bg_c
+                let (result, ms, cancel) = bg_c
                     .spawn(async move {
                         let started = std::time::Instant::now();
                         let mut session = lock(&session_bg);
@@ -353,9 +356,13 @@ impl SqlHighlandView {
                                     .map_err(|e| e.to_string()),
                             }
                         })();
-                        (result, started.elapsed().as_millis())
+                        let cancel = session.cancel_token();
+                        (result, started.elapsed().as_millis(), cancel)
                     })
                     .await;
+                if cancel.is_some() {
+                    cancel_token = cancel;
+                }
                 total_ms += ms;
                 executed = i + 1;
                 match result {
@@ -383,6 +390,11 @@ impl SqlHighlandView {
                 }
             }
             view.update(cx, |this, cx| {
+                // Remember the interrupt handle for future Cancel clicks (the
+                // connection outlives this script).
+                if cancel_token.is_some() {
+                    this.pool.set_cancel_token(&conn_id_bg, cancel_token);
+                }
                 let Some(ix) = this.tab_index(&tab_id) else {
                     return; // Tab closed while running.
                 };

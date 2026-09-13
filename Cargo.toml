@@ -44,6 +44,16 @@ default = []
 # Build/run the desktop app with: cargo run --features gui
 gui = ["dep:gpui", "dep:gpui-kit", "dep:gpui-kit-assets", "dep:lsp-types"]
 
+# Plain-TCP query cancellation, added on top of upstream `main` in this fork.
+# Pinned to an exact commit so builds are reproducible; bump the rev when the
+# fork changes.
+#
+# Only flat TCP connections get a cancel handle (TLS/TCPS returns
+# "not supported"), so callers must keep the existing client-side abandon as a
+# fallback.
+[patch.crates-io]
+oracledb = { git = "https://github.com/srikkanthm/rust-oracledb", rev = "49bb38a05fd2fe325361726ea016216f3eacbd9b" }
+
 [[bin]]
 name = "sqlhighland"
 path = "src/main.rs"

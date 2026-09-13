@@ -4944,9 +4944,8 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "oracledb"
-version = "26.0.0-beta.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f9af8674256d8417b17b2e9e86a304cb637b881ffa9bc817d58b98c7b49457d"
+version = "26.0.0-beta.4"
+source = "git+https://github.com/srikkanthm/rust-oracledb?rev=49bb38a05fd2fe325361726ea016216f3eacbd9b#49bb38a05fd2fe325361726ea016216f3eacbd9b"
 dependencies = [
  "aes 0.9.3",
  "base16ct",
@@ -4958,6 +4957,7 @@ dependencies = [
  "rand 0.10.2",
  "rustls",
  "sha2 0.11.0",
+ "socket2",
  "uuid",
  "webpki-roots",
  "whoami",

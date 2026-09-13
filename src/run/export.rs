@@ -140,6 +140,11 @@ fn export_drain_blocking(
                 Ok(p) => p,
                 Err(e) => {
                     let _ = std::fs::remove_file(&tmp);
+                    // A real interrupt (token) aborts the in-flight fetch and
+                    // lands here; treat it as a cancel, not a failure.
+                    if cancel.load(Ordering::Relaxed) {
+                        return ExportOutcome::Cancelled(rows);
+                    }
                     return ExportOutcome::Failed(e.to_string());
                 }
             };
@@ -221,7 +226,19 @@ impl SqlHighlandView {
         if let Some(flag) = t.export_cancel.clone() {
             flag.store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        t.result_meta = "Cancelling export…".into();
+        let conn_id = t.connection_id.clone();
+        // Also interrupt the in-flight fetch so a slow page doesn't stall the
+        // cancel until the server would have replied anyway.
+        if let Some(conn_id) = conn_id {
+            if let Some(token) = self.pool.cancel_token(&conn_id) {
+                if let Err(e) = token.cancel() {
+                    crate::logging::warn(format!("cancel request failed: {e}"));
+                }
+            }
+        }
+        if let Some(t) = self.tab_by_id(tab_id) {
+            t.result_meta = "Cancelling export…".into();
+        }
         cx.notify();
     }
 

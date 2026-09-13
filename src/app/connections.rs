@@ -152,16 +152,19 @@ impl SqlHighlandView {
         let bg = cx.background_executor().clone();
         let view = cx.entity().downgrade();
         cx.spawn(async move |_, cx| {
-            let outcome = bg
+            let (outcome, cancel) = bg
                 .spawn(async move {
                     let mut guard = lock(&session);
                     match guard.connect(&cfg) {
-                        Ok(()) => WorkOutcome::Connected,
-                        Err(e) => WorkOutcome::Failed(e.to_string()),
+                        Ok(()) => (WorkOutcome::Connected, guard.cancel_token()),
+                        Err(e) => (WorkOutcome::Failed(e.to_string()), None),
                     }
                 })
                 .await;
             view.update(cx, |this, cx| {
+                if cancel.is_some() {
+                    this.pool.set_cancel_token(&conn_id, cancel);
+                }
                 match outcome {
                     // Success/failure notices are transient events. Live
                     // connection *state* is never stored as text — the status

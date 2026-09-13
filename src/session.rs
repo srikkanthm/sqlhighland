@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::db::{DbClient, OracledbSession, SharedSession};
+use crate::db::{CancelToken, DbClient, OracledbSession, SharedSession};
 use crate::schema::DbEngine;
 
 /// Poison-tolerant guard for session-adjacent locks (session, grid data,
@@ -41,6 +41,10 @@ pub(crate) fn throwaway_session(engine: DbEngine) -> SharedSession {
 #[derive(Default)]
 pub struct SessionPool {
     sessions: HashMap<String, SharedSession>,
+    /// Cancel tokens per connection, captured when a session connects (plain
+    /// TCP Oracle only). Held outside the session mutex so the UI can
+    /// interrupt an in-flight query without blocking on it.
+    cancel_tokens: HashMap<String, Arc<dyn CancelToken>>,
 }
 
 impl SessionPool {
@@ -56,11 +60,25 @@ impl SessionPool {
             .clone()
     }
 
+    /// Record the cancel token for a connected session. `None` (e.g. TLS) is a
+    /// no-op, leaving any previously captured token in place.
+    pub fn set_cancel_token(&mut self, connection_id: &str, token: Option<Arc<dyn CancelToken>>) {
+        if let Some(token) = token {
+            self.cancel_tokens.insert(connection_id.to_string(), token);
+        }
+    }
+
+    /// The cancel token for a connection, if its session can be interrupted.
+    pub fn cancel_token(&self, connection_id: &str) -> Option<Arc<dyn CancelToken>> {
+        self.cancel_tokens.get(connection_id).cloned()
+    }
+
     /// Drop a connection's session, disconnecting first. Never blocks: if a
     /// query holds the session lock (e.g. disconnect clicked mid-run), the
     /// entry is dropped and the worker's own Arc keeps its session alive
     /// until it finishes — its results are still guarded by run tokens.
     pub fn remove(&mut self, connection_id: &str) {
+        self.cancel_tokens.remove(connection_id);
         if let Some(session) = self.sessions.remove(connection_id) {
             if let Ok(mut guard) = session.try_lock() {
                 guard.disconnect();
@@ -88,6 +106,7 @@ impl SessionPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::DbError;
 
     #[test]
     fn same_id_returns_shared_session() {
@@ -120,5 +139,31 @@ mod tests {
         assert_eq!(*lock(&m), 41);
         *lock(&m) = 42;
         assert_eq!(*lock(&m), 42);
+    }
+
+    struct FakeToken;
+
+    impl CancelToken for FakeToken {
+        fn cancel(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn cancel_token_registry_lifecycle() {
+        let mut pool = SessionPool::new();
+        assert!(pool.cancel_token("db1").is_none());
+
+        let token: Arc<dyn CancelToken> = Arc::new(FakeToken);
+        pool.set_cancel_token("db1", Some(token));
+        assert!(pool.cancel_token("db1").is_some());
+
+        // A `None` update (e.g. a TLS session) must not clobber a known token.
+        pool.set_cancel_token("db1", None);
+        assert!(pool.cancel_token("db1").is_some());
+
+        // Removing the session forgets its token.
+        pool.remove("db1");
+        assert!(pool.cancel_token("db1").is_none());
     }
 }

@@ -247,11 +247,17 @@ impl SqlHighlandView {
                                 .map_err(|e| e.to_string()),
                         }
                     })();
-                    (result, started.elapsed().as_millis())
+                    let cancel = session.cancel_token();
+                    (result, started.elapsed().as_millis(), cancel)
                 })
                 .await;
-            let (outcome, elapsed_ms) = outcome;
+            let (outcome, elapsed_ms, cancel) = outcome;
             view.update(cx, |this, cx| {
+                // Remember the interrupt handle for future Cancel clicks (the
+                // connection outlives this run).
+                if cancel.is_some() {
+                    this.pool.set_cancel_token(&conn_id_bg, cancel);
+                }
                 let Some(ix) = this.tab_index(&tab_id) else {
                     return; // Tab closed while running.
                 };
@@ -358,10 +364,12 @@ impl SqlHighlandView {
         .detach();
     }
 
-    /// Cancel the tab's in-flight run (client-side abandon — see
-    /// `run_token`). The worker keeps its session lock until the server
-    /// responds, so a same-connection re-run queues behind it; its results
-    /// are discarded on arrival and the fresh run proceeds normally.
+    /// Cancel the tab's in-flight run.
+    ///
+    /// When the backend/transport can truly interrupt (plain-TCP Oracle), a
+    /// server-side break is sent first so the statement actually stops and the
+    /// session is freed. The client-side `run_token` bump is kept as the
+    /// fallback (TLS, other engines) and to discard any late results.
     pub(crate) fn cancel_run(&mut self, tab_id: &str, cx: &mut Context<Self>) {
         let Some(t) = self.tab_by_id(tab_id) else {
             return;
@@ -369,6 +377,17 @@ impl SqlHighlandView {
         if !t.busy {
             return;
         }
+        let conn_id = t.connection_id.clone();
+        // Fire the real interrupt outside the tab borrow (it doesn't need the
+        // session mutex, so it can't block the UI even mid-query).
+        if let Some(conn_id) = conn_id {
+            if let Some(token) = self.pool.cancel_token(&conn_id) {
+                if let Err(e) = token.cancel() {
+                    crate::logging::warn(format!("cancel request failed: {e}"));
+                }
+            }
+        }
+        let t = self.tab_by_id(tab_id).expect("checked above");
         t.run_token = t.run_token.wrapping_add(1);
         t.busy = false;
         t.run_started = None;

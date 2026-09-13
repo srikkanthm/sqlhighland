@@ -99,6 +99,30 @@ pub trait DbClient: Send {
     fn exec(&mut self, sql: &str, binds: &[BindParam]) -> Result<(u64, u128), DbError>;
     fn commit(&mut self) -> Result<(), DbError>;
     fn rollback(&mut self) -> Result<(), DbError>;
+
+    /// A token that can interrupt this session's in-flight operation from
+    /// another thread without locking the session. `None` when the backend or
+    /// transport cannot truly cancel (e.g. TLS), in which case callers fall
+    /// back to discarding late results.
+    fn cancel_token(&self) -> Option<Arc<dyn CancelToken>> {
+        None
+    }
+}
+
+/// Cancels an in-flight operation on a session. Implementations must be usable
+/// while the originating query still holds the session mutex (the Oracle
+/// driver writes an interrupt on an independent socket path).
+pub trait CancelToken: Send + Sync {
+    fn cancel(&self) -> Result<(), DbError>;
+}
+
+/// Oracle cancellation: wraps a driver [`oracledb::CancelHandle`].
+struct OracleCancelToken(Arc<oracledb::CancelHandle>);
+
+impl CancelToken for OracleCancelToken {
+    fn cancel(&self) -> Result<(), DbError> {
+        self.0.cancel().map_err(DbError::from)
+    }
 }
 
 /// Shared, thread-safe session handle: one per saved connection, used from the
@@ -138,6 +162,8 @@ pub struct OracledbSession {
     /// Lookahead row consumed to detect end-of-data; prepended to next page.
     pending: Option<oracledb::Row>,
     query_id: u64,
+    /// Independent interrupt handle for the live connection (plain TCP only).
+    cancel: Option<Arc<oracledb::CancelHandle>>,
 }
 
 impl OracledbSession {
@@ -148,6 +174,7 @@ impl OracledbSession {
             columns: Vec::new(),
             pending: None,
             query_id: 0,
+            cancel: None,
         }
     }
 
@@ -391,6 +418,11 @@ impl From<oracledb::Error> for DbError {
                 "Query timed out after {secs}s (query timeout setting)"
             ));
         }
+        // The server aborted the statement because we sent an interrupt; the
+        // connection itself is still usable.
+        if err.kind() == &oracledb::ErrorKind::Cancelled {
+            return Self("Query cancelled".to_string());
+        }
         Self(err.to_string())
     }
 }
@@ -415,6 +447,9 @@ impl DbClient for OracledbSession {
             .set_connect_string(&cfg.connect_string())
             .map_err(DbError::from)?;
         let conn = oracledb::connect(ora_cfg).map_err(DbError::from)?;
+        // Capture the interrupt handle before moving the connection (plain TCP
+        // only; `Err` for TLS leaves cancel unavailable).
+        self.cancel = conn.cancel_handle().ok().map(Arc::new);
         self.conn = Some(conn);
         // Fresh connection: no cursor can be open.
         self.cursor = None;
@@ -435,6 +470,7 @@ impl DbClient for OracledbSession {
         self.cursor = None;
         self.pending = None;
         self.columns.clear();
+        self.cancel = None;
         self.conn = None;
     }
 
@@ -470,6 +506,12 @@ impl DbClient for OracledbSession {
 
     fn rollback(&mut self) -> Result<(), DbError> {
         OracledbSession::rollback(self)
+    }
+
+    fn cancel_token(&self) -> Option<Arc<dyn CancelToken>> {
+        self.cancel
+            .as_ref()
+            .map(|h| Arc::new(OracleCancelToken(h.clone())) as Arc<dyn CancelToken>)
     }
 }
 
