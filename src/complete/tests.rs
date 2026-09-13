@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::metadata::TableKind;
+use crate::metadata::{ColumnMeta, MetadataCache};
 
 #[test]
 fn prefix_extracts_word_and_offset() {
@@ -15,22 +16,13 @@ fn prefix_extracts_word_and_offset() {
 fn prefix_ignores_closed_quotes_on_earlier_lines() {
     // @-script path on line 1 must not claim prefixes below it.
     let text = "@\"/Users/srikanth/test.sql\";\nSELECT * FROM em";
-    assert_eq!(
-        word_prefix(text, text.len()),
-        ("em".to_string(), 43)
-    );
+    assert_eq!(word_prefix(text, text.len()), ("em".to_string(), 43));
     // Same-line closed pair: the completed "B" is not an open quote.
     let text = "SELECT \"B\" FROM emp WHERE x = em";
-    assert_eq!(
-        word_prefix(text, text.len()),
-        ("em".to_string(), 30)
-    );
+    assert_eq!(word_prefix(text, text.len()), ("em".to_string(), 30));
     // Genuinely open quotes still win, on any line.
     let text = "@\"/x.sql\";\nSELECT \"Mixed";
-    assert_eq!(
-        word_prefix(text, text.len()),
-        ("Mixed".to_string(), 19)
-    );
+    assert_eq!(word_prefix(text, text.len()), ("Mixed".to_string(), 19));
     // Escaped "" pairs don't confuse parity.
     assert_eq!(word_prefix("SELECT \"A\"\"B", 13), ("B".to_string(), 11));
     // Quotes inside comments/single-quoted strings never claim prefixes.
@@ -53,16 +45,16 @@ fn word_at_extends_past_cursor() {
     );
     // End-of-word: identical to the prefix.
     let sql = "SELECT FIRST_NAME FROM SYSTEM.EMPLOYEES";
-    assert_eq!(
-        word_at(sql, 39),
-        ("EMPLOYEES".to_string(), 30)
-    );
+    assert_eq!(word_at(sql, 39), ("EMPLOYEES".to_string(), 30));
     // Non-word positions stay empty; on `.` the word before holds
     // (unchanged legacy behavior — resolves to no card downstream).
     assert_eq!(word_at("SELECT a.b", 8), ("a".to_string(), 7));
     assert_eq!(word_at("SELECT ", 7), ("".to_string(), 7));
     // Quoted: inner name, no quotes.
-    assert_eq!(word_at("SELECT \"MixedCase\" FROM t", 12), ("MixedCase".to_string(), 8));
+    assert_eq!(
+        word_at("SELECT \"MixedCase\" FROM t", 12),
+        ("MixedCase".to_string(), 8)
+    );
 }
 
 #[test]
@@ -346,8 +338,7 @@ fn trivia_respects_scope_nesting() {
 #[test]
 fn detect_join_on_finds_fresh_condition() {
     let aliases = build_alias_map("SELECT * FROM emp e JOIN dept d ON ");
-    let (alias, tref) =
-        detect_join_on("SELECT * FROM emp e JOIN dept d ON ", &aliases).unwrap();
+    let (alias, tref) = detect_join_on("SELECT * FROM emp e JOIN dept d ON ", &aliases).unwrap();
     assert_eq!(alias, "d");
     assert_eq!(tref.name, "dept");
     // AS alias + owner-qualified.
@@ -363,9 +354,7 @@ fn detect_join_on_finds_fresh_condition() {
     assert!(detect_join_on("SELECT * FROM emp e JOIN dept d", &aliases).is_none());
     // Condition already started → None (v1: first condition only).
     assert!(detect_join_on("SELECT * FROM emp e JOIN dept d ON e.x = 1", &aliases).is_none());
-    assert!(
-        detect_join_on("SELECT * FROM emp e JOIN dept d ON e.x = 1 AND ", &aliases).is_none()
-    );
+    assert!(detect_join_on("SELECT * FROM emp e JOIN dept d ON e.x = 1 AND ", &aliases).is_none());
     // Quoted JOIN prose doesn't fool it.
     assert!(detect_join_on("SELECT 'join dept on ' FROM emp e", &aliases).is_none());
 }
@@ -532,12 +521,15 @@ fn hover_table_card_lists_columns() {
 
 #[test]
 fn display_name_bares_own_schema() {
-    assert_eq!(display_name(Some("SYSTEM"), "EMPLOYEES", "system"), "EMPLOYEES");
-    assert_eq!(display_name(Some("SYSTEM"), "EMPLOYEES", "SYSTEM"), "EMPLOYEES");
     assert_eq!(
-        display_name(Some("SCOTT"), "EMP", "HR"),
-        "SCOTT.EMP"
+        display_name(Some("SYSTEM"), "EMPLOYEES", "system"),
+        "EMPLOYEES"
     );
+    assert_eq!(
+        display_name(Some("SYSTEM"), "EMPLOYEES", "SYSTEM"),
+        "EMPLOYEES"
+    );
+    assert_eq!(display_name(Some("SCOTT"), "EMP", "HR"), "SCOTT.EMP");
     assert_eq!(display_name(None, "DUAL", "HR"), "DUAL");
     assert_eq!(display_name(Some(""), "DUAL", "HR"), "DUAL");
 }
@@ -563,8 +555,7 @@ fn hover_owner_table_resolves_directly() {
         }],
     );
     let aliases = build_alias_map("SELECT first_name FROM system.employees");
-    let md =
-        hover_markdown("EMPLOYEES", Some("SYSTEM"), &aliases, &cache, false, "HR").unwrap();
+    let md = hover_markdown("EMPLOYEES", Some("SYSTEM"), &aliases, &cache, false, "HR").unwrap();
     assert!(md.contains("**SYSTEM.EMPLOYEES**"), "{md}");
     assert!(md.contains("ID — NUMBER"), "{md}");
     // Dotted qualifier + column: `scott.emp.|ename`.
@@ -581,15 +572,7 @@ fn hover_owner_table_resolves_directly() {
             comments: "".into(),
         }],
     );
-    let md = hover_markdown(
-        "ENAME",
-        Some("scott.emp"),
-        &aliases,
-        &cache,
-        false,
-        "HR",
-    )
-    .unwrap();
+    let md = hover_markdown("ENAME", Some("scott.emp"), &aliases, &cache, false, "HR").unwrap();
     assert!(md.contains("**ENAME**"), "{md}");
     assert!(md.contains("emp · scott"), "{md}");
 }
@@ -664,7 +647,10 @@ fn describe_target_resolves_tables_only() {
         describe_target("nope", None, &aliases, &cache, false, "SCOTT"),
         None
     );
-    assert_eq!(describe_target("", None, &aliases, &cache, false, "SCOTT"), None);
+    assert_eq!(
+        describe_target("", None, &aliases, &cache, false, "SCOTT"),
+        None
+    );
 }
 
 #[test]
