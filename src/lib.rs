@@ -28,4 +28,6 @@ pub mod providers;
 #[cfg(feature = "gui")]
 pub mod browser;
 #[cfg(feature = "gui")]
+pub mod sidebar;
+#[cfg(feature = "gui")]
 pub mod bind_dialog;

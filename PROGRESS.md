@@ -761,3 +761,15 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   introduction deferred to Phase 3d (touches field layout + all users).
 - Verified: clean clippy --all-targets, 112 lib +
   menus/themes/browser_tree green, GUI builds, live serial 11/11.
+
+## Refactor Phase 3c — sidebar extracted (2026-09-13, uncommitted)
+
+- sidebar.rs (~426 lines): render_connection_row, render_sidebar,
+  toggle_sidebar, set_sidebar_collapsed (mechanical move). app.rs
+  4,110 → 3,708. ConnMenuOp/conn_menu_item pub(crate); sidebar
+  render calls cycle_tab/dismiss_results/open_sql_file/
+  save_active_tab(_as)/render_browser_tree pub(crate) in place.
+- Verified: clean clippy --all-targets, 112 lib +
+  menus/themes/browser_tree green, GUI builds, live serial 11/11
+  (one transient serial failure mid-phase, green on immediate
+  rerun x2 — live tests don't touch GUI code; environmental).
