@@ -22,4 +22,6 @@ pub mod connection_dialog;
 #[cfg(feature = "gui")]
 pub mod conn_picker;
 #[cfg(feature = "gui")]
+pub mod run;
+#[cfg(feature = "gui")]
 pub mod bind_dialog;

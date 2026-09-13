@@ -718,3 +718,26 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - Verified: temp headless probes for connection dialog (pills, cancel)
   and bind dialog (opens on pick, Enter submits) — since removed.
   Clean clippy, 112 lib + menus/themes/browser_tree green.
+
+## Refactor Phase 2b — run executors extracted (2026-09-13, uncommitted)
+
+- run.rs (~1,295 lines): start_run gate, script_base_dir,
+  start_script_run, run_buffer_as_script, start_script_common,
+  run_sql, run_script, cancel_run/export, start_export,
+  begin_export_drain, finish_export, mark_siblings_exhausted,
+  clear_pending — plus ExportOutcome, file_stem, unix_timestamp,
+  export_drain_blocking moved in (executor-side only).
+  app.rs 6,0xx → 4,732. All impl methods + shared struct fields
+  (QueryTab, FetchState, ResultData, SqlHighlandView) + helpers
+  (Output::info, ExportFormat::ext, ResultsDelegate::set_fetch,
+  with_password, effective_password, ensure_meta, bump_usage,
+  PendingPassword, TabKind, CopySel, ResultsDelegate) pub(crate);
+  with_password/effective_password/bump_usage/ensure_meta move
+  to final homes in Phase 3d. Unused-import trim + 6 pre-existing
+  needless_borrow cleanups (lock(&cache) → lock(cache)).
+- Verified: clean clippy --all-targets, 112 lib +
+  menus/themes/browser_tree green, GUI builds, live serial 11/11.
+  NOTE: parallel live suite flakes live_call_timeout_trips_and_survives
+  ("connection has been closed" instead of timeout) on clean 20164c9
+  too (2/4 base runs fail identically) — pre-existing timing flake
+  under parallel DB load, not from this refactor.
