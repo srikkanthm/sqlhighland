@@ -813,6 +813,10 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   is the working path (OOB plumbing stays for servers that accept it).
 - Fallback preserved: TLS/other engines, or a tab with no captured token,
   still use the `run_token` abandon.
+- TCPS/TLS is **not** covered (deferred; no TLS Oracle to test against):
+  Oracle disables OOB for TLS and the in-band marker can't be injected from
+  another thread. Candidate designs — cooperative in-band cancel (fork) and
+  server-side `ALTER SYSTEM CANCEL SQL` — are recorded in `CANCELLATION.md` §7.
 - New opt-in `tests/cancel_live.rs` (ignored; needs plain-TCP Oracle):
   15 s `dbms_lock.sleep` returned in ~3 s with `Cancelled`, connection
   reusable. Full details + upstream revert checklist: `CANCELLATION.md`.

@@ -1,8 +1,9 @@
 # Query cancellation — implementation & upstream revert guide
 
-Status: **shipped** 2026-09-13, backed by a **fork** of the `oracledb`
-driver. This document records what we changed, why, how to verify it, and
-**exactly how to drop the fork once upstream ships cancellation**.
+Status: **shipped** 2026-09-13 for **plain TCP only**, backed by a **fork**
+of the `oracledb` driver. TCPS/TLS is **deferred** — see §7. This document
+records what we changed, why, how to verify it, and **exactly how to drop the
+fork once upstream ships cancellation**.
 
 > Companion: [`PROGRESS.md`](PROGRESS.md) has the dated build-log entry;
 > [`../ARCHITECTURE.md`](../ARCHITECTURE.md) shows where the seams live.
@@ -228,3 +229,91 @@ When rebasing the fork onto a newer upstream, push the branch and re-pin the
 `rev` to the new commit, then re-run the verification commands above. Always
 test against a real plain-TCP Oracle — the OOB path and the reset recovery
 are server-dependent and will not show up in unit tests.
+
+---
+
+## 7. TCPS / TLS cancellation (deferred — needs a test target)
+
+Status: **not implemented.** Sessions using `tcps://` get
+`cancel_token() == None`, so Cancel falls back to client-side abandon and the
+server keeps running the statement. This section records why, and the two
+viable designs, so the work can be picked up once a TCPS Oracle is available.
+**There is currently no TLS Oracle to validate against**, which is the main
+reason it is tabled: every candidate is server-behavior-dependent and cannot be
+proven with unit tests.
+
+### 7.1 Why the plain-TCP trick does not carry over
+
+1. **OOB breaks are not supported over TLS.** Oracle's own thin driver
+   disables them for `tcps` (`python-oracledb` `protocol.pyx`:
+   `if use_tcps: self._caps.supports_oob = False`); Oracle Net's break is TCP
+   urgent data (the `DISABLE_OOB` sqlnet parameter). The fork mirrors this:
+   `Transport::cancel_stream` returns `None` when `tls_stream.is_some()`
+   (`src/transport.rs:257`).
+2. **The in-band marker cannot be injected from another thread.** It must be
+   written through rustls's `StreamOwned` TLS state, which lives in `Transport`
+   behind the same client mutex the running query holds (`conn_impl.rs:58`).
+   Writing plaintext on a cloned fd would corrupt the TLS record stream.
+3. So there is no independent-socket path to cancel on, unlike plain TCP.
+
+### 7.2 The opening: the interrupt path already works through TLS
+
+`Client::recover_from_error()` (`src/client/mod.rs:214`) already sends
+`MARKER_TYPE_INTERRUPT` through the **normal transport** (TLS included) and then
+`reset()`s — that is how the existing call-timeout recovery works. What is
+missing is waking the blocked read to check a cancel flag: reads block
+indefinitely unless a call timeout is set (`transport.rs:246`; SQLHighland sets
+60 s at `src/db.rs:193`).
+
+### 7.3 Option A — cooperative in-band cancel (recommended)
+
+Fork changes:
+
+1. Add a per-connection cancel request (`Arc<AtomicBool>`) reachable from a
+   handle, so `CancelHandle::cancel()` can set it (today `CancelHandle` is tied
+   to the cloned stream and errors when there is none —
+   `src/connection/mod.rs`).
+2. Give `Transport`/`Client` a short internal poll read timeout (~100–250 ms)
+   while a token is armed. On wake, in `Client::receive_data_packet`
+   (`src/client/mod.rs:135`):
+   - real call-timeout deadline passed → `ErrorKind::CallTimeoutExceeded`
+     (existing behavior),
+   - cancel flag set → send `MARKER_TYPE_INTERRUPT`, `reset()`, return
+     `Error::cancelled()`,
+   - otherwise keep reading.
+3. Keep the pool manager's call-timeout save/restore intact
+   (`pool/manager.rs:65`); the poll timeout is transport-internal and must not
+   be confused with the user's call timeout.
+4. Add a unit test for flag→interrupt and a live TCPS test (§7.5).
+
+App changes: essentially none — the `CancelToken` seam already abstracts this.
+`db.rs` would hand back a flag-setting token for TLS sessions and keep the
+immediate socket token for plain TCP.
+
+Trade-offs: uniform, no privileges, keeps the connection; cancel latency equals
+the poll interval (~100–250 ms); it touches the central read/timeout loop, so
+the call-timeout and pooling paths need regression coverage.
+
+### 7.4 Option B — server-side `ALTER SYSTEM CANCEL SQL` (fallback)
+
+Run `ALTER SYSTEM CANCEL SQL 'sid, serial#'` from a helper connection. It is
+transport-agnostic (works on TCPS and plain TCP) and would let us drop the fork
+entirely. Caveats:
+
+- requires the `ALTER SYSTEM` privilege (often unavailable to app accounts),
+- needs the target session's `SID` **and** `SERIAL#` (from `V$SESSION` /
+  `SYS_CONTEXT`),
+- opens/maintains a second session and adds round trips,
+- coverage for PL/SQL blocks (e.g. `dbms_lock.sleep`) varies.
+
+It could ship as a privilege-gated fallback: use the token first, else the
+helper connection when the account has the privilege.
+
+### 7.5 Verification plan (needs a TCPS Oracle)
+
+- A TLS variant of `tests/cancel_live.rs` (wallet/one-way TLS) asserting the
+  same "returns promptly + `Cancelled` + connection reusable" outcome.
+- Regression: the 60 s call timeout still trips correctly and the session
+  survives; pool acquire/release still restores timeouts.
+- Confirm the server actually honors an in-band interrupt delivered through the
+  TLS stream — the key unknown that requires a live target.
