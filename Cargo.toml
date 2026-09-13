@@ -16,6 +16,10 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 # Stable ids for saved connections.
 uuid = { version = "1", features = ["v4"] }
+# Cross-platform secret storage for connection passwords: picks the native
+# store per platform (macOS Keychain, Windows Credential Manager, Linux Secret
+# Service). The `v1` default feature supplies the simple `Entry` API.
+keyring = { version = "=4.2.0", default-features = false, features = ["v1"] }
 # Zeroize secrets held in memory (connection passwords) on drop.
 # `serde` keeps `Zeroizing<String>` round-trippable through the TOML files.
 zeroize = { version = "1", features = ["serde"] }
@@ -34,12 +38,6 @@ gpui-kit-assets = { version = "=0.6.1", optional = true }
 # Native .xlsx export (pure Rust, no native deps). Pinned like the rest.
 # `constant_memory` streams worksheet writes (uncapped exports stay lean).
 rust_xlsxwriter = { version = "=0.99.0", features = ["constant_memory"] }
-
-# OS keychain backend, per platform. macOS login keychain today (Apple-only
-# crate); Windows (Credential Manager) / Linux (Secret Service) to follow.
-# Pinned like the rest; the .crate is vendored so this resolves offline.
-[target.'cfg(target_vendor = "apple")'.dependencies]
-security-framework = "=3.7.0"
 
 [features]
 default = []

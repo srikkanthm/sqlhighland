@@ -76,10 +76,11 @@ impl PasswordMode {
 
     /// Mode for a *newly created* connection. `File` stays the serde default so
     /// legacy files without the field keep loading as plaintext, but new
-    /// connections prefer the OS keychain where a backend exists, and otherwise
-    /// never store the secret (prompt per run).
+    /// connections prefer the OS keychain where a reliable backend exists
+    /// (macOS Keychain, Windows Credential Manager), and otherwise never store
+    /// the secret (prompt per run — Linux Secret Service may be absent).
     pub fn default_for_new() -> Self {
-        if cfg!(target_vendor = "apple") {
+        if cfg!(any(target_vendor = "apple", target_os = "windows")) {
             PasswordMode::Keychain
         } else {
             PasswordMode::Ask
