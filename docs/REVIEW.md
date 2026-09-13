@@ -14,8 +14,8 @@ docs in §4.3 are fixed, the Tier 1 hygiene items (§3 formatting, §4.1, §4.2,
 zeroization, tab-id path safety), the Tier 3 remainder (§3 lock policy and
 logging, plus an MSRV CI job), cross-platform P0 (§6.1 home-dir resolution),
 and port hardening P1/P2 (§6.2 Windows ACLs, §6.4 Linux/Windows check jobs) are
-fixed — see the change sets at the end. §6 tracks any remaining
-cross-platform / second-engine work.
+fixed — see the change sets at the end. Later change sets add P4 (view-state
+grouping, §6.6). §6 tracks any remaining cross-platform / second-engine work.
 
 ## 1. Security
 
@@ -107,10 +107,10 @@ Every source file is now under ~1,000 lines. Behavior-preserving: 116 lib
 tests green, GUI UI tests unchanged, `clippy --all-targets` clean.
 
 Still open:
-- `SqlHighlandView` remains a ~45-field struct; the `ConnectionDialogState` /
-  `PendingOps` / `ConnCache` field-grouping was declined (risk > benefit), so
-  the *type* boundary is unchanged even though files are now navigable.
 - 3× `#[allow(clippy::too_many_arguments)]` remain in `run/export.rs`.
+
+(Field-grouping follow-up done in P4 — see §6.6: `SqlHighlandView` is now 21
+fields via `ConnectionDialogState` / `PendingOps` / `BrowserState`.)
 
 ## 3. Code smells
 
@@ -207,10 +207,11 @@ incremental-cursor API (`start_query`/`fetch_more` live on `OracledbSession`),
 and the metadata fetchers are Oracle dictionary SQL. A second engine needs its
 own cursor + metadata + dialect module.
 
-### 6.6 View-state breadth — open (feature velocity)
-`SqlHighlandView` remains a ~45-field struct; every feature adds fields and
-`impl` methods. The declined `ConnectionDialogState`/`PendingOps`/`ConnCache`
-grouping is the main maintainability cost for new features.
+### 6.6 View-state breadth — **FIXED (P4)**
+`SqlHighlandView` dropped from ~44 fields to 21 by grouping the connection
+dialog (`ConnectionDialogState`), modal-resume runs (`PendingOps`), and
+per-connection caches + schema-browser (`BrowserState`) into focused structs in
+`app.rs`. Behavior unchanged (119 lib tests + GUI UI tests green).
 
 ## Change set — security
 
@@ -290,3 +291,12 @@ grouping is the main maintainability cost for new features.
   GPUI Linux deps) and `windows-core` (`cargo check --lib` with NASM), both
   non-blocking/provisional.
 - Fixes §6.2 and partially §6.4.
+
+## Change set — view-state grouping (P4)
+
+- `src/app.rs`: new `ConnectionDialogState` (dialog form + pending option
+  pills), `PendingOps` (bind/pick/password resume), and `BrowserState`
+  (dictionary caches, usage, schema-browser trees/filters). `SqlHighlandView`
+  drops from ~44 to 21 fields; call sites updated across `app/*`, dialogs,
+  `browser`, `sidebar`, and `run`.
+- Fixes §6.6; 119 lib tests green, clippy clean, GUI UI tests pass.

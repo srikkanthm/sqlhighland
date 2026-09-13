@@ -83,6 +83,11 @@ src/
 - GUI modules should not be reached from the GUI-free core.
 - Keep the public API at the parent module: children define, parents
   re-export.
+- **Keep `SqlHighlandView` shallow.** Cohesive field clusters live in their own
+  structs in `app.rs` — `ConnectionDialogState` (dialog form + option pills),
+  `PendingOps` (bind/picker/password resume), `BrowserState` (dictionary
+  caches, usage, schema-browser). Add a feature's state to the right struct
+  rather than growing the view.
 
 ## Verify a split
 
