@@ -741,3 +741,14 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   ("connection has been closed" instead of timeout) on clean 20164c9
   too (2/4 base runs fail identically) — pre-existing timing flake
   under parallel DB load, not from this refactor.
+
+## Refactor Phase 3a — autocomplete provider extracted (2026-09-13, uncommitted)
+
+- providers.rs (~417 lines): completion_items_for, to_items,
+  trigger_complete (mechanical move). app.rs 4,732 → 4,331.
+  own_schema_of stays (shared by browser/hover/completion) as
+  pub(crate); editor_focused + COMPLETE_LIMIT pub(crate).
+  Lexer-level items (CompleteContext, ScopeTable, resolve_qualifier,
+  keyword tables) already lived in complete.rs — no move needed.
+- Verified: clean clippy --all-targets, 112 lib +
+  menus/themes/browser_tree green, GUI builds, live serial 11/11.
