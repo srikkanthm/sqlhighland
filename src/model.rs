@@ -185,6 +185,25 @@ impl ConnectionConfig {
             false
         }
     }
+
+    /// Validate the fields needed for a connect attempt, returning the first
+    /// user-facing problem. Backs the dialog's "Test connection" action (and
+    /// could gate Save later); pure so it is unit-tested without a DB.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.host.trim().is_empty() {
+            return Err("Host is required".to_string());
+        }
+        if self.service_name.trim().is_empty() {
+            return Err("Service name (or SID) is required".to_string());
+        }
+        if self.user.trim().is_empty() {
+            return Err("User is required".to_string());
+        }
+        if self.port == 0 {
+            return Err("Port must be between 1 and 65535".to_string());
+        }
+        Ok(())
+    }
 }
 
 impl Default for ConnectionConfig {
@@ -359,6 +378,42 @@ mod tests {
         assert!(!a.id.is_empty() && !b.id.is_empty() && a.id != b.id);
         // Existing ids are preserved.
         assert!(!a.ensure_id());
+    }
+
+    #[test]
+    fn validate_requires_connect_fields() {
+        // Defaults (localhost/highlandpdb/system/1521) are complete.
+        assert!(ConnectionConfig::default().validate().is_ok());
+
+        let c = ConnectionConfig {
+            host: "  ".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(c.validate().unwrap_err(), "Host is required");
+
+        let c = ConnectionConfig {
+            service_name: String::new(),
+            ..Default::default()
+        };
+        assert_eq!(
+            c.validate().unwrap_err(),
+            "Service name (or SID) is required"
+        );
+
+        let c = ConnectionConfig {
+            user: String::new(),
+            ..Default::default()
+        };
+        assert_eq!(c.validate().unwrap_err(), "User is required");
+
+        let c = ConnectionConfig {
+            port: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            c.validate().unwrap_err(),
+            "Port must be between 1 and 65535"
+        );
     }
 
     #[test]

@@ -30,6 +30,14 @@ fn new_session(engine: DbEngine) -> Box<dyn DbClient> {
     }
 }
 
+/// A session **not** owned by the pool, for one-off probes such as the
+/// connection dialog's "Test connection". Never shared or marked live; the
+/// caller connects and drops it.
+#[cfg(feature = "gui")]
+pub(crate) fn throwaway_session(engine: DbEngine) -> SharedSession {
+    Arc::new(Mutex::new(new_session(engine)))
+}
+
 #[derive(Default)]
 pub struct SessionPool {
     sessions: HashMap<String, SharedSession>,

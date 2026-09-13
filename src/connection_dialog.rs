@@ -1,9 +1,10 @@
 //! Connection add/edit dialog: form fields, role/service/SSL/
 //! password/engine rows, keychain routing.
 //!
-//! Extracted from `app.rs` (refactor Phase 1); behavior unchanged. The
-//! dialog owns `pending_*` mirroring; the `ConnectionDialogState` grouping
-//! was declined (see `docs/HISTORY.md`, Part 5).
+//! Extracted from `app.rs` (refactor Phase 1). Dialog state lives in
+//! [`crate::app::ConnectionDialogState`] (see `docs/HISTORY.md` Part 5 and the
+//! P4 view-state grouping in `docs/REVIEW.md`). Also hosts the dialog's
+//! "Test connection" action.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -22,6 +23,19 @@ use crate::config::SavedConfig;
 use crate::conn_picker::PickAfter;
 use crate::model::{ConnectionConfig, Environment, OracleRole, PasswordMode, ServiceKind};
 use crate::schema::DbEngine;
+use crate::session::{lock, throwaway_session};
+
+/// State of the dialog's "Test connection" action, shared with the dialog
+/// builder through an `Rc` cell (like the option pills): the builder re-reads
+/// it on every rebuild but must never touch the view entity.
+#[derive(Default)]
+enum TestState {
+    #[default]
+    Idle,
+    Testing,
+    Ok,
+    Err(String),
+}
 
 impl SqlHighlandView {
     fn form_config(&self, cx: &App) -> ConnectionConfig {
@@ -186,6 +200,9 @@ impl SqlHighlandView {
         // (NOT the Scrollable wrapper, whose caller-id keying misbehaves for
         // dialog content that rebuilds every render).
         let scroll_handle = Rc::new(ScrollHandle::new());
+        // Live "Test connection" state, shared with the builder (which reads
+        // it on every rebuild) and reset each time the dialog opens.
+        let test_cell: Rc<RefCell<TestState>> = Rc::new(RefCell::new(TestState::Idle));
         self.note_dialog_open();
         window.open_dialog(cx, move |dialog, _, cx| {
             let save_view = view.clone();
@@ -484,19 +501,65 @@ impl SqlHighlandView {
                                 ),
                         ),
                 )
-                .footer(dialog_footer(
-                    "dlg-cancel",
-                    Button::new("dlg-save").primary().label("Save").on_click(
-                        move |_, window, cx: &mut App| {
-                            save_view
-                                .update(cx, |this, cx| {
-                                    this.save_from_dialog(window, cx);
+                .child({
+                    let cell = test_cell.clone();
+                    let state = cell.borrow();
+                    match &*state {
+                        TestState::Idle => div().into_any_element(),
+                        TestState::Testing => div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("Testing connection…")
+                            .into_any_element(),
+                        TestState::Ok => div()
+                            .text_xs()
+                            .text_color(cx.theme().success)
+                            .child("Connected successfully")
+                            .into_any_element(),
+                        TestState::Err(msg) => div()
+                            .text_xs()
+                            .text_color(cx.theme().danger)
+                            .child(msg.clone())
+                            .into_any_element(),
+                    }
+                })
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .child({
+                            let cell = test_cell.clone();
+                            let testing = matches!(*cell.borrow(), TestState::Testing);
+                            let test_view = view.clone();
+                            Button::new("dlg-test")
+                                .label("Test connection")
+                                .loading(testing)
+                                .disabled(testing)
+                                .on_click(move |_, _window, cx: &mut App| {
+                                    let cell = cell.clone();
+                                    test_view
+                                        .update(cx, |this, cx| {
+                                            this.test_connection_from_dialog(cell, cx);
+                                        })
+                                        .ok();
                                 })
-                                .ok();
-                            window.close_dialog(cx);
-                        },
-                    ),
-                ))
+                        })
+                        .child(div().flex_1())
+                        .child(
+                            Button::new("dlg-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(Button::new("dlg-save").primary().label("Save").on_click(
+                            move |_, window, cx: &mut App| {
+                                save_view
+                                    .update(cx, |this, cx| {
+                                        this.save_from_dialog(window, cx);
+                                    })
+                                    .ok();
+                                window.close_dialog(cx);
+                            },
+                        )),
+                )
         });
     }
 
@@ -551,6 +614,74 @@ impl SqlHighlandView {
         self.persist(cx);
         self.status = format!("Saved {}", cfg.name).into();
         cx.notify();
+    }
+
+    /// Password to use for a "Test connection": the typed field wins;
+    /// otherwise a saved Keychain entry (when editing) or the File-mode value.
+    /// `None` means the mode needs a secret the form cannot supply.
+    fn test_password(&self, cfg: &ConnectionConfig, cx: &App) -> Option<Zeroizing<String>> {
+        let typed = self.dialog.password.read(cx).value().to_string();
+        if !typed.is_empty() {
+            return Some(Zeroizing::new(typed));
+        }
+        match cfg.password_mode {
+            PasswordMode::File => (!cfg.password.is_empty()).then(|| cfg.password.clone()),
+            PasswordMode::Keychain if !cfg.id.is_empty() => crate::keychain::get(&cfg.id)
+                .ok()
+                .flatten()
+                .map(Zeroizing::new),
+            _ => None,
+        }
+    }
+
+    /// Connect with the current form values on a throwaway session and report
+    /// the result inline. Never touches the pool or the `live` set, so it is
+    /// safe even while a saved connection is already connected.
+    fn test_connection_from_dialog(
+        &mut self,
+        cell: Rc<RefCell<TestState>>,
+        cx: &mut Context<Self>,
+    ) {
+        // A second click while a test is in flight is a no-op.
+        if matches!(*cell.borrow(), TestState::Testing) {
+            return;
+        }
+        let mut cfg = self.form_config(cx);
+        if let Err(msg) = cfg.validate() {
+            *cell.borrow_mut() = TestState::Err(msg);
+            cx.notify();
+            return;
+        }
+        let Some(password) = self.test_password(&cfg, cx) else {
+            *cell.borrow_mut() = TestState::Err("Enter a password to test".to_string());
+            cx.notify();
+            return;
+        };
+        cfg.password = password;
+
+        *cell.borrow_mut() = TestState::Testing;
+        cx.notify();
+
+        let session = throwaway_session(cfg.engine);
+        let bg = cx.background_executor().clone();
+        let view = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let outcome = bg
+                .spawn(async move {
+                    let mut guard = lock(&session);
+                    guard.connect(&cfg).map_err(|e| e.to_string())
+                })
+                .await;
+            view.update(cx, |_this, cx| {
+                *cell.borrow_mut() = match outcome {
+                    Ok(()) => TestState::Ok,
+                    Err(e) => TestState::Err(e),
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 }
 

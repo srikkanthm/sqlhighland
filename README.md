@@ -16,7 +16,9 @@ development — see [`docs/PROGRESS.md`](docs/PROGRESS.md) for the build log and
 - **Connections sidebar** — collapsible, resizable, persisted list. Add/Edit
   via dialog; per-row right-click menu (Connect/Disconnect, Edit…, Delete).
   Live connection marked with a green dot. Environment tags (Prod/Dev/QA/UAT)
-  plus per-engine connection options (Oracle role / service-vs-SID, TLS).
+  plus per-engine connection options (Oracle role / service-vs-SID, TLS). The
+  dialog has a **Test connection** button that connects with the current form
+  values (throwaway session) before you save.
 - **Query editor** — tree-sitter SQL highlighting, code folding, **Format**
   button (`sqlformat`), **Cmd+Enter** runs the statement under the cursor
   (multi-statement scripts supported client-side).
