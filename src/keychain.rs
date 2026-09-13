@@ -47,7 +47,7 @@ pub fn set(account: &str, password: &str) -> Result<(), String> {
 pub fn delete(account: &str) {
     if let Ok(kc) = default_keychain() {
         if let Ok((_, item)) = kc.find_generic_password(SERVICE, account) {
-            let _ = item.delete();
+            item.delete();
         }
     }
 }

@@ -260,29 +260,31 @@ mod tests {
     use crate::metadata::{ColumnMeta, TableId};
 
     fn cache() -> MetadataCache {
-        let mut c = MetadataCache::default();
-        c.tables = vec![
-            TableId {
-                owner: "SYSTEM".into(),
-                name: "EMPLOYEES".into(),
-                kind: TableKind::Table,
-            },
-            TableId {
-                owner: "HR".into(),
-                name: "DEPT".into(),
-                kind: TableKind::Table,
-            },
-            TableId {
-                owner: "HR".into(),
-                name: "EMPVW".into(),
-                kind: TableKind::View,
-            },
+        let mut c = MetadataCache {
+            tables: vec![
+                TableId {
+                    owner: "SYSTEM".into(),
+                    name: "EMPLOYEES".into(),
+                    kind: TableKind::Table,
+                },
+                TableId {
+                    owner: "HR".into(),
+                    name: "DEPT".into(),
+                    kind: TableKind::Table,
+                },
+                TableId {
+                    owner: "HR".into(),
+                    name: "EMPVW".into(),
+                    kind: TableKind::View,
+                },
             TableId {
                 owner: "SYS".into(),
                 name: "DUALX".into(),
                 kind: TableKind::Table,
             },
-        ];
+            ],
+            ..Default::default()
+        };
         c.columns.insert(
             ("SYSTEM".into(), "EMPLOYEES".into()),
             vec![ColumnMeta {

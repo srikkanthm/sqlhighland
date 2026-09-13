@@ -2063,12 +2063,14 @@ mod tests {
     fn hover_owner_table_resolves_directly() {
         // `SYSTEM.|EMPLOYEES`: qualifier is an owner, not an alias — must
         // not misread as table SYSTEM, and bypasses the system filter.
-        let mut cache = MetadataCache::default();
-        cache.tables = vec![crate::metadata::TableId {
-            owner: "SYSTEM".into(),
-            name: "EMPLOYEES".into(),
-            kind: TableKind::Table,
-        }];
+        let mut cache = MetadataCache {
+            tables: vec![crate::metadata::TableId {
+                owner: "SYSTEM".into(),
+                name: "EMPLOYEES".into(),
+                kind: TableKind::Table,
+            }],
+            ..Default::default()
+        };
         cache.columns.insert(
             ("SYSTEM".into(), "EMPLOYEES".into()),
             vec![ColumnMeta {
@@ -2111,19 +2113,21 @@ mod tests {
 
     #[test]
     fn describe_target_resolves_tables_only() {
-        let mut cache = MetadataCache::default();
-        cache.tables = vec![
-            crate::metadata::TableId {
-                owner: "SYSTEM".into(),
-                name: "EMPLOYEES".into(),
-                kind: TableKind::Table,
-            },
-            crate::metadata::TableId {
-                owner: "SCOTT".into(),
-                name: "EMP".into(),
-                kind: TableKind::Table,
-            },
-        ];
+        let mut cache = MetadataCache {
+            tables: vec![
+                crate::metadata::TableId {
+                    owner: "SYSTEM".into(),
+                    name: "EMPLOYEES".into(),
+                    kind: TableKind::Table,
+                },
+                crate::metadata::TableId {
+                    owner: "SCOTT".into(),
+                    name: "EMP".into(),
+                    kind: TableKind::Table,
+                },
+            ],
+            ..Default::default()
+        };
         cache.columns.insert(
             ("SYSTEM".into(), "EMPLOYEES".into()),
             vec![ColumnMeta {

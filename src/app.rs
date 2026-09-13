@@ -36,7 +36,7 @@ use crate::model::{
     ServiceKind,
 };
 use crate::schema::{DbEngine, OracleProvider, SchemaProvider as _};
-use crate::session::SessionPool;
+use crate::session::{SessionPool, lock};
 use crate::sql::{
     apply_substitutions, exec_summary, expand_at_directives, expand_script_file, find_bind_vars,
     find_substitution_vars, format_sql, is_dml, line_at, parse_at_directive, split_statements,
@@ -109,6 +109,10 @@ gpui_kit::actions!(
 
 /// Max popup rows per request (ranking already orders them best-first).
 const COMPLETE_LIMIT: usize = 100;
+
+/// The Cmd-click document hook: answers `oracle-describe:` URIs by
+/// opening a viewer tab. Named type for clippy's complexity lint.
+type ShowDocumentHook = Rc<dyn Fn(&lsp_types::ShowDocumentParams, &mut Window, &mut App) -> bool>;
 
 /// Oracle definition provider for one tab: Cmd-hover underlines a table
 /// word, Cmd-click jumps to its DESCRIBE output. Table-only (v1, same
@@ -433,7 +437,10 @@ impl TableDelegate for ResultsDelegate {
             return Column::new("col-rownum", "#").width(px(52.)).text_right();
         }
         let name = self.with_data(|d| d.columns.get(col_ix - 1).map(|c| c.name.clone()), None);
-        let name = name.expect("column with no result");
+        // DB-shaped data must never crash the grid: a 0-column result or
+        // a virtualized-grid race yields a positional placeholder instead
+        // of panicking the app (and its unsaved drafts) away.
+        let name = name.unwrap_or_else(|| format!("col{col_ix}"));
         // Key by position, not name: duplicate column names (common in
         // SELECT * joins) would otherwise collide element identities,
         // breaking reconciliation and defeating column virtualization.
@@ -522,7 +529,7 @@ impl TableDelegate for ResultsDelegate {
         cx.spawn(async move |table_view, cx| {
             let outcome = bg
                 .spawn(async move {
-                    let mut session = fetch_bg.session.lock().expect("session lock");
+                    let mut session = lock(&fetch_bg.session);
                     session.fetch_more(fetch_bg.query_id, fetch_bg.chunk)
                 })
                 .await;
@@ -538,11 +545,11 @@ impl TableDelegate for ResultsDelegate {
                     match page_opt {
                         Some(page) => {
                             if !page.current {
-                                fetch.data.lock().expect("data lock").loading = false;
+                                lock(&fetch.data).loading = false;
                                 return false;
                             }
                             {
-                                let mut data = fetch.data.lock().expect("data lock");
+                                let mut data = lock(&fetch.data);
                                 let room = fetch.cap.saturating_sub(data.rows.len());
                                 let take = page.rows.len().min(room);
                                 data.rows
@@ -556,7 +563,7 @@ impl TableDelegate for ResultsDelegate {
                         }
                         None => {
                             // Leave `exhausted` false so the next scroll retries.
-                            fetch.data.lock().expect("data lock").loading = false;
+                            lock(&fetch.data).loading = false;
                             false
                         }
                     }
@@ -591,7 +598,7 @@ impl TableDelegate for ResultsDelegate {
 
 /// One-line status for buffered data, e.g. `2,400 rows · 12 ms`.
 fn describe_fetch(fetch: &FetchState) -> String {
-    let data = fetch.data.lock().expect("data lock");
+    let data = lock(&fetch.data);
     let mut s = format!("{} rows · {} ms", data.rows.len(), data.elapsed_ms);
     if data.loading {
         s.push_str(" · fetching…");
@@ -740,10 +747,10 @@ struct QueryTab {
 }
 
 /// Tab flavor: a full SQL editor, or an object viewer (DESCRIBE grid,
-/// no editor) opened from the schema browser. Viewers are ephemeral and
-/// reuse the run/results pipeline. The editor entity is kept but
-/// unrendered for viewers — every viewer branch is a marked `TabKind`
-/// check, so a future `Option<editor>` refactor is compiler-guided.
+// no editor) opened from the schema browser. Viewers are ephemeral and
+// reuse the run/results pipeline. The editor entity is kept but
+// unrendered for viewers — every viewer branch is a marked `TabKind`
+// check, so a future `Option<editor>` refactor is compiler-guided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TabKind {
     Query,
@@ -752,6 +759,16 @@ enum TabKind {
         name: String,
         kind: crate::metadata::TableKind,
     },
+}
+
+/// Arguments for creating a tab: the data half of `make_tab` (keeps it
+/// under clippy's argument limit), leaving `window`/`cx` separate.
+struct NewTabSpec {
+    id: String,
+    name: String,
+    connection_id: Option<String>,
+    text: String,
+    kind: TabKind,
 }
 
 /// Export file format chosen in the menu.
@@ -911,7 +928,7 @@ fn export_drain_blocking(
                 return ExportOutcome::Cancelled(rows);
             }
             let page = {
-                let mut session = session.lock().expect("session lock");
+                let mut session = lock(&session);
                 session.fetch_more(query_id, FETCH_CHUNK)
             };
             let page = match page {
@@ -1131,7 +1148,7 @@ fn pick_connection_and_run(
             t.connection_id = Some(conn_id.to_string());
         }
         this.pending_pick = None;
-        this.persist_tabs();
+        this.persist_tabs(cx);
         this.start_run(tab_id, sql.to_string(), window, cx);
     })
     .ok();
@@ -1156,7 +1173,7 @@ fn pick_connection_for_new_tab(
                 this.select_tab(ix, window, cx);
             }
             this.pending_pick = None;
-            this.persist_tabs();
+            this.persist_tabs(cx);
             // Establish the session now so the tab is live before the
             // first run (failures surface through the standard
             // connect-failed path, same as sidebar Connect).
@@ -1187,7 +1204,7 @@ fn pick_connection_for_rebind(
             t.connection_id = Some(conn_id.to_string());
         }
         this.pending_pick = None;
-        this.persist_tabs();
+        this.persist_tabs(cx);
         // Same eager session as a fresh Cmd+K tab (failures surface
         // through the standard connect-failed path).
         this.connect_connection(conn_id, window, cx);
@@ -1216,7 +1233,7 @@ fn pick_connection_and_resume_buffer(
             t.connection_id = Some(conn_id.to_string());
         }
         this.pending_pick = None;
-        this.persist_tabs();
+        this.persist_tabs(cx);
         this.run_buffer_as_script(tab_id, window, cx);
     })
     .ok();
@@ -1588,16 +1605,14 @@ impl SqlHighlandView {
             .unwrap_or_else(|| "Select connection".to_string())
     }
 
-    fn make_tab(
-        &mut self,
-        id: String,
-        name: String,
-        connection_id: Option<String>,
-        text: String,
-        kind: TabKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn make_tab(&mut self, spec: NewTabSpec, window: &mut Window, cx: &mut Context<Self>) {
+        let NewTabSpec {
+            id,
+            name,
+            connection_id,
+            text,
+            kind,
+        } = spec;
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language("sql")
@@ -1624,9 +1639,7 @@ impl SqlHighlandView {
             // Unknown schemes fall through to the kit default.
             let view = cx.entity().downgrade();
             let jump_tab_id = id.clone();
-            let show_document: Rc<
-                dyn Fn(&lsp_types::ShowDocumentParams, &mut Window, &mut App) -> bool,
-            > = Rc::new(move |params, window, cx| {
+            let show_document: ShowDocumentHook = Rc::new(move |params, window, cx| {
                 if !params.uri.scheme().is_some_and(|s| s.as_str() == "oracle-describe") {
                     return false;
                 }
@@ -1760,7 +1773,17 @@ impl SqlHighlandView {
             } else {
                 saved.name.clone()
             };
-            self.make_tab(saved.id, name, connection_id, text, TabKind::Query, window, cx);
+            self.make_tab(
+                NewTabSpec {
+                    id: saved.id,
+                    name,
+                    connection_id,
+                    text,
+                    kind: TabKind::Query,
+                },
+                window,
+                cx,
+            );
             if let Some((path, _, stamp)) = external {
                 if let Some(tab) = self.tabs.last_mut() {
                     tab.path = Some(path);
@@ -1782,7 +1805,17 @@ impl SqlHighlandView {
         for (id, text) in orphans {
             self.untitled_counter += 1;
             let name = tab_name_from_sql(&text, &format!("Untitled {}", self.untitled_counter));
-            self.make_tab(id, name, None, text, TabKind::Query, window, cx);
+            self.make_tab(
+                NewTabSpec {
+                    id,
+                    name,
+                    connection_id: None,
+                    text,
+                    kind: TabKind::Query,
+                },
+                window,
+                cx,
+            );
         }
         if self.tabs.is_empty() {
             // First launch (or empty manifest): one starter tab, unbound so
@@ -1795,7 +1828,7 @@ impl SqlHighlandView {
             self.add_tab(None, text, window, cx);
         } else if adopted {
             // Manifest now matches the adopted set on disk.
-            self.persist_tabs();
+            self.persist_tabs(cx);
         }
         self.active = 0;
     }
@@ -1810,10 +1843,23 @@ impl SqlHighlandView {
         self.untitled_counter += 1;
         let id = uuid::Uuid::new_v4().to_string();
         let name = tab_name_from_sql(&text, &format!("Untitled {}", self.untitled_counter));
-        self.make_tab(id.clone(), name, connection_id, text.clone(), TabKind::Query, window, cx);
+        self.make_tab(
+            NewTabSpec {
+                id: id.clone(),
+                name,
+                connection_id,
+                text: text.clone(),
+                kind: TabKind::Query,
+            },
+            window,
+            cx,
+        );
         // Persist immediately so a crash before the first keystroke loses nothing.
-        let _ = TabsManifest::write_draft(&id, &text);
-        self.persist_tabs();
+        if let Err(e) = TabsManifest::write_draft(&id, &text) {
+            self.status = format!("Draft save failed: {e:#}").into();
+            cx.notify();
+        }
+        self.persist_tabs(cx);
         self.active = self.tabs.len() - 1;
         self.tab_scroll.scroll_to_item(self.active);
         cx.notify();
@@ -1843,14 +1889,16 @@ impl SqlHighlandView {
         let title = OracleProvider.object_title(&owner, &name, &own);
         let id = uuid::Uuid::new_v4().to_string();
         self.make_tab(
-            id.clone(),
-            title,
-            Some(conn_id.to_string()),
-            String::new(),
-            TabKind::Viewer {
-                owner: owner.clone(),
-                name: name.clone(),
-                kind,
+            NewTabSpec {
+                id: id.clone(),
+                name: title,
+                connection_id: Some(conn_id.to_string()),
+                text: String::new(),
+                kind: TabKind::Viewer {
+                    owner: owner.clone(),
+                    name: name.clone(),
+                    kind,
+                },
             },
             window,
             cx,
@@ -1889,10 +1937,20 @@ impl SqlHighlandView {
                 self.untitled_counter += 1;
                 let id = uuid::Uuid::new_v4().to_string();
                 let name = format!("Untitled {}", self.untitled_counter);
-                self.make_tab(id, name, None, String::new(), TabKind::Query, window, cx);
+                self.make_tab(
+                    NewTabSpec {
+                        id,
+                        name,
+                        connection_id: None,
+                        text: String::new(),
+                        kind: TabKind::Query,
+                    },
+                    window,
+                    cx,
+                );
             }
             self.active = self.active.min(self.tabs.len().saturating_sub(1));
-            self.persist_tabs();
+            self.persist_tabs(cx);
             self.tab_scroll.scroll_to_item(self.active);
             // The closed editor may still own keyboard focus. Move focus to
             // the replacement active tab so repeated shortcuts keep working.
@@ -2075,7 +2133,7 @@ impl SqlHighlandView {
         self.select_tab(next, window, cx);
     }
 
-    fn persist_tabs(&self) {
+    fn persist_tabs(&mut self, cx: &mut Context<Self>) {
         let manifest = TabsManifest {
             tabs: self
                 .tabs
@@ -2090,7 +2148,12 @@ impl SqlHighlandView {
                 })
                 .collect(),
         };
-        let _ = manifest.save();
+        // A failed save must shout: silent loss (disk-full, permissions)
+        // is worse than an alarming status line.
+        if let Err(e) = manifest.save() {
+            self.status = format!("Tabs save failed: {e:#}").into();
+            cx.notify();
+        }
     }
 
     fn save_active_tab_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2135,7 +2198,7 @@ impl SqlHighlandView {
                             .unwrap_or("Untitled")
                             .to_string()
                             .into();
-                        this.persist_tabs();
+                        this.persist_tabs(cx);
                         cx.notify();
                     }
                     Err(err) => {
@@ -2167,7 +2230,7 @@ impl SqlHighlandView {
                     tab.file_stamp = Some(stamp);
                     tab.dirty = false;
                 }
-                self.persist_tabs();
+                self.persist_tabs(cx);
                 cx.notify();
             }
             Err(err) => {
@@ -2230,7 +2293,17 @@ impl SqlHighlandView {
                         .and_then(|s| s.to_str())
                         .unwrap_or("Untitled")
                         .to_string();
-                    this.make_tab(id, name, None, text, TabKind::Query, window, cx);
+                    this.make_tab(
+                        NewTabSpec {
+                            id,
+                            name,
+                            connection_id: None,
+                            text,
+                            kind: TabKind::Query,
+                        },
+                        window,
+                        cx,
+                    );
                     if let Some(tab) = this.tabs.last_mut() {
                         tab.path = Some(path);
                         tab.file_stamp = Some(stamp);
@@ -2238,7 +2311,7 @@ impl SqlHighlandView {
                     }
                     let ix = this.tabs.len() - 1;
                     this.select_tab(ix, window, cx);
-                    this.persist_tabs();
+                    this.persist_tabs(cx);
                     cx.notify();
                 })
                 .ok();
@@ -2283,7 +2356,7 @@ impl SqlHighlandView {
                         if let Some(stamp) = stamp {
                             tab.file_stamp = Some(stamp);
                         }
-                        this.persist_tabs();
+                        this.persist_tabs(cx);
                     }
                     Err(msg) => {
                         this.status = format!("Draft save failed: {msg}").into();
@@ -2372,12 +2445,15 @@ impl SqlHighlandView {
         });
     }
 
-    fn persist(&self) {
+    fn persist(&mut self, cx: &mut Context<Self>) {
         if let Ok(path) = SavedConfig::default_path() {
             let saved = SavedConfig {
                 connections: self.connections.clone(),
             };
-            let _ = saved.save(&path);
+            if let Err(e) = saved.save(&path) {
+                self.status = format!("Connections save failed: {e:#}").into();
+                cx.notify();
+            }
         }
     }
 
@@ -2483,6 +2559,24 @@ impl SqlHighlandView {
         top_is_settings
     }
 
+    /// Save preferences, reporting failure on the status bar instead of
+    /// losing it silently. Resolves the view through the AppView global
+    /// so settings/dialog callbacks (which own no lease and often no
+    /// view handle) stay one-liners. Falls back to stderr where no
+    /// window/view exists (e.g. headless tests).
+    fn save_prefs_status(prefs: &Preferences, cx: &mut App) {
+        if let Err(e) = prefs.save() {
+            if let Some(view) = app_view(cx) {
+                view.update(cx, |this, cx| {
+                    this.status = format!("Preferences save failed: {e:#}").into();
+                    cx.notify();
+                });
+            } else {
+                eprintln!("preferences save failed: {e:#}");
+            }
+        }
+    }
+
     /// Settings dialog as an associated function so the global App::on_action
     /// handler (which has a window but no view handle) can open it too.
     /// Pure open: toggle bookkeeping lives with the callers (see above).
@@ -2513,10 +2607,13 @@ impl SqlHighlandView {
                             .hover(move |this| this.bg(hover_bg))
                             .on_click(move |_, window, cx| {
                                 let view = row_view.clone();
-                                view.update(cx, |_, cx| {
+                                view.update(cx, |this, cx| {
                                     let mut prefs = Preferences::load();
                                     prefs.theme = name.to_string();
-                                    let _ = prefs.save();
+                                    if let Err(e) = prefs.save() {
+                                        this.status =
+                                            format!("Preferences save failed: {e:#}").into();
+                                    }
                                     crate::guitheme::apply_preferences(&prefs, Some(window), cx);
                                     // Full view re-render: GPUI only repaints
                                     // dirty views, and window refreshes alone
@@ -2628,8 +2725,14 @@ impl SqlHighlandView {
                                                                                         );
                                                                                     prefs.completion =
                                                                                         apply;
-                                                                                    let _ =
-                                                                                        prefs.save();
+                                                                                    if let Err(e) =
+                                                                                        prefs.save()
+                                                                                    {
+                                                                                        this.status = format!(
+                                                                                            "Preferences save failed: {e:#}"
+                                                                                        )
+                                                                                        .into();
+                                                                                    }
                                                                                     this.complete_auto =
                                                                                         apply
                                                                                             == CompleteMode::Auto;
@@ -2764,7 +2867,9 @@ impl SqlHighlandView {
                                                             let mut prefs =
                                                                 Preferences::load();
                                                             prefs.font_family = value.clone();
-                                                            let _ = prefs.save();
+                                                            Self::save_prefs_status(
+                                                                &prefs, cx,
+                                                            );
                                                             crate::guitheme::apply_font_prefs(
                                                                 &prefs, cx,
                                                             );
@@ -2817,7 +2922,7 @@ impl SqlHighlandView {
                                                                             .font_size
                                                                             .saturating_sub(1)
                                                                             .max(10);
-                                                                        let _ = prefs.save();
+                                                                        Self::save_prefs_status(&prefs, cx);
                                                                         crate::guitheme::apply_font_prefs(
                                                                             &prefs, cx,
                                                                         );
@@ -2846,7 +2951,7 @@ impl SqlHighlandView {
                                                                             .font_size
                                                                             .saturating_add(1)
                                                                             .min(24);
-                                                                        let _ = prefs.save();
+                                                                        Self::save_prefs_status(&prefs, cx);
                                                                         crate::guitheme::apply_font_prefs(
                                                                             &prefs, cx,
                                                                         );
@@ -2889,11 +2994,11 @@ impl SqlHighlandView {
                                                         None,
                                                         current == n,
                                                         cx,
-                                                        move |_, window, _| {
+                                                        move |_, window, cx| {
                                                             let mut prefs =
                                                                 Preferences::load();
                                                             prefs.result_cap = n;
-                                                            let _ = prefs.save();
+                                                            Self::save_prefs_status(&prefs, cx);
                                                             window.refresh();
                                                         },
                                                     )
@@ -2931,11 +3036,11 @@ impl SqlHighlandView {
                                                         None,
                                                         current == n,
                                                         cx,
-                                                        move |_, window, _| {
+                                                        move |_, window, cx| {
                                                             let mut prefs =
                                                                 Preferences::load();
                                                             prefs.query_timeout_secs = n;
-                                                            let _ = prefs.save();
+                                                            Self::save_prefs_status(&prefs, cx);
                                                             window.refresh();
                                                         },
                                                     )
@@ -2973,12 +3078,12 @@ impl SqlHighlandView {
                                                             None,
                                                             current == value,
                                                             cx,
-                                                            move |_, window, _| {
+                                                            move |_, window, cx| {
                                                                 let mut prefs =
                                                                     Preferences::load();
                                                                 prefs.csv_delimiter =
                                                                     value.clone();
-                                                                let _ = prefs.save();
+                                                                Self::save_prefs_status(&prefs, cx);
                                                                 window.refresh();
                                                             },
                                                         )
@@ -3027,14 +3132,15 @@ impl SqlHighlandView {
                                                                             .csv_header,
                                                                     )
                                                                     .on_change(
-                                                                        move |checked, window, _| {
+                                                                        move |checked, window, cx| {
                                                                             let mut prefs =
                                                                                 Preferences::load(
                                                                                 );
                                                                             prefs.csv_header =
                                                                                 *checked;
-                                                                            let _ =
-                                                                                prefs.save();
+                                                                            Self::save_prefs_status(
+                                                                                &prefs, cx,
+                                                                            );
                                                                             window.refresh();
                                                                         },
                                                                     ),
@@ -3495,7 +3601,7 @@ impl SqlHighlandView {
             self.connections.push(cfg.clone());
         }
         self.editing = None;
-        self.persist();
+        self.persist(cx);
         self.status = format!("Saved {}", cfg.name).into();
         cx.notify();
     }
@@ -3571,8 +3677,8 @@ impl SqlHighlandView {
                 tab.connection_id = None;
             }
         }
-        self.persist();
-        self.persist_tabs();
+        self.persist(cx);
+        self.persist_tabs(cx);
         self.status = format!("Deleted {}", removed.name).into();
         cx.notify();
     }
@@ -3724,7 +3830,7 @@ impl SqlHighlandView {
         cx.spawn(async move |_, cx| {
             let outcome = bg
                 .spawn(async move {
-                    let mut guard = session.lock().expect("session lock");
+                    let mut guard = lock(&session);
                     match guard.connect(&cfg) {
                         Ok(()) => WorkOutcome::Connected,
                         Err(e) => WorkOutcome::Failed(e.to_string()),
@@ -3976,7 +4082,7 @@ impl SqlHighlandView {
             cx.notify();
             return;
         }
-        let base = self.script_base_dir(&tab_id);
+        let base = self.script_base_dir(tab_id);
         let expanded = match expand_at_directives(&text, &base) {
             Ok(e) => e,
             Err(msg) => {
@@ -4429,7 +4535,7 @@ impl SqlHighlandView {
                                                 t.connection_id = Some(row.id.clone());
                                             }
                                             this.pending_pick = None;
-                                            this.persist_tabs();
+                                            this.persist_tabs(cx);
                                             this.start_run(&ok_tab, ok_sql.clone(), window, cx);
                                         })
                                         .ok();
@@ -4821,7 +4927,7 @@ impl SqlHighlandView {
                     // Wall-clock for the whole blocking section, so failures
                     // can also report timing in the status line.
                     let started = std::time::Instant::now();
-                    let mut session = session_bg.lock().expect("session lock");
+                    let mut session = lock(&session_bg);
                     let result: Result<Outcome, String> = (|| {
                         // Reconnect lazily; a live pooled session is reused.
                         if !session.is_connected() {
@@ -5108,7 +5214,7 @@ impl SqlHighlandView {
                 let (result, ms) = bg_c
                     .spawn(async move {
                         let started = std::time::Instant::now();
-                        let mut session = session_bg.lock().expect("session lock");
+                        let mut session = lock(&session_bg);
                         let result: Result<StmtOutcome, String> = (|| {
                             if !session.is_connected() {
                                 session.connect(&cfg_c).map_err(|e| e.to_string())?;
@@ -5516,7 +5622,7 @@ impl SqlHighlandView {
         cx.spawn(async move |_, cx| {
             let outcome = bg
                 .spawn(async move {
-                    let mut session = session_bg.lock().expect("session lock");
+                    let mut session = lock(&session_bg);
                     if commit {
                         session.commit().map_err(|e| e.to_string())
                     } else {
@@ -5700,7 +5806,7 @@ impl SqlHighlandView {
         let mut scope_order: Vec<String> = aliases.keys().cloned().collect();
         scope_order.sort();
         let scope_tables: Vec<ScopeTable> = if let Some(cache) = &cache {
-            let cache = cache.lock().expect("meta lock");
+            let cache = lock(&cache);
             let mut seen = std::collections::HashSet::new();
             let mut out = Vec::new();
             for alias in &scope_order {
@@ -5792,7 +5898,7 @@ impl SqlHighlandView {
             let Some(cache) = &cache else {
                 return;
             };
-            let cache = cache.lock().expect("meta lock");
+            let cache = lock(&cache);
             for s in &cache.sequences {
                 if hide_system(&s.owner) {
                     continue;
@@ -5823,7 +5929,7 @@ impl SqlHighlandView {
             CompleteContext::ColumnOf(q) => {
                 if let Some(tref) = resolve_qualifier(q, &aliases) {
                     let cols = cache.as_ref().map(|c| {
-                        let c = c.lock().expect("meta lock");
+                        let c = lock(&c);
                         c.columns_for(tref.owner.as_deref(), &tref.name)
                     });
                     if let Some(cols) = cols {
@@ -5847,7 +5953,7 @@ impl SqlHighlandView {
                 // tables show (and insert) bare: Oracle resolves
                 // unqualified names to the connected schema first.
                 if let Some(cache) = &cache {
-                    let cache = cache.lock().expect("meta lock");
+                    let cache = lock(&cache);
                     for t in &cache.tables {
                         if hide_system(&t.owner) {
                             continue;
@@ -5866,7 +5972,7 @@ impl SqlHighlandView {
             CompleteContext::OwnerTables(owner) => {
                 // `FROM owner.|` — that owner's tables, bare names.
                 if let Some(cache) = &cache {
-                    let cache = cache.lock().expect("meta lock");
+                    let cache = lock(&cache);
                     for t in &cache.tables {
                         if !t.owner.eq_ignore_ascii_case(owner) {
                             continue;
@@ -6032,7 +6138,7 @@ impl SqlHighlandView {
             }
             let outcome = bg
                 .spawn(async move {
-                    let mut s = session.lock().expect("session lock");
+                    let mut s = lock(&session);
                     if !s.is_connected() {
                         if let Err(e) = s.connect(&cfg).map_err(|e| e.to_string()) {
                             let e = e.to_string();
@@ -6415,12 +6521,10 @@ impl SqlHighlandView {
                 let ids = id.to_string();
                 // Two fixed glyph slots: disclosure chevron (folders) +
                 // type icon. The kit draws neither itself.
-                let chevron: Option<KitIcon> = folder.then(|| {
-                    if expanded {
-                        KitIcon::ChevronDown
-                    } else {
-                        KitIcon::ChevronRight
-                    }
+                let chevron: Option<KitIcon> = folder.then_some(if expanded {
+                    KitIcon::ChevronDown
+                } else {
+                    KitIcon::ChevronRight
                 });
                 let type_icon: Option<KitIcon> = if ids == "u:users" {
                     Some(KitIcon::Users)
@@ -6476,11 +6580,14 @@ impl SqlHighlandView {
                 };
                 // Object rows (not columns, not folders) open viewer tabs.
                 // Shared id parse (a `/`-split here once attached zero
-                // handlers: every object parsed to nothing and clicks died
-                // silently — the debug_assert below guards the scheme).
+                // handlers and clicks died silently). The debug_assert
+                // guards the scheme in debug; the eprintln keeps release
+                // builds from failing silently (view updates are illegal
+                // mid-render — leases — so logging is the only signal).
                 let target = crate::schema::parse_object_id(&ids);
                 if ids.starts_with("o:") && target.is_none() {
                     debug_assert!(false, "unparsed object row {ids}");
+                    eprintln!("unparsed schema-browser object row: {ids}");
                 }
                 // Click synthesis (`on_click`) never fires inside the kit's
                 // virtualized rows (its mousedown rebuild drops the pending
@@ -7052,7 +7159,7 @@ impl SqlHighlandView {
                                         view.update(cx, |this, cx| {
                                             if let Some(t) = this.tab_by_id(&tab_id) {
                                                 t.connection_id = Some(conn_id.clone());
-                                                this.persist_tabs();
+                                                this.persist_tabs(cx);
                                                 this.connect_connection(&conn_id, window, cx);
                                             }
                                             cx.notify();
@@ -7704,7 +7811,9 @@ impl SqlHighlandView {
     fn zoom_font(&mut self, delta: i32, cx: &mut Context<Self>) {
         let mut prefs = Preferences::load();
         prefs.font_size = (prefs.font_size as i32 + delta).clamp(10, 24) as u32;
-        let _ = prefs.save();
+        if let Err(e) = prefs.save() {
+            self.status = format!("Preferences save failed: {e:#}").into();
+        }
         crate::guitheme::apply_font_prefs(&prefs, cx);
         cx.notify();
     }
@@ -7713,7 +7822,9 @@ impl SqlHighlandView {
     fn zoom_font_reset(&mut self, cx: &mut Context<Self>) {
         let mut prefs = Preferences::load();
         prefs.font_size = 13;
-        let _ = prefs.save();
+        if let Err(e) = prefs.save() {
+            self.status = format!("Preferences save failed: {e:#}").into();
+        }
         crate::guitheme::apply_font_prefs(&prefs, cx);
         cx.notify();
     }
@@ -7905,11 +8016,15 @@ pub fn app_menus() -> Vec<Menu> {
     ]
 }
 
+/// Pick callback for a dialog pill row: receives the chosen value.
+/// Named type for clippy's complexity lint.
+type DialogPick<T> = std::rc::Rc<dyn Fn(T, &mut App)>;
+
 fn dialog_pills<T: Copy + PartialEq + 'static>(
     id_base: &'static str,
     options: &[(T, &'static str)],
     current: T,
-    pick: std::rc::Rc<dyn Fn(T, &mut App)>,
+    pick: DialogPick<T>,
     cx: &App,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;

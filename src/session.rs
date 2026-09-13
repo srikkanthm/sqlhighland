@@ -9,6 +9,14 @@ use std::sync::{Arc, Mutex};
 
 use crate::db::{DbClient, OracledbSession};
 
+/// Poison-tolerant guard for session-adjacent locks (session, grid data,
+/// metadata cache): a panic while holding one must degrade to stale data
+/// on next access, never a crash loop — `lock().expect(..)` would panic
+/// on every later touch until restart.
+pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[derive(Default)]
 pub struct SessionPool {
     sessions: HashMap<String, Arc<Mutex<OracledbSession>>>,
@@ -78,5 +86,19 @@ mod tests {
         pool.remove("db1");
         assert!(pool.is_empty());
         assert!(!pool.is_live("db1"));
+    }
+
+    #[test]
+    fn lock_recovers_from_poison() {
+        let m = Mutex::new(41u32);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = m.lock().unwrap();
+            panic!("simulated holder panic");
+        }));
+        assert!(m.is_poisoned());
+        // Helper recovers the inner value instead of panicking.
+        assert_eq!(*lock(&m), 41);
+        *lock(&m) = 42;
+        assert_eq!(*lock(&m), 42);
     }
 }

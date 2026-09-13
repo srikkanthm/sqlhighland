@@ -258,45 +258,50 @@ impl OracledbSession {
     /// so it is dropped — the next run reconnects fresh. Plain ORA- errors
     /// keep cursor + connection alive for scroll-to-retry.
     fn pull_locked(&mut self, limit: usize) -> Result<PulledRows, DbError> {
-        assert!(limit > 0, "fetch limit must be positive");
-        let outcome: Result<PulledRows, oracledb::Error> = (|| {
-            let cursor = self
-                .cursor
-                .as_mut()
-                .expect("pull_locked with no open cursor");
-            let mut rows: Vec<Vec<Option<String>>> = Vec::new();
-            if let Some(row) = self.pending.take() {
-                rows.push(convert_row(row, &self.columns));
-            }
-            let mut exhausted = false;
-            while rows.len() < limit {
-                match cursor.next() {
-                    Some(Ok(row)) => rows.push(convert_row(row, &self.columns)),
-                    Some(Err(e)) => return Err(e),
-                    None => {
-                        exhausted = true;
-                        break;
-                    }
+        if limit == 0 {
+            return Err(DbError("fetch limit must be positive".to_string()));
+        }
+        // Missing cursor is a caller desync, not a panic: error out and
+        // keep the session alive for retry.
+        let Some(cursor) = self.cursor.as_mut() else {
+            return Err(DbError("fetch with no open cursor".to_string()));
+        };
+        // Inline (not a closure) so the borrows stay field-level:
+        // `cursor` + `pending` + `columns` are disjoint, no whole-self
+        // capture — which is what forced the old `expect` in the first place.
+        let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+        if let Some(row) = self.pending.take() {
+            rows.push(convert_row(row, &self.columns));
+        }
+        let mut fetch_err: Option<oracledb::Error> = None;
+        let mut exhausted = false;
+        while rows.len() < limit {
+            match cursor.next() {
+                Some(Ok(row)) => rows.push(convert_row(row, &self.columns)),
+                Some(Err(e)) => {
+                    fetch_err = Some(e);
+                    break;
                 }
-            }
-            if !exhausted {
-                match cursor.next() {
-                    Some(Ok(row)) => self.pending = Some(row),
-                    Some(Err(e)) => return Err(e),
-                    None => exhausted = true,
+                None => {
+                    exhausted = true;
+                    break;
                 }
-            }
-            Ok((rows, exhausted))
-        })();
-        match outcome {
-            Ok(page) => Ok(page),
-            Err(e) => {
-                if is_poisoned(&e) {
-                    self.disconnect();
-                }
-                Err(DbError::from(e))
             }
         }
+        if fetch_err.is_none() && !exhausted {
+            match cursor.next() {
+                Some(Ok(row)) => self.pending = Some(row),
+                Some(Err(e)) => fetch_err = Some(e),
+                None => exhausted = true,
+            }
+        }
+        if let Some(e) = fetch_err {
+            if is_poisoned(&e) {
+                self.disconnect();
+            }
+            return Err(DbError::from(e));
+        }
+        Ok((rows, exhausted))
     }
 }
 
@@ -756,6 +761,15 @@ mod tests {
         assert_send::<oracledb::Connection>();
         assert_send::<oracledb::Cursor>();
         assert_send::<std::sync::Mutex<OracledbSession>>();
+    }
+
+    #[test]
+    fn pull_validates_without_panicking() {
+        let mut session = OracledbSession::new();
+        // Zero limit and missing cursor are errors, never panics: a
+        // desynced fetch must not take the app (and its drafts) down.
+        assert!(session.pull_locked(0).is_err());
+        assert!(session.pull_locked(10).is_err());
     }
 
     #[test]

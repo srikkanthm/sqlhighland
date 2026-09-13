@@ -675,3 +675,23 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   quotes behave exactly as before.
 - Verified: 7 new unit tests (fail-before/pass-after), 110 lib +
   menus/themes/browser_tree green, clean clippy, GUI builds.
+
+## Refactor Phase 0 — robustness + hygiene (2026-09-12, uncommitted)
+
+- Clippy fully clean (was 6 warnings): NewTabSpec params struct for
+  make_tab, ShowDocumentHook/DialogPick type aliases, then_some,
+  keychain unit delete, struct-update init in 3 test helpers, one
+  needless borrow.
+- Poison-tolerant locks: session::lock() helper (+ unit test) replaces
+  16 production lock().expect sites; db.rs pull_locked rewritten on
+  disjoint field borrows — zero-limit and missing-cursor are DbErrors
+  (+ unit test), poison path preserved.
+- Crash vector closed: grid column() falls back to `col{ix}` instead
+  of expect on DB-shaped data.
+- Visible persistence: persist_tabs/persist/write_draft and all 12
+  prefs.save sites (via save_prefs_status + AppView global) report
+  failures on the status bar.
+- Release signal for unparsed browser rows (eprintln; view updates
+  are lease-illegal mid-render).
+- Verified: clean clippy, 112 lib + menus/themes/browser_tree green,
+  GUI builds. See REFACTOR_PLAN.md for Phases 1–3.
