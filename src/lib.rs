@@ -3,6 +3,7 @@ pub mod config;
 pub mod db;
 pub mod export;
 pub mod filetab;
+pub mod fsutil;
 pub mod keychain;
 pub mod metadata;
 pub mod model;

@@ -32,9 +32,8 @@ pub fn write(path: &Path, text: &str) -> Result<FileStamp> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    let tmp = path.with_extension("sqlhighland.tmp");
-    std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("moving {}", path.display()))?;
+    // Crash-safe, fsynced write. User files keep default (umask) permissions.
+    crate::fsutil::write_atomic(path, text, false)?;
     stamp(path)
 }
 

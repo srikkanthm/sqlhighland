@@ -105,7 +105,10 @@ impl Environment {
 
 /// Connection parameters for a single Oracle database.
 /// Password is stored in plaintext in v1 (see PLAN.md debt note).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is implemented by hand to redact `password`: a derived `Debug`
+/// would leak the secret through any `{:?}`, panic message, or log line.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ConnectionConfig {
     /// Stable identity. Empty for pre-id entries on disk; backfilled on load.
     #[serde(default)]
@@ -183,6 +186,28 @@ impl Default for ConnectionConfig {
             ssl: false,
             password_mode: PasswordMode::default(),
         }
+    }
+}
+
+/// Hand-written to keep the password out of `{:?}` output. Everything else
+/// mirrors a derived `Debug`.
+impl std::fmt::Debug for ConnectionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionConfig")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("service_name", &self.service_name)
+            .field("user", &self.user)
+            .field("password", &"<redacted>")
+            .field("environment", &self.environment)
+            .field("engine", &self.engine)
+            .field("role", &self.role)
+            .field("service_kind", &self.service_kind)
+            .field("ssl", &self.ssl)
+            .field("password_mode", &self.password_mode)
+            .finish()
     }
 }
 
@@ -276,6 +301,24 @@ fn csv_field(value: &str, delim: char) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_redacts_password() {
+        let cfg = ConnectionConfig {
+            password: "hunter2-secret".to_string(),
+            ..Default::default()
+        };
+        let rendered = format!("{cfg:?}");
+        assert!(!rendered.contains("hunter2-secret"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        // SavedConfig aggregates connections: the secret must not leak there
+        // either.
+        let saved = crate::config::SavedConfig {
+            connections: vec![cfg],
+        };
+        let rendered = format!("{saved:?}");
+        assert!(!rendered.contains("hunter2-secret"), "{rendered}");
+    }
 
     #[test]
     fn connect_string_is_ezconnect() {

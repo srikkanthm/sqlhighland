@@ -9,15 +9,25 @@ use crate::model::ConnectionConfig;
 /// Write-then-rename so a crash mid-write never leaves a truncated file
 /// behind (a truncated `tabs.toml` used to read as "no tabs", and the next
 /// persist overwrote it — permanent tab loss from one bad shutdown).
+///
+/// These files may hold connection passwords, so they are written owner-only
+/// (`0600`, directory `0700`) and fsynced (see [`crate::fsutil`]).
 fn write_atomic(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+    crate::fsutil::write_atomic(path, text, true)
+}
+
+/// Bring an existing config file (and its directory) down to owner-only
+/// permissions. Older builds wrote `connections.toml` with the process
+/// umask, leaving plaintext passwords world-readable on multi-user machines.
+fn tighten_owned(path: &std::path::Path) {
+    if path.exists() {
+        let _ = crate::fsutil::restrict(path, 0o600);
     }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("moving {}", path.display()))?;
-    Ok(())
+    if let Some(parent) = path.parent() {
+        if parent.exists() {
+            let _ = crate::fsutil::restrict(parent, 0o700);
+        }
+    }
 }
 
 /// Base config dir. Overridable via `SQLHIGHLAND_CONFIG_DIR` (tests).
@@ -44,6 +54,7 @@ impl SavedConfig {
         if !path.exists() {
             return Ok(Self::default());
         }
+        tighten_owned(path);
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut cfg: Self = toml::from_str(&text).context("parsing saved connections")?;
@@ -96,6 +107,7 @@ impl TabsManifest {
         if !path.exists() {
             return Ok(Self::default());
         }
+        tighten_owned(&path);
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
         toml::from_str(&text).context("parsing tabs manifest")
@@ -409,6 +421,25 @@ mod tests {
             std::env::temp_dir().join(format!("sqlhighland-missing-{}.toml", std::process::id()));
         let loaded = SavedConfig::load(&path).unwrap();
         assert!(loaded.connections.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_tightens_loose_connections_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir =
+            std::env::temp_dir().join(format!("sqlhighland-tighten-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("connections.toml");
+        std::fs::write(&path, "[[connections]]\nid = \"c1\"\nname = \"n\"\nhost = \"h\"\nport = 1521\nservice_name = \"s\"\nuser = \"u\"\npassword = \"p\"\n").unwrap();
+        crate::fsutil::restrict(&path, 0o644).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o644);
+        // Loading migrates the file to owner-only.
+        let _ = SavedConfig::load(&path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
