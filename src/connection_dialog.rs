@@ -673,7 +673,11 @@ impl SqlHighlandView {
             let outcome = bg
                 .spawn(async move {
                     let mut guard = lock(&session);
-                    guard.connect(&cfg).map_err(|e| e.to_string())
+                    let outcome = guard.connect(&cfg).map_err(|e| e.to_string());
+                    // The probe is done either way: close it explicitly rather
+                    // than leaving teardown to Drop.
+                    guard.disconnect();
+                    outcome
                 })
                 .await;
             view.update(cx, |_this, cx| {

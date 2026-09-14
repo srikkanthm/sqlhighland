@@ -84,18 +84,22 @@ impl SqlHighlandView {
                 .spawn(async move {
                     let session = throwaway_session(cfg.engine);
                     let mut guard = lock(&session);
-                    guard.connect(&cfg).map_err(|e| e.to_string())?;
-                    let result = guard
-                        .run_query(&count_sql, 1, &[])
-                        .map_err(|e| e.to_string())?;
+                    let outcome = (|| -> Result<String, String> {
+                        guard.connect(&cfg).map_err(|e| e.to_string())?;
+                        let result = guard
+                            .run_query(&count_sql, 1, &[])
+                            .map_err(|e| e.to_string())?;
+                        Ok(result
+                            .rows
+                            .first()
+                            .and_then(|row| row.first())
+                            .and_then(|cell| cell.clone())
+                            .unwrap_or_default())
+                    })();
+                    // Always tear the throwaway session down (a no-op if the
+                    // connect failed); closes the cursor before the socket.
                     guard.disconnect();
-                    let value = result
-                        .rows
-                        .first()
-                        .and_then(|row| row.first())
-                        .and_then(|cell| cell.clone())
-                        .unwrap_or_default();
-                    Ok::<String, String>(value)
+                    outcome
                 })
                 .await;
             view.update(cx, |this, cx| {

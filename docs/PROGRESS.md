@@ -1026,3 +1026,6 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   failure.
 - Retained bind values (`QueryTab.last_binds`, used for export re-execution)
   are zeroized on overwrite and on tab close.
+- Throwaway sessions (Count rows, connection-dialog "Test connection") now
+  call `disconnect()` on every path instead of leaving teardown to `Drop`,
+  so the cursor is released before the socket closes.
