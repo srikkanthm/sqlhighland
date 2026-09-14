@@ -124,6 +124,11 @@ jobs:
     name: Security audit
     runs-on: ubuntu-latest
     continue-on-error: true
+    # rustsec/audit-check reports via a check run; without checks:write it
+    # errors with "Resource not accessible by integration" even on a clean run.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v7
       - uses: rustsec/audit-check@v2

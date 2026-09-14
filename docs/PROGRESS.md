@@ -890,3 +890,8 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   workflows), `actions/upload-artifact@v7`, `softprops/action-gh-release@v3`.
   `rustsec/audit-check@v2` has no Node 24 release, so its warning remains
   (non-blocking).
+- Audit job gained `checks: write`: it was erroring ("Resource not accessible
+  by integration") because it couldn't create its result check run even on a
+  clean scan. RustSec reports **no vulnerabilities**; 5 informational
+  "unmaintained" warnings remain (`instant`, `paste`, `rustls-pemfile`,
+  `rustybuzz`, `ttf-parser` — all transitive, not actionable locally).
