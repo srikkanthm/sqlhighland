@@ -1538,6 +1538,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "des"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "916a94e407b54f9034d71dd748234cd1e516ced6284009906ae246f177eafe5a"
+dependencies = [
+ "cipher 0.5.2",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4955,13 +4964,15 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 [[package]]
 name = "oracledb"
 version = "26.0.0-beta.4"
-source = "git+https://github.com/srikkanthm/rust-oracledb?rev=fb3d9c6e5180574734ed886307a56404feeaca23#fb3d9c6e5180574734ed886307a56404feeaca23"
+source = "git+https://github.com/srikkanthm/rust-oracledb?rev=da90f63e9806c39f0aa511c2131a823ec8beb231#da90f63e9806c39f0aa511c2131a823ec8beb231"
 dependencies = [
  "aes 0.9.3",
  "base16ct",
  "base64ct",
  "cbc 0.2.1",
  "chrono",
+ "des",
+ "md-5",
  "num-bigint 0.5.1",
  "num-traits",
  "pbkdf2 0.13.0",
@@ -6764,7 +6775,7 @@ dependencies = [
 
 [[package]]
 name = "sqlhighland"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "gpui-kit",
