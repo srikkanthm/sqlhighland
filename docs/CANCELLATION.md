@@ -59,7 +59,9 @@ for real. An explicit sidebar Connect stores the token up front.
 
 - Repo: `https://github.com/srikkanthm/rust-oracledb` (branch `main`)
 - Base: upstream `26.0.0-beta.4` era (fork commits sit on top of `466c453`)
-- Pinned commit: `52993b57ae798fd207db5830153970e9428fd6cb`
+- Pinned commit: see `[patch.crates-io]` in `Cargo.toml` (updated whenever the
+  fork is synced/released); the fork is synced by **merging** upstream, so old
+  pins stay reachable
 - Commits added on top of upstream:
   - `4412161` Add plain TCP cancellation API
   - `9a4fcb1` Use out-of-band break for cancellation; map ORA-01013 to Cancelled
@@ -70,7 +72,7 @@ Pinned from `Cargo.toml`:
 
 ```toml
 [patch.crates-io]
-oracledb = { git = "https://github.com/srikkanthm/rust-oracledb", rev = "52993b57ae798fd207db5830153970e9428fd6cb" }
+oracledb = { git = "https://github.com/srikkanthm/rust-oracledb", rev = "<sha>" }
 ```
 
 ### 3.1 Public API added
@@ -257,10 +259,13 @@ of this is isolated to `src/db.rs` and the opt-in test.
 
 ### Bumping the fork before then
 
-When rebasing the fork onto a newer upstream, push the branch and re-pin the
-`rev` to the new commit, then re-run the verification commands above. Always
-test against a real plain-TCP Oracle — the OOB path and the reset recovery
-are server-dependent and will not show up in unit tests.
+The fork is synced by **merging** `upstream/main` into the fork's `main` — never
+rebase/force-push, so the `rev`s pinned here (and in `Cargo.lock`) stay
+reachable. Run `scripts/sync-upstream.sh` in the fork, push, then re-pin the
+`rev` to the new commit and re-run the verification commands above. Always test
+against a real plain-TCP Oracle — the OOB path and the reset recovery are
+server-dependent and will not show up in unit tests. See the fork's `FORK.md`
+for the full procedure and the conflict-prone files.
 
 ---
 

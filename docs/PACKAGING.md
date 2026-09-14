@@ -178,6 +178,22 @@ git tag v0.1.0
 git push origin main v0.1.0
 ```
 
+### Updating the driver fork
+
+`oracledb` is pinned to the `srikkanthm/rust-oracledb` fork. To pull in
+upstream driver changes, sync the fork **by merging** — never rebase/force-push,
+so pinned `rev`s (and `Cargo.lock` entries) stay reachable:
+
+```sh
+# in the fork clone
+scripts/sync-upstream.sh      # fetch + merge upstream/main + fmt/clippy/tests
+git push origin main
+```
+
+Then re-pin `[patch.crates-io] rev` in `Cargo.toml` to the new commit (and bump
+the `oracledb` dependency requirement if upstream changed the crate version),
+and cut a release as above. See the fork's `FORK.md`.
+
 The workflow needs no secrets: it uses the automatic `GITHUB_TOKEN`
 (`permissions: contents: write`). The uploaded DMG is **unsigned** — see §5 for
 the Gatekeeper note.
