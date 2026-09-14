@@ -895,3 +895,18 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   clean scan. RustSec reports **no vulnerabilities**; 5 informational
   "unmaintained" warnings remain (`instant`, `paste`, `rustls-pemfile`,
   `rustybuzz`, `ttf-parser` — all transitive, not actionable locally).
+
+## About: app icon + menu link (2026-09-13)
+
+- Settings → About now renders the app icon (embedded 256px PNG) beside the
+  title/version. `main.rs` wraps `AllAssets` in an `AppAssets` source that
+  serves `sqlhighland-icon.png` from `assets/icon/icon-256.png`; the About row
+  draws it with `img(...)`.
+- Native app menu gains **"About SQLHighland"** (new `OpenAbout` action,
+  registered globally in `main.rs`) which opens Settings focused on its About
+  page. The kit's `default_selected_index` only applies when the keyed state is
+  first created, so the targeted open uses a unique Settings element id; normal
+  Cmd+, opens keep the persistent page/search.
+- Verified: menu coverage test extended with `OpenAbout`; `clippy --features
+  gui-test --all-targets -D warnings` clean, 4 UI suites + 122 lib tests green,
+  debug launch smoke OK. Visual confirmation of the icon/menu is manual.

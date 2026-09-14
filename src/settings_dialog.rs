@@ -4,10 +4,12 @@
 //! apply live, persist to preferences.toml, and notify the view for a
 //! full re-render (GPUI only repaints dirty views).
 
-use gpui::{px, App, Context, Entity, Window};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use gpui::{img, px, App, Context, Entity, ObjectFit, Window};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::setting::{
-    RenderOptions, SettingGroup, SettingItem, SettingPage, Settings,
+    RenderOptions, SelectIndex, SettingGroup, SettingItem, SettingPage, Settings,
 };
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
@@ -18,6 +20,19 @@ use gpui_kit_assets::IconName as KitIcon;
 use crate::app::{app_view, SqlHighlandView};
 use crate::config::{CompleteMode, Preferences, SavedConfig, TabsManifest, THEME_LIST};
 
+/// Index of the "About" page within the `Settings::pages` list built in
+/// [`SqlHighlandView::open_settings_dialog`] (Themes, Editor, Results,
+/// About). Keep in sync if a page is inserted before it.
+const ABOUT_PAGE_IX: usize = 3;
+
+/// Asset path served by `AppAssets` in `main.rs` (the embedded app icon).
+const ABOUT_ICON: &str = "sqlhighland-icon.png";
+
+/// Makes each targeted "About" open use a fresh `Settings` keyed state, so it
+/// always starts on the About page. The kit's `default_selected_index` only
+/// applies when the state is first created.
+static ABOUT_DIALOG_SEQ: AtomicU64 = AtomicU64::new(0);
+
 impl SqlHighlandView {
     /// Settings dialog: theme family + appearance mode. Selections apply
     /// live, persist to preferences.toml, and close the dialog (menu-like).
@@ -27,7 +42,19 @@ impl SqlHighlandView {
         if self.take_settings_toggle(window, cx) {
             return;
         }
-        Self::open_settings_dialog(&cx.entity(), window, cx);
+        Self::open_settings_dialog(&cx.entity(), window, cx, None);
+    }
+
+    /// App-menu "About SQLHighland": open the Settings dialog on its About
+    /// page, replacing any dialog already on screen.
+    /// Public only for main.rs (the binary is a separate crate); not part of
+    /// the app's UI surface.
+    pub fn open_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            window.close_dialog(cx);
+        }
+        self.note_dialog_open_for_settings(window.has_active_dialog(cx));
+        Self::open_settings_dialog(&cx.entity(), window, cx, Some(ABOUT_PAGE_IX));
     }
 
     /// Cmd+, toggle decision shared by the view-level entry (above) and the
@@ -83,9 +110,24 @@ impl SqlHighlandView {
     /// Pure open: toggle bookkeeping lives with the callers (see above).
     /// Rows apply, notify the view for a full re-render (GPUI only repaints
     /// dirty views — window refreshes alone reuse cached ones), then close.
-    pub fn open_settings_dialog(view: &Entity<SqlHighlandView>, window: &mut Window, cx: &mut App) {
+    pub fn open_settings_dialog(
+        view: &Entity<SqlHighlandView>,
+        window: &mut Window,
+        cx: &mut App,
+        initial_page: Option<usize>,
+    ) {
         // Owned for the 'static dialog builder below.
         let view = view.clone();
+        // A targeted open (About) uses a unique id so the kit builds fresh
+        // state on the requested page; a normal open keeps the persistent id
+        // (and its remembered page/search).
+        let settings_id = match initial_page {
+            Some(_) => format!(
+                "sqlhighland-settings-{}",
+                ABOUT_DIALOG_SEQ.fetch_add(1, Ordering::Relaxed)
+            ),
+            None => "sqlhighland-settings".to_string(),
+        };
         window.open_dialog(cx, move |dialog, _, cx| {
             let muted = cx.theme().muted_foreground;
             let hover_bg = cx.theme().accent;
@@ -159,7 +201,12 @@ impl SqlHighlandView {
                 .w(px(640.))
                 .child(
                     div().w_full().h(px(440.)).child(
-                        Settings::new("sqlhighland-settings").pages(vec![
+                        Settings::new(settings_id.clone())
+                            .default_selected_index(SelectIndex {
+                                page_ix: initial_page.unwrap_or(0),
+                                group_ix: None,
+                            })
+                            .pages(vec![
                             SettingPage::new("Themes")
                                 .icon(KitIcon::Palette)
                                 .groups(vec![SettingGroup::new().title("Appearance").items(
@@ -655,12 +702,24 @@ impl SqlHighlandView {
                                 .icon(KitIcon::Info)
                                 .groups(vec![SettingGroup::new().title("About").items(vec![
                                     SettingItem::render(move |_, _, _| {
-                                        v_flex().gap_1().child(
-                                            div().text_sm().child(format!(
-                                                "SQLHighland {} — SQL database client",
-                                                env!("CARGO_PKG_VERSION")
-                                            )),
-                                        )
+                                        h_flex()
+                                            .gap_3()
+                                            .items_center()
+                                            .child(
+                                                img(ABOUT_ICON)
+                                                    .w(px(64.))
+                                                    .h(px(64.))
+                                                    .flex_none()
+                                                    .object_fit(ObjectFit::Contain),
+                                            )
+                                            .child(
+                                                v_flex().gap_1().child(
+                                                    div().text_sm().child(format!(
+                                                        "SQLHighland {} — SQL database client",
+                                                        env!("CARGO_PKG_VERSION")
+                                                    )),
+                                                ),
+                                            )
                                     })
                                     .keywords(["about", "version"]),
                                     SettingItem::render(move |_, _, _| {

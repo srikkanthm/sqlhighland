@@ -1,13 +1,36 @@
+use std::borrow::Cow;
+
 use sqlhighland::{app, guitheme};
 
 use gpui_kit::component::*;
 use gpui_kit::*;
 
+/// App asset source: the kit's embedded icon catalog plus SQLHighland's own
+/// app icon. The icon is embedded from `assets/icon/icon-256.png` and served
+/// at `sqlhighland-icon.png`, so the About page can render it with
+/// `img("sqlhighland-icon.png")` without shipping loose files.
+struct AppAssets;
+
+impl gpui::AssetSource for AppAssets {
+    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        if path == "sqlhighland-icon.png" {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icon/icon-256.png"
+            ))));
+        }
+        gpui_kit::assets::AllAssets.load(path)
+    }
+
+    fn list(&self, path: &str) -> gpui::Result<Vec<gpui::SharedString>> {
+        gpui_kit::assets::AllAssets.list(path)
+    }
+}
+
 fn main() {
     // AllAssets embeds the complete Lucide catalog. The default `Assets`
     // bundle only covers a subset, which leaves icons like Database/Plug
-    // rendering blank.
-    let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
+    // rendering blank. `AppAssets` layers our own icon on top.
+    let app = gpui_kit::application().with_assets(AppAssets);
 
     app.run(move |cx| {
         // This must be called before using any GPUI Component features.
@@ -32,10 +55,25 @@ fn main() {
                             let toggle_off = view
                                 .update(cx, |this, _| this.note_dialog_open_for_settings(active));
                             if !toggle_off {
-                                app::SqlHighlandView::open_settings_dialog(&view, window, cx);
+                                app::SqlHighlandView::open_settings_dialog(&view, window, cx, None);
                             } else if window.has_active_dialog(cx) {
                                 window.close_dialog(cx);
                             }
+                        }
+                    });
+                }
+            });
+        });
+        // App menu "About SQLHighland": opens the Settings dialog focused on
+        // its About page. Same deferred/window-take discipline as above.
+        cx.on_action(|_: &app::OpenAbout, cx: &mut App| {
+            cx.defer(|cx| {
+                if let Some(handle) = cx.windows().into_iter().next() {
+                    let _ = handle.update(cx, |_, window, cx| {
+                        if let Some(view) = app::app_view(cx) {
+                            view.update(cx, |this, cx| {
+                                this.open_about(window, cx);
+                            });
                         }
                     });
                 }

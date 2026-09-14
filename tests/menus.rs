@@ -23,6 +23,7 @@ async fn menu_coverage(_cx: &mut TestAppContext) {
     // normal copy in the editor).
     for expected in [
         "OpenSettings",
+        "OpenAbout",
         "Quit",
         "NewTab",
         "PickConnection",

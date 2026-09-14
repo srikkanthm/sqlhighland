@@ -68,6 +68,7 @@ gpui_kit::actions!(
         CommitTxn,
         RollbackTxn,
         OpenSettings,
+        OpenAbout,
         Quit,
         NextTab,
         PrevTab,
@@ -721,6 +722,8 @@ pub fn app_menus() -> Vec<Menu> {
         Menu {
             name: "SQLHighland".into(),
             items: vec![
+                MenuItem::action("About SQLHighland", OpenAbout),
+                MenuItem::Separator,
                 MenuItem::action("Preferences…", OpenSettings),
                 MenuItem::Separator,
                 MenuItem::action("Quit", Quit),
