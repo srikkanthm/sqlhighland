@@ -700,7 +700,7 @@ impl SqlHighlandView {
                                 ]),
                             SettingPage::new("About")
                                 .icon(KitIcon::Info)
-                                .groups(vec![SettingGroup::new().title("About").items(vec![
+                                .groups(vec![SettingGroup::new().items(vec![
                                     SettingItem::render(move |_, _, _| {
                                         h_flex()
                                             .gap_4()
