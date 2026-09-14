@@ -639,6 +639,7 @@ impl SqlHighlandView {
                     div()
                         .flex_1()
                         .min_w_0()
+                        .min_h_0()
                         .overflow_hidden()
                         .p_2()
                         .context_menu(move |menu, _, _| {
@@ -821,6 +822,7 @@ impl SqlHighlandView {
         h_flex()
             .w_full()
             .min_w_0()
+            .flex_none()
             .gap_2()
             .px_2()
             .h(px(28.))
@@ -960,15 +962,21 @@ impl SqlHighlandView {
                     .child("Loading description…")
                     .into_any_element()
             };
-            v_resizable("viewer-split")
+            div()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
                 .child(
-                    resizable_panel()
-                        .size(px(36.))
-                        .size_range(px(36.)..px(200.))
-                        .flex_none()
-                        .child(self.render_viewer_header(tab, cx)),
+                    v_resizable("viewer-split")
+                        .child(
+                            resizable_panel()
+                                .size(px(36.))
+                                .size_range(px(36.)..px(200.))
+                                .flex_none()
+                                .child(self.render_viewer_header(tab, cx)),
+                        )
+                        .child(body),
                 )
-                .child(body)
                 .into_any_element()
         } else {
             // Dismissed (output Dismiss or grid close): editor takes the
@@ -987,19 +995,29 @@ impl SqlHighlandView {
                     true => self.render_output_pane(tab, window, cx).into_any_element(),
                     false => self.render_results(tab, window, cx).into_any_element(),
                 };
-                v_resizable("query-split")
-                    // Owned state: keyboard steps (`resize_panel`) and
-                    // mouse drags share it, so neither fights the other.
-                    // The panel's `.size()` below is initial-only.
-                    .with_state(&self.editor_split)
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
                     .child(
-                        resizable_panel()
-                            .size(px(300.))
-                            .size_range(px(160.)..px(900.))
-                            .flex_none()
-                            .child(self.render_editor(cx)),
+                        v_resizable("query-split")
+                            // Owned state: keyboard steps (`resize_panel`) and
+                            // mouse drags share it, so neither fights the other.
+                            // The panel's `.size()` below is initial-only.
+                            .with_state(&self.editor_split)
+                            .child(
+                                resizable_panel()
+                                    .size(px(300.))
+                                    .size_range(px(160.)..px(900.))
+                                    // Grow 0 holds the editor at its size on
+                                    // tall windows; shrink 1 lets it give room
+                                    // back to the grid when the window is short.
+                                    .flex_grow_0()
+                                    .flex_shrink_1()
+                                    .child(self.render_editor(cx)),
+                            )
+                            .child(body),
                     )
-                    .child(body)
                     .into_any_element()
             }
         };
@@ -1007,6 +1025,7 @@ impl SqlHighlandView {
         v_flex()
             .flex_1()
             .min_w_0()
+            .min_h_0()
             .h_full()
             // Measure the content width each frame and flip the responsive
             // toolbar level when it crosses a threshold (hysteresis-free: the

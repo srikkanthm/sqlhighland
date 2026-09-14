@@ -1053,3 +1053,16 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - Connection names in the picker/status/viewer header are shortened with the
   full name kept in tooltips.
 - A `window_min_size` floor (640×480) bounds the squeeze.
+
+### Short-window vertical clipping
+
+- The query split's editor panel was `flex_none()` (fixed 300px, shrink 0), so
+  the split's minimum height was editor 300 + results min 100 = 400px. On a
+  short window the split overflowed its slot and pushed the status bar off the
+  bottom (and clipped the grid).
+- The editor panel now uses `flex_grow_0().flex_shrink_1()`: it holds its size
+  on tall windows but yields height to the grid when the window is short
+  (down to its 160px minimum). Both splits are wrapped in a
+  `flex_1().min_h_0().overflow_hidden()` container, `render_main`'s root is
+  `min_h_0`, the status bar is `flex_none`, and the results grid container is
+  `min_h_0` so the virtualized table shrinks and scrolls.
