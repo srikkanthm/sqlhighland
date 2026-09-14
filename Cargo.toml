@@ -1,6 +1,6 @@
 [package]
 name = "sqlhighland"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.89"
 description = "A native, cross-platform SQL client built with Rust + GPUI. Browse schemas, query with dictionary-backed completion, page through results, and export to CSV or Excel — powered by Oracle's official pure-Rust thin driver, no Oracle Client required."
