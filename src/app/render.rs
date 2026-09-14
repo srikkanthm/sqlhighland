@@ -498,6 +498,13 @@ impl SqlHighlandView {
             let tab_id = tab.id.clone();
             let exp_view = view.clone();
             let exp_tab = tab.id.clone();
+            // "Count rows" only makes sense for a settled, wrapable query
+            // result (not DESCRIBE / object viewers).
+            let can_count = tab.has_result
+                && !tab.busy
+                && !tab.exporting
+                && crate::sql::statement_kind(&tab.last_sql) == crate::sql::StatementKind::Query
+                && !crate::db::is_describe_statement(&tab.last_sql);
             v_flex()
                 .flex_1()
                 .min_w_0()
@@ -559,6 +566,21 @@ impl SqlHighlandView {
                         .p_2()
                         .context_menu(move |menu, _, _| {
                             let mut menu = menu;
+                            if can_count {
+                                let count_view = view.clone();
+                                let count_tab = tab_id.clone();
+                                menu = menu
+                                    .item(PopupMenuItem::new("Count rows").on_click(
+                                        move |_, _, cx| {
+                                            count_view
+                                                .update(cx, |this, cx| {
+                                                    this.start_count_rows(&count_tab, cx);
+                                                })
+                                                .ok();
+                                        },
+                                    ))
+                                    .separator();
+                            }
                             for fmt in [ExportFormat::Csv, ExportFormat::Xlsx] {
                                 let view = view.clone();
                                 let tab_id = tab_id.clone();
@@ -573,7 +595,7 @@ impl SqlHighlandView {
                             }
                             menu
                         })
-                        .child(render_tab_table(&tab.table)),
+                        .child(render_tab_table(&tab.table, self.grid_row_height)),
                 )
                 .into_any_element()
         }

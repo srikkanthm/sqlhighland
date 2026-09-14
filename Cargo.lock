@@ -6775,7 +6775,7 @@ dependencies = [
 
 [[package]]
 name = "sqlhighland"
-version = "0.2.13"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "gpui-kit",

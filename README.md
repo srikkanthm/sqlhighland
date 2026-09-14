@@ -23,16 +23,23 @@ development — see [`docs/PROGRESS.md`](docs/PROGRESS.md) for the build log and
   button (`sqlformat`), **Cmd+Enter** runs the statement under the cursor
   (multi-statement scripts supported client-side).
 - **Autocomplete & hover** — dictionary-backed table/column/sequence
-  suggestions, JOIN…ON completion from foreign keys, and table/column hover
-  cards. Also Cmd-click a table for its `DESCRIBE`.
+  suggestions and JOIN…ON completion from foreign keys. Table/column hover
+  cards are **opt-in** (Settings → Editor → Hover); Cmd-click a table for its
+  `DESCRIBE`.
 - **Schema browser** — per-connection tree of schemas, tables, views, and
   sequences, with a client-side filter.
-- **Results grid** — virtualized table, `NULL` styling, error banner.
+- **Results grid** — virtualized table with `NULL` styling, an error banner,
+  and a right-click menu (CSV/Excel export, **Count rows**). Row height
+  (compactness) is adjustable with a slider in Settings → Results.
 - **Incremental fetching** — first 1000 rows load immediately, then 1000-row
   pages append as you scroll near the bottom. Server-side cursor stays open
-  (no re-execution); 100,000-row memory cap with notice.
+  (no re-execution); the grid row cap is configurable in Settings (blank/0 =
+  unlimited).
 - **Export** — CSV and native `.xlsx` (with the exported SQL on a `query`
   sheet), uncapped, streamed with constant memory.
+- **Count rows** — right-click the grid to run `SELECT COUNT(*)` over the
+  current query on a **separate session**, so the grid and its open cursor are
+  left untouched; the result appears in a popup.
 - **Query cancellation** — Cancel on a running query/script/export sends a
   real server-side interrupt on plain-TCP Oracle sessions (forked driver, see
   [`docs/CANCELLATION.md`](docs/CANCELLATION.md)); it falls back to

@@ -128,7 +128,10 @@ impl TableDelegate for ResultsDelegate {
     fn column(&self, col_ix: usize, _: &App) -> Column {
         // Grid column 0 is the row number; data columns shift by one.
         if col_ix == 0 {
-            return Column::new("col-rownum", "#").width(px(52.)).text_right();
+            return Column::new("col-rownum", "#")
+                .width(px(52.))
+                .text_right()
+                .paddings(compact_cell_pad());
         }
         let name = self.with_data(|d| d.columns.get(col_ix - 1).map(|c| c.name.clone()), None);
         // DB-shaped data must never crash the grid: a 0-column result or
@@ -138,7 +141,9 @@ impl TableDelegate for ResultsDelegate {
         // Key by position, not name: duplicate column names (common in
         // SELECT * joins) would otherwise collide element identities,
         // breaking reconciliation and defeating column virtualization.
-        Column::new(format!("col-{col_ix}"), name).width(px(180.))
+        Column::new(format!("col-{col_ix}"), name)
+            .width(px(180.))
+            .paddings(compact_cell_pad())
     }
 
     /// Header labels as native selectable text: drag-select a name and
@@ -301,10 +306,32 @@ pub(crate) fn describe_fetch(fetch: &FetchState) -> String {
     s
 }
 
-pub(crate) fn render_tab_table(table: &Entity<TableState<ResultsDelegate>>) -> impl IntoElement {
+/// Compact cell padding for the results grid: pairs with the custom row height
+/// in [`render_tab_table`] so the size table's medium defaults don't widen the
+/// cells back out.
+fn compact_cell_pad() -> gpui::Edges<gpui::Pixels> {
+    gpui::Edges {
+        top: px(0.),
+        bottom: px(0.),
+        left: px(5.),
+        right: px(5.),
+    }
+}
+
+pub(crate) fn render_tab_table(
+    table: &Entity<TableState<ResultsDelegate>>,
+    row_height: u32,
+) -> impl IntoElement {
     div()
         .size_full()
         .min_w_0()
         .overflow_hidden()
-        .child(DataTable::new(table).xsmall().stripe(true))
+        // A custom `Size` only sets the row height; the cell text size is
+        // inherited, so pin it here to keep the compact rows from growing.
+        .text_sm()
+        .child(
+            DataTable::new(table)
+                .with_size(gpui_kit::component::Size::Size(px(row_height as f32)))
+                .stripe(true),
+        )
 }

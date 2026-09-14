@@ -957,3 +957,27 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   non-encrypted instance (`localhost:1521`) is unaffected.
 - Integrity/checksum is not negotiated yet (the client offers "none"); details
   and the port map are in `docs/ANO.md`. SQLHighland re-pinned to the fork rev.
+
+## Grid & editor polish: hover opt-in, Count rows, row-cap field, denser grid (2026-09-14)
+
+- **Hover details are opt-in.** The editor table/column hover cards are gated by
+  `Preferences.hover_details` (default **off**) and a Settings → Editor → Hover
+  switch. The provider reads the live view flag, so toggling needs no per-tab
+  reinstall; Cmd-hover → `DESCRIBE` is unchanged.
+- **Count rows.** The results grid's right-click menu gained **Count rows**
+  (then a separator, then the CSV/Excel items). It runs
+  `SELECT COUNT(*) FROM (<query>)` for the tab's last query on a throwaway
+  session — the grid's open cursor is never disturbed — and shows the
+  thousands-separated result in a popup. Offered only for settled, wrapable
+  query results (not DESCRIBE/object viewers); a query with `:binds` surfaces
+  the server error.
+- **Row cap is a free-form field.** Settings → Results → Maximum rows replaces
+  the fixed picker. Blank or `0` means **unlimited** (the grid pages until the
+  cursor is exhausted); any other integer is the cap.
+- **Configurable grid density.** The results-grid row height is now a
+  preference (`grid_row_height`, 18–34pt, default 22) with a slider in
+  Settings → Results ("Row height"); dragging previews live and the value is
+  persisted on release. Replaces the earlier fixed 22px compact size.
+- Tests: new `format_count` unit tests + updated preference-defaults test;
+  `cargo clippy --features gui --all-targets -- -D warnings` and the gui lib
+  tests (124) are green.

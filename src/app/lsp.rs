@@ -118,6 +118,10 @@ impl HoverProvider for OracleHover {
     ) -> Task<anyhow::Result<Option<lsp_types::Hover>>> {
         let snapshot = text.to_string();
         let out = self.view.update(cx, |this, _| {
+            // Hover detail cards are opt-in (Settings → Editor → Hover).
+            if !this.hover_details {
+                return None;
+            }
             let tab = this.tabs.iter().find(|t| t.id == self.tab_id)?;
             let conn_id = tab.connection_id.clone();
             if is_trivia_position(&snapshot, offset) {

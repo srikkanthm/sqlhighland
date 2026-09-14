@@ -8,9 +8,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::{img, px, App, Context, Entity, ObjectFit, Window};
 use gpui_kit::component::button::Button;
+use gpui_kit::component::input::Input;
 use gpui_kit::component::setting::{
     RenderOptions, SelectIndex, SettingGroup, SettingItem, SettingPage, Settings,
 };
+use gpui_kit::component::slider::{Slider, SliderValue};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -118,6 +120,24 @@ impl SqlHighlandView {
     ) {
         // Owned for the 'static dialog builder below.
         let view = view.clone();
+        // Settings → Results writes into the view-owned row-cap field; seed it
+        // with the current preference every time the dialog opens.
+        let cap_input = view.read(cx).result_cap_input.clone();
+        cap_input.update(cx, |state, cx| {
+            let cap = Preferences::load().result_cap;
+            let text = if cap == 0 {
+                String::new()
+            } else {
+                cap.to_string()
+            };
+            state.set_value(text, window, cx);
+        });
+        // Seed the density slider to the current row height.
+        let density_slider = view.read(cx).grid_density_slider.clone();
+        let row_height = view.read(cx).grid_row_height;
+        density_slider.update(cx, |state, cx| {
+            state.set_value(SliderValue::Single(row_height as f32), window, cx);
+        });
         // A targeted open (About) uses a unique id so the kit builds fresh
         // state on the requested page; a normal open keeps the persistent id
         // (and its remembered page/search).
@@ -131,6 +151,8 @@ impl SqlHighlandView {
         window.open_dialog(cx, move |dialog, _, cx| {
             let muted = cx.theme().muted_foreground;
             let hover_bg = cx.theme().accent;
+            let cap_input = cap_input.clone();
+            let density_slider = density_slider.clone();
             // Reloaded on every rebuild so the check mark follows the
             // selection while the dialog stays open.
             let current = Preferences::load().theme_name();
@@ -196,6 +218,7 @@ impl SqlHighlandView {
             let system_view = view.clone();
             let system_selected = show_system;
             let system_view_outer = system_view.clone();
+            let hover_view_outer = view.clone();
             dialog
                 .title("Settings")
                 .w(px(640.))
@@ -510,50 +533,151 @@ impl SqlHighlandView {
                                         })
                                         .keywords(["font", "size", "text"]),
                                     ]),
+                                    SettingGroup::new().title("Hover").items(vec![
+                                        SettingItem::render(move |_, _, _| {
+                                            let hover_view = hover_view_outer.clone();
+                                            let enabled = Preferences::load().hover_details;
+                                            v_flex().gap_1().child(
+                                                div()
+                                                    .id("settings-hover-details")
+                                                    .w_full()
+                                                    .p_2()
+                                                    .rounded_md()
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_2()
+                                                            .items_center()
+                                                            .child(
+                                                                v_flex().flex_1()
+                                                                    .child(
+                                                                        div().text_sm().child(
+                                                                            "Show details on hover",
+                                                                        ),
+                                                                    )
+                                                                    .child(
+                                                                        div()
+                                                                            .text_xs()
+                                                                            .text_color(muted)
+                                                                            .child(
+                                                                                "Table and column cards while hovering the editor",
+                                                                            ),
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                Switch::new("settings-hover-toggle")
+                                                                    .small()
+                                                                    .checked(enabled)
+                                                                    .on_change(move |checked, _, cx| {
+                                                                        hover_view.update(cx, |this, cx| {
+                                                                            let mut prefs = Preferences::load();
+                                                                            prefs.hover_details = *checked;
+                                                                            let _ = prefs.save();
+                                                                            this.hover_details = *checked;
+                                                                            cx.notify();
+                                                                        });
+                                                                    }),
+                                                            ),
+                                                    ),
+                                            )
+                                        })
+                                        .keywords(["hover", "tooltip", "details", "card"]),
+                                    ]),
                                 ]),
                             SettingPage::new("Results")
                                 .icon(KitIcon::Table)
                                 .groups(vec![
                                     SettingGroup::new().title("Row limit").items(vec![
-                                        SettingItem::render(move |_, _, cx| {
-                                            const CAPS: &[(usize, &str)] = &[
-                                                (10_000, "10,000"),
-                                                (50_000, "50,000"),
-                                                (100_000, "100,000"),
-                                                (500_000, "500,000"),
-                                                (1_000_000, "1,000,000"),
-                                            ];
-                                            let current =
-                                                Preferences::load().result_cap;
-                                            let ids = [
-                                                "settings-cap-0",
-                                                "settings-cap-1",
-                                                "settings-cap-2",
-                                                "settings-cap-3",
-                                                "settings-cap-4",
-                                            ];
-                                            v_flex().gap_1().children(CAPS.iter().enumerate().map(
-                                                |(ix, (n, label))| {
-                                                    let n = *n;
-                                                    settings_pick_row(
-                                                        ids[ix],
-                                                        format!("{label} rows"),
-                                                        None,
-                                                        current == n,
-                                                        cx,
-                                                        move |_, window, cx| {
-                                                            let mut prefs =
-                                                                Preferences::load();
-                                                            prefs.result_cap = n;
-                                                            Self::save_prefs_status(&prefs, cx);
-                                                            window.refresh();
-                                                        },
-                                                    )
-                                                },
-                                            ))
+                                        SettingItem::render(move |_, _, _| {
+                                            let cap_input = cap_input.clone();
+                                            v_flex().gap_1().child(
+                                                div()
+                                                    .id("settings-result-cap")
+                                                    .w_full()
+                                                    .p_2()
+                                                    .rounded_md()
+                                                    .child(
+                                                        v_flex()
+                                                            .gap_1()
+                                                            .child(
+                                                                div()
+                                                                    .text_sm()
+                                                                    .child("Maximum rows"),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(muted)
+                                                                    .child(
+                                                                        "Grid stops loading past this many rows. Blank or 0 = unlimited",
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                Input::new(&cap_input)
+                                                                    .w_full(),
+                                                            ),
+                                                    ),
+                                            )
                                         })
                                         .keywords([
                                             "results", "limit", "rows", "cap", "grid",
+                                        ]),
+                                    ]),
+                                    SettingGroup::new().title("Grid").items(vec![
+                                        SettingItem::render(move |_, _, cx| {
+                                            let slider = density_slider.clone();
+                                            let height =
+                                                slider.read(cx).value().end().round() as u32;
+                                            v_flex().gap_1().child(
+                                                div()
+                                                    .id("settings-grid-density")
+                                                    .w_full()
+                                                    .p_2()
+                                                    .rounded_md()
+                                                    .child(
+                                                        v_flex()
+                                                            .gap_2()
+                                                            .child(
+                                                                h_flex()
+                                                                    .gap_2()
+                                                                    .items_center()
+                                                                    .child(
+                                                                        v_flex()
+                                                                            .flex_1()
+                                                                            .child(
+                                                                                div()
+                                                                                    .text_sm()
+                                                                                    .child(
+                                                                                        "Row height",
+                                                                                    ),
+                                                                            )
+                                                                            .child(
+                                                                                div()
+                                                                                    .text_xs()
+                                                                                    .text_color(muted)
+                                                                                    .child(
+                                                                                        "Results grid compactness",
+                                                                                    ),
+                                                                            ),
+                                                                    )
+                                                                    .child(
+                                                                        div()
+                                                                            .text_sm()
+                                                                            .text_color(muted)
+                                                                            .child(format!(
+                                                                                "{height} px"
+                                                                            )),
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                Slider::new(&slider)
+                                                                    .w_full(),
+                                                            ),
+                                                    ),
+                                            )
+                                        })
+                                        .keywords([
+                                            "grid", "density", "compact", "rows", "height",
+                                            "spacing", "tight",
                                         ]),
                                     ]),
                                     SettingGroup::new().title("Query timeout").items(vec![

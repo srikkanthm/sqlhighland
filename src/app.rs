@@ -19,7 +19,10 @@ use crate::complete::{
     build_alias_map, byte_to_lsp_pos, describe_target, hover_markdown, is_trivia_position,
     qualifier_before, word_at,
 };
-use crate::config::{CompleteMode, Preferences, SavedConfig, SavedTab, TabsManifest};
+use crate::config::{
+    CompleteMode, Preferences, SavedConfig, SavedTab, TabsManifest, GRID_ROW_HEIGHT_MAX,
+    GRID_ROW_HEIGHT_MIN,
+};
 use crate::conn_picker::{PendingPick, PickAfter};
 use crate::db::SharedSession;
 use crate::filetab::{self, FileStamp};
@@ -43,6 +46,7 @@ use gpui_kit::component::list::ListItem;
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::resizable::ResizableState;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
+use gpui_kit::component::slider::{SliderEvent, SliderState, SliderValue};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::tree::{tree, TreeState};
@@ -449,6 +453,19 @@ pub struct SqlHighlandView {
     pub(crate) complete_auto: bool,
     /// Include SYS/SYSTEM/etc. objects in suggestions. Mirrors preferences.
     pub(crate) show_system: bool,
+    /// Show table/column detail cards on editor hover. Mirrors preferences.
+    pub(crate) hover_details: bool,
+    /// Results-grid row cap in effect (0 = unlimited). Mirrors the saved
+    /// preference and is updated live from the Settings field.
+    pub(crate) result_cap: usize,
+    /// Results-grid row height in points (compactness). Mirrors the saved
+    /// preference and is updated live from the Settings slider.
+    pub(crate) grid_row_height: u32,
+    /// Settings → Results density slider (row height).
+    pub(crate) grid_density_slider: Entity<SliderState>,
+    /// Free-form results-grid row cap field (Settings → Results). `0` or
+    /// empty means unlimited.
+    pub(crate) result_cap_input: Entity<InputState>,
     /// Window-lifetime subscriptions (OS appearance observer for System
     /// theme mode). Kept alive by ownership, like per-tab `_subs`.
     pub(crate) _subs: Vec<Subscription>,
@@ -557,6 +574,28 @@ impl SqlHighlandView {
             InputState::new(window, cx)
                 .placeholder("password for this session")
                 .masked(true)
+        });
+        // Settings → Results row cap. Blank/0 renders as unlimited.
+        let result_cap_value = Preferences::load().result_cap;
+        let result_cap_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("100000")
+                .default_value(if result_cap_value == 0 {
+                    String::new()
+                } else {
+                    result_cap_value.to_string()
+                })
+        });
+        // Settings → Results density slider (row height in points).
+        let grid_row_height = Preferences::load()
+            .grid_row_height
+            .clamp(GRID_ROW_HEIGHT_MIN, GRID_ROW_HEIGHT_MAX);
+        let grid_density_slider = cx.new(|_| {
+            SliderState::new()
+                .min(GRID_ROW_HEIGHT_MIN as f32)
+                .max(GRID_ROW_HEIGHT_MAX as f32)
+                .step(1.)
+                .default_value(SliderValue::Single(grid_row_height as f32))
         });
 
         // Cmd+Enter runs the statement under the cursor. Scoped to the
@@ -668,6 +707,11 @@ impl SqlHighlandView {
             },
             complete_auto: prefs.completion == CompleteMode::Auto,
             show_system: prefs.show_system_schemas,
+            hover_details: prefs.hover_details,
+            result_cap: prefs.result_cap,
+            grid_row_height,
+            grid_density_slider,
+            result_cap_input,
             _subs: Vec::new(),
         };
         // Follow the OS appearance while the theme mode is System. The
@@ -677,6 +721,71 @@ impl SqlHighlandView {
             crate::guitheme::reapply_for_system_appearance(window, cx);
         });
         this._subs.push(appearance_sub);
+        // Persist the free-form results row cap as it is edited. Empty or 0
+        // means unlimited; non-numeric text is left unsaved (the field keeps
+        // what was typed, but the preference is unchanged).
+        {
+            let cap_input = this.result_cap_input.clone();
+            let cap_input_sub = cap_input.clone();
+            let cap_sub = cx.subscribe_in(
+                &cap_input,
+                window,
+                move |this, _, ev: &InputEvent, _, cx| {
+                    if !matches!(
+                        ev,
+                        InputEvent::Change | InputEvent::Blur | InputEvent::PressEnter { .. }
+                    ) {
+                        return;
+                    }
+                    let text = cap_input_sub.read(cx).value().to_string();
+                    let trimmed = text.trim();
+                    let parsed = if trimmed.is_empty() {
+                        Some(0usize)
+                    } else if trimmed.bytes().all(|b| b.is_ascii_digit()) {
+                        trimmed.parse::<usize>().ok()
+                    } else {
+                        None
+                    };
+                    if let Some(cap) = parsed {
+                        // Apply immediately (the next run reads the view field),
+                        // and persist for the next launch.
+                        this.result_cap = cap;
+                        let mut prefs = Preferences::load();
+                        if prefs.result_cap != cap {
+                            prefs.result_cap = cap;
+                            let _ = prefs.save();
+                        }
+                    }
+                },
+            );
+            this._subs.push(cap_sub);
+        }
+        // Grid density slider: preview live while dragging, persist on
+        // release (avoids a preferences write per pixel).
+        {
+            let slider = this.grid_density_slider.clone();
+            let sub = cx.subscribe(&slider, move |this, _, ev: &SliderEvent, cx| {
+                let (value, persist) = match ev {
+                    SliderEvent::Change(v) => (*v, false),
+                    SliderEvent::Release(v) => (*v, true),
+                };
+                let height = (value.end().round() as i64)
+                    .clamp(GRID_ROW_HEIGHT_MIN as i64, GRID_ROW_HEIGHT_MAX as i64)
+                    as u32;
+                if this.grid_row_height != height {
+                    this.grid_row_height = height;
+                    cx.notify();
+                }
+                if persist {
+                    let mut prefs = Preferences::load();
+                    if prefs.grid_row_height != height {
+                        prefs.grid_row_height = height;
+                        let _ = prefs.save();
+                    }
+                }
+            });
+            this._subs.push(sub);
+        }
         this.restore_tabs(window, cx);
         // Give the window an initial focus target. Without this, GPUI has no
         // focused dispatch node until the user clicks the editor, so the

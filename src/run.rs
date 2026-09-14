@@ -25,6 +25,7 @@ use crate::sql::{
     StatementKind, SubVar,
 };
 
+mod count;
 mod export;
 mod query;
 mod script;

@@ -258,9 +258,18 @@ pub struct Preferences {
     /// Include SYS/SYSTEM/etc. objects in suggestions. Default hidden.
     #[serde(default)]
     pub show_system_schemas: bool,
-    /// Results-grid row cap (exports stay uncapped). Default 100k.
+    /// Show table/column detail cards when hovering the editor. Off by
+    /// default (the cards are informative but can be noisy).
+    #[serde(default)]
+    pub hover_details: bool,
+    /// Results-grid row cap (exports stay uncapped). Default 100k; `0`
+    /// means unlimited (page until the cursor is exhausted).
     #[serde(default = "default_result_cap")]
     pub result_cap: usize,
+    /// Results-grid row height in points (compactness). Clamped to
+    /// [`GRID_ROW_HEIGHT_MIN`]..=[`GRID_ROW_HEIGHT_MAX`] on load/use.
+    #[serde(default = "default_grid_row_height")]
+    pub grid_row_height: u32,
     /// CSV delimiter for file exports ("," ";" tab "|" presets).
     #[serde(default = "default_csv_delimiter")]
     pub csv_delimiter: String,
@@ -295,7 +304,9 @@ impl Default for Preferences {
             theme: SYSTEM_THEME.to_string(),
             completion: CompleteMode::default(),
             show_system_schemas: false,
+            hover_details: false,
             result_cap: default_result_cap(),
+            grid_row_height: default_grid_row_height(),
             csv_delimiter: default_csv_delimiter(),
             csv_header: default_true(),
             font_family: String::new(),
@@ -310,6 +321,14 @@ impl Default for Preferences {
 
 fn default_result_cap() -> usize {
     100_000
+}
+
+/// Compactness bounds for the results grid (row height in points).
+pub const GRID_ROW_HEIGHT_MIN: u32 = 18;
+pub const GRID_ROW_HEIGHT_MAX: u32 = 34;
+
+fn default_grid_row_height() -> u32 {
+    22
 }
 
 fn default_csv_delimiter() -> String {
@@ -535,6 +554,8 @@ mod tests {
         assert_eq!(p.font_family, "");
         assert_eq!(p.font_size, 13);
         assert_eq!(p.query_timeout_secs, 60);
+        assert!(!p.hover_details);
+        assert_eq!(p.grid_row_height, 22);
         let p: Preferences = toml::from_str("theme = \"Nord Dark\"\n").unwrap();
         assert_eq!(p.result_cap, 100_000);
         assert_eq!(p.csv_delimiter, ",");

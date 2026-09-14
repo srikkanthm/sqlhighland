@@ -174,9 +174,15 @@ impl SqlHighlandView {
         let kind = statement_kind(&sql);
         let dml = is_dml(&sql);
         let sql_label = sql.clone();
-        // Grid row cap from Settings (exports stay uncapped by design).
-        // Clamped so a hand-edited preferences file can't OOM the grid.
-        let cap = Preferences::load().result_cap.clamp(1_000, 5_000_000);
+        // Grid row cap: 0 = unlimited (page until the cursor is exhausted).
+        // Read from the live view field so a Settings change applies to the
+        // next run without a reload. Exports stay uncapped by design.
+        let cap = match self.result_cap {
+            0 => usize::MAX,
+            n => n,
+        };
+        // The first page is normally one chunk; never fetch past the cap.
+        let first_chunk = cap.min(FETCH_CHUNK);
         // Ticker repainting the live `Running… Ns` status twice a second.
         // Exits on its own once the run ends (token mismatch or not busy);
         // no handle needed because a newer run's ticker supersedes it.
@@ -224,7 +230,7 @@ impl SqlHighlandView {
                             StatementKind::Query => {
                                 let inner = std::time::Instant::now();
                                 session
-                                    .start_query(&sql, FETCH_CHUNK, &binds)
+                                    .start_query(&sql, first_chunk, &binds)
                                     .map(|(columns, page, id)| {
                                         Outcome::Rows(
                                             columns,
@@ -276,6 +282,9 @@ impl SqlHighlandView {
                                 "Table not found or no access — DESCRIBE returned no columns",
                             ));
                         }
+                        // Hitting the cap on the first page (with more rows
+                        // still available) already stops further fetching.
+                        let capped = page.rows.len() >= cap && !page.exhausted;
                         let fetch = Arc::new(FetchState {
                             session: session.clone(),
                             query_id,
@@ -285,9 +294,9 @@ impl SqlHighlandView {
                                 columns,
                                 rows: to_shared(page.rows),
                                 elapsed_ms,
-                                exhausted: page.exhausted,
+                                exhausted: page.exhausted || capped,
                                 loading: false,
-                                capped: false,
+                                capped,
                             }),
                             view: view.clone(),
                             tab_id: tab_id.clone(),
