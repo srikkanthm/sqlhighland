@@ -241,6 +241,9 @@ pub(crate) struct QueryTab {
     pub(crate) output_text: Entity<TextareaState>,
     /// Last executed statement text. Feeds the `query` sheet on Excel export.
     pub(crate) last_sql: String,
+    /// Native bind values for `last_sql`, retained so an export can re-execute
+    /// the query on its own session. In-memory only, never persisted.
+    pub(crate) last_binds: Vec<crate::db::BindParam>,
     /// An export drain is paging this tab's cursor past the grid cap.
     /// While true the grid shows fetched-so-far rows and scroll-fetching
     /// pauses (`loading` is held) so pages never interleave or duplicate.
@@ -321,6 +324,20 @@ impl SearchableListItem for ChoiceItem {
     fn value(&self) -> &Self::Value {
         &self.value
     }
+}
+
+/// Entity handles the Settings dialog seeds on open. Gathered by the caller —
+/// via direct field access when the view is already leased (menu About, the
+/// sidebar gear), or `view.read` when it is not — so `open_settings_dialog`
+/// never reads the view itself (a nested read under a lease panics).
+pub struct SettingsControls {
+    pub(crate) result_cap_input: Entity<InputState>,
+    pub(crate) grid_density_slider: Entity<SliderState>,
+    pub(crate) query_timeout_input: Entity<InputState>,
+    pub(crate) csv_delim_input: Entity<InputState>,
+    pub(crate) theme_select: Entity<SelectState<SearchableVec<SharedString>>>,
+    pub(crate) font_select: Entity<SelectState<SearchableVec<ChoiceItem>>>,
+    pub(crate) grid_row_height: u32,
 }
 
 /// Global handle to the main view, stashed at window creation. Lets

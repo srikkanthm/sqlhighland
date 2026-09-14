@@ -55,7 +55,10 @@ fn main() {
                             let toggle_off = view
                                 .update(cx, |this, _| this.note_dialog_open_for_settings(active));
                             if !toggle_off {
-                                app::SqlHighlandView::open_settings_dialog(&view, window, cx, None);
+                                let controls = view.read(cx).settings_controls();
+                                app::SqlHighlandView::open_settings_dialog(
+                                    &view, controls, window, cx, None,
+                                );
                             } else if window.has_active_dialog(cx) {
                                 window.close_dialog(cx);
                             }

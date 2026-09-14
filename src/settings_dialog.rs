@@ -18,7 +18,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use gpui_kit_assets::IconName as KitIcon;
 
-use crate::app::{app_view, SqlHighlandView};
+use crate::app::{app_view, SettingsControls, SqlHighlandView};
 use crate::config::{CompleteMode, Preferences};
 
 /// Index of the "About" page within the `Settings::pages` list built in
@@ -43,7 +43,7 @@ impl SqlHighlandView {
         if self.take_settings_toggle(window, cx) {
             return;
         }
-        Self::open_settings_dialog(&cx.entity(), window, cx, None);
+        Self::open_settings_dialog(&cx.entity(), self.settings_controls(), window, cx, None);
     }
 
     /// App-menu "About SQLHighland": open the Settings dialog on its About
@@ -55,7 +55,13 @@ impl SqlHighlandView {
             window.close_dialog(cx);
         }
         self.note_dialog_open_for_settings(window.has_active_dialog(cx));
-        Self::open_settings_dialog(&cx.entity(), window, cx, Some(ABOUT_PAGE_IX));
+        Self::open_settings_dialog(
+            &cx.entity(),
+            self.settings_controls(),
+            window,
+            cx,
+            Some(ABOUT_PAGE_IX),
+        );
     }
 
     /// Cmd+, toggle decision shared by the view-level entry (above) and the
@@ -106,6 +112,21 @@ impl SqlHighlandView {
         }
     }
 
+    /// The Settings control handles, gathered by direct field access so the
+    /// dialog can be opened from a context that already holds the view lease
+    /// (menu About, the sidebar gear). Reading the view here would panic.
+    pub fn settings_controls(&self) -> SettingsControls {
+        SettingsControls {
+            result_cap_input: self.result_cap_input.clone(),
+            grid_density_slider: self.grid_density_slider.clone(),
+            query_timeout_input: self.query_timeout_input.clone(),
+            csv_delim_input: self.csv_delim_input.clone(),
+            theme_select: self.theme_select.clone(),
+            font_select: self.font_select.clone(),
+            grid_row_height: self.grid_row_height,
+        }
+    }
+
     /// Settings dialog as an associated function so the global App::on_action
     /// handler (which has a window but no view handle) can open it too.
     /// Pure open: toggle bookkeeping lives with the callers (see above).
@@ -113,15 +134,17 @@ impl SqlHighlandView {
     /// dirty views — window refreshes alone reuse cached ones), then close.
     pub fn open_settings_dialog(
         view: &Entity<SqlHighlandView>,
+        controls: SettingsControls,
         window: &mut Window,
         cx: &mut App,
         initial_page: Option<usize>,
     ) {
         // Owned for the 'static dialog builder below.
         let view = view.clone();
-        // Settings → Results writes into the view-owned row-cap field; seed it
-        // with the current preference every time the dialog opens.
-        let cap_input = view.read(cx).result_cap_input.clone();
+        // Seed the controls from the current preferences. Handles are passed
+        // in rather than read off the view: callers (menu About, sidebar gear)
+        // may already hold the view's lease, and a nested read would panic.
+        let cap_input = controls.result_cap_input;
         cap_input.update(cx, |state, cx| {
             let cap = Preferences::load().result_cap;
             let text = if cap == 0 {
@@ -132,13 +155,13 @@ impl SqlHighlandView {
             state.set_value(text, window, cx);
         });
         // Seed the density slider to the current row height.
-        let density_slider = view.read(cx).grid_density_slider.clone();
-        let row_height = view.read(cx).grid_row_height;
+        let density_slider = controls.grid_density_slider;
+        let row_height = controls.grid_row_height;
         density_slider.update(cx, |state, cx| {
             state.set_value(SliderValue::Single(row_height as f32), window, cx);
         });
         // Seed the query-timeout and delimiter fields.
-        let timeout_input = view.read(cx).query_timeout_input.clone();
+        let timeout_input = controls.query_timeout_input;
         let timeout_secs = Preferences::load().query_timeout_secs;
         timeout_input.update(cx, |state, cx| {
             state.set_value(
@@ -151,18 +174,18 @@ impl SqlHighlandView {
                 cx,
             );
         });
-        let delim_input = view.read(cx).csv_delim_input.clone();
+        let delim_input = controls.csv_delim_input;
         let delim = Preferences::load().csv_delimiter;
         delim_input.update(cx, |state, cx| {
             state.set_value(crate::export::csv_delim_display(&delim), window, cx);
         });
         // Seed the theme/font dropdowns with the current selection.
-        let theme_select = view.read(cx).theme_select.clone();
+        let theme_select = controls.theme_select;
         let theme = Preferences::load().theme_name();
         theme_select.update(cx, |state, cx| {
             state.set_selected_value(&SharedString::from(theme.clone()), window, cx);
         });
-        let font_select = view.read(cx).font_select.clone();
+        let font_select = controls.font_select;
         let font = Preferences::load().font_family;
         font_select.update(cx, |state, cx| {
             state.set_selected_value(&SharedString::from(font.clone()), window, cx);

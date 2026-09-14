@@ -142,6 +142,9 @@ impl SqlHighlandView {
         let run_token = self.tabs[ix].run_token;
         // Remembered for the export audit tab.
         self.tabs[ix].last_sql = sql.clone();
+        // Retained so an export can re-execute on its own session (the worker
+        // moves the originals into the driver).
+        self.tabs[ix].last_binds = binds.clone();
         // Executed table names boost future suggestion rankings.
         self.bump_usage(&conn_id, &sql);
         // Warm the suggestion cache alongside the run (no-op when fresh),
@@ -294,7 +297,7 @@ impl SqlHighlandView {
                                 columns,
                                 rows: to_shared(page.rows),
                                 elapsed_ms,
-                                exhausted: page.exhausted || capped,
+                                exhausted: page.exhausted,
                                 loading: false,
                                 capped,
                             }),

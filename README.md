@@ -36,7 +36,9 @@ development — see [`docs/PROGRESS.md`](docs/PROGRESS.md) for the build log and
   (no re-execution); the grid row cap is configurable in Settings (blank/0 =
   unlimited).
 - **Export** — CSV and native `.xlsx` (with the exported SQL on a `query`
-  sheet), uncapped, streamed with constant memory.
+  sheet), always the **full** result set, streamed with constant memory. Uses
+  the grid buffer when it already holds every row; otherwise it re-executes the
+  query on its **own session**, so the grid and other tabs stay usable.
 - **Count rows** — right-click the grid to run `SELECT COUNT(*)` over the
   current query on a **separate session**, so the grid and its open cursor are
   left untouched; the result appears in a popup.

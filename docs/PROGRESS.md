@@ -993,3 +993,24 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   the font list expanded to ~14 common monospace families.
 - `settings_pick_row` removed (no callers left). New
   `export::csv_delim_from_input` / `csv_delim_display` helpers with unit tests.
+
+## Fixes: About/gear crash + independent, uncapped export (2026-09-14)
+
+- **Settings open crash.** `open_settings_dialog` read the view (`view.read`)
+  to fetch the Settings control handles; when called from a path that already
+  holds the view's mutable lease — the app-menu **About** (`view.update`) and
+  the sidebar **gear** (`cx.listener`) — GPUI panicked on the nested read
+  (Cmd+, was fine because `main.rs` opens it outside a lease). The handles are
+  now gathered by direct field access (`SqlHighlandView::settings_controls`
+  returning a `SettingsControls` struct) and passed in; the dialog never reads
+  the view.
+- **Export is uncapped and independent.** The grid cap previously set
+  `exhausted = true`, which the export drain read as "cursor done", so exports
+  stopped at the cap. `exhausted` (cursor exhausted) and `capped` (grid hit the
+  cap) are now separate flags. Export is a hybrid: it writes the grid buffer
+  when the grid already holds every row, otherwise it re-executes the query on
+  a **throwaway session** (`last_sql` + retained `last_binds`) and streams to
+  the file. Consequences: the full result set is always exported; another tab
+  on the same connection can run queries during an export; the grid buffer is
+  not grown (cap's memory guard respected). `FOR UPDATE` results that aren't
+  complete export the buffered rows with a notice (re-running would re-lock).

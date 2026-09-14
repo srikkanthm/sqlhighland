@@ -157,6 +157,7 @@ impl SqlHighlandView {
             hide_results: false,
             output_text: cx.new(|cx| TextareaState::new(window, cx)),
             last_sql: String::new(),
+            last_binds: Vec::new(),
             exporting: false,
             export_rows: 0,
             export_cancel: None,

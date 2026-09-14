@@ -201,7 +201,7 @@ impl TableDelegate for ResultsDelegate {
     }
 
     fn has_more(&self, _: &App) -> bool {
-        self.with_data(|d| !d.exhausted && !d.loading, false)
+        self.with_data(|d| !d.exhausted && !d.capped && !d.loading, false)
     }
 
     fn load_more_threshold(&self) -> usize {
@@ -214,7 +214,7 @@ impl TableDelegate for ResultsDelegate {
         };
         {
             let mut data = lock(&fetch.data);
-            if data.loading || data.exhausted {
+            if data.loading || data.exhausted || data.capped {
                 return;
             }
             data.loading = true;
@@ -250,8 +250,8 @@ impl TableDelegate for ResultsDelegate {
                                 let take = page.rows.len().min(room);
                                 data.rows
                                     .extend(to_shared(page.rows).into_iter().take(take));
-                                data.capped = data.rows.len() >= fetch.cap;
-                                data.exhausted = page.exhausted || data.capped;
+                                data.exhausted = page.exhausted;
+                                data.capped = data.rows.len() >= fetch.cap && !page.exhausted;
                                 data.loading = false;
                             }
                             table.refresh(cx);

@@ -3,10 +3,15 @@
 //! Part of the run pipeline (see `run.rs`).
 
 use super::*;
+use crate::model::ConnectionConfig;
+use crate::session::throwaway_session;
 
 /// Outcome of the background export drain.
 pub(crate) enum ExportOutcome {
     Done(u64),
+    /// Buffered-only export: the grid was incomplete and the query wasn't
+    /// re-run (e.g. `FOR UPDATE` locks). Carries a user-facing notice.
+    Partial(u64, String),
     Cancelled(u64),
     Failed(String),
 }
@@ -39,64 +44,124 @@ fn unix_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
-/// Blocking drain: page the cursor to exhaustion, streaming rows to the file
-/// and appending them to the grid's buffer. Runs on the background executor
-/// holding the session lock; polls `cancel` each chunk. Writes to a `.part`
-/// sibling and renames on success so a failed/cancelled export never leaves
-/// a half file behind at the target path.
+/// True when the statement is a `SELECT ... FOR UPDATE` (row locks). A re-run
+/// on a fresh session would try to re-lock rows the tab still holds, so those
+/// exports fall back to the buffered rows.
+fn sql_locks_rows(sql: &str) -> bool {
+    sql.to_ascii_lowercase().contains("for update")
+}
+
+/// Disconnect a throwaway export session, if one was opened.
+fn close_throwaway(session: &Option<SharedSession>) {
+    if let Some(s) = session {
+        lock(s).disconnect();
+    }
+}
+
+/// Blocking drain: writes the result set to the file with constant memory. The
+/// grid buffer is the source when it already holds the complete set; otherwise
+/// the query is re-executed on a **throwaway session** so the grid's cursor and
+/// other tabs are untouched. `FOR UPDATE` queries never re-run (lock conflict):
+/// they export the buffered rows with a notice. Writes to a `.part` sibling and
+/// renames on success so a failed/cancelled export never leaves a half file.
 #[allow(clippy::too_many_arguments)] // drain config is threaded from the UI snapshot
 fn export_drain_blocking(
-    session: &SharedSession,
     fetch: &Arc<FetchState>,
-    query_id: u64,
-    columns: &[String],
+    cfg: &ConnectionConfig,
+    sql: &str,
+    binds: &[BindParam],
+    complete: bool,
     fmt: ExportFormat,
     path: &std::path::Path,
     sheet: &str,
-    query_sql: &str,
     cancel: &Arc<std::sync::atomic::AtomicBool>,
     csv_delim: char,
     csv_header: bool,
 ) -> ExportOutcome {
     use std::sync::atomic::Ordering;
     let tmp = path.with_extension("part");
-    // CSV streams line by line; XLSX buffers through its constant-memory
-    // worksheet (flat memory either way — no FETCH_CAP on exports).
+
+    // Rows already buffered by the grid, plus their column names.
+    let (buffered, buffered_columns): (Vec<Vec<Option<String>>>, Vec<String>) = {
+        let data = lock(&fetch.data);
+        (
+            data.rows
+                .iter()
+                .map(|r| r.iter().map(|c| c.as_deref().map(str::to_string)).collect())
+                .collect(),
+            data.columns.iter().map(|c| c.name.clone()).collect(),
+        )
+    };
+
+    let locked = sql_locks_rows(sql);
+    let re_run = !complete && !locked && !sql.is_empty();
+    let partial_notice = locked && !complete;
+
+    // Re-execute on a throwaway session when the grid is incomplete: connect
+    // and run the first page, which also gives us the columns.
+    let mut session: Option<SharedSession> = None;
+    let mut fresh: Option<(Vec<ColumnInfo>, FetchPage, u64)> = None;
+    if re_run {
+        let s = throwaway_session(cfg.engine);
+        let started = {
+            let mut guard = lock(&s);
+            if let Err(e) = guard.connect(cfg) {
+                Err(e)
+            } else {
+                guard.start_query(sql, FETCH_CHUNK, binds)
+            }
+        };
+        match started {
+            Ok((columns, page, id)) => {
+                fresh = Some((columns, page, id));
+                session = Some(s);
+            }
+            Err(e) => return ExportOutcome::Failed(e.to_string()),
+        }
+    }
+
+    let columns: Vec<String> = match &fresh {
+        Some((cols, _, _)) => cols.iter().map(|c| c.name.clone()).collect(),
+        None => buffered_columns,
+    };
+
+    // Open the writer (CSV streams; XLSX uses its constant-memory worksheet).
     let mut csv_out: Option<std::io::BufWriter<std::fs::File>> = None;
     let mut xlsx: Option<XlsxBuilder> = None;
     match fmt {
         ExportFormat::Csv => {
             let file = match std::fs::File::create(&tmp) {
                 Ok(f) => f,
-                Err(e) => return ExportOutcome::Failed(format!("cannot write file: {e}")),
+                Err(e) => {
+                    close_throwaway(&session);
+                    return ExportOutcome::Failed(format!("cannot write file: {e}"));
+                }
             };
             let mut w = std::io::BufWriter::new(file);
             if csv_header {
                 if let Err(e) = (|| -> std::io::Result<()> {
                     use std::io::Write as _;
-                    w.write_all(csv_header_line_with(columns, csv_delim).as_bytes())?;
+                    w.write_all(csv_header_line_with(&columns, csv_delim).as_bytes())?;
                     w.write_all(b"\n")?;
                     Ok(())
                 })() {
+                    close_throwaway(&session);
+                    let _ = std::fs::remove_file(&tmp);
                     return ExportOutcome::Failed(format!("cannot write file: {e}"));
                 }
             }
             csv_out = Some(w);
         }
-        ExportFormat::Xlsx => match XlsxBuilder::new(sheet, columns, query_sql) {
+        ExportFormat::Xlsx => match XlsxBuilder::new(sheet, &columns, sql) {
             Ok(b) => xlsx = Some(b),
-            Err(e) => return ExportOutcome::Failed(e),
+            Err(e) => {
+                close_throwaway(&session);
+                return ExportOutcome::Failed(e);
+            }
         },
     }
+
     let mut rows: u64 = 0;
-    // Rows already buffered by scrolling are exported first, then the cursor
-    // is paged. The grid keeps everything (uncapped by design here).
-    let buffered: Vec<Vec<Option<String>>> = lock(&fetch.data)
-        .rows
-        .iter()
-        .map(|r| r.iter().map(|c| c.as_deref().map(str::to_string)).collect())
-        .collect();
-    // Write buffered rows through the same path (counts + file).
     let mut write_row = |row: &Vec<Option<String>>| -> Result<(), String> {
         match fmt {
             ExportFormat::Csv => {
@@ -112,77 +177,78 @@ fn export_drain_blocking(
                 .push_row(row),
         }
     };
-    for row in &buffered {
-        if cancel.load(Ordering::Relaxed) {
-            let _ = std::fs::remove_file(&tmp);
-            return ExportOutcome::Cancelled(rows);
-        }
-        if let Err(e) = write_row(row) {
-            let _ = std::fs::remove_file(&tmp);
-            return ExportOutcome::Failed(e);
-        }
-        rows += 1;
-    }
-    // Mark grid buffer state: buffered rows are now "consumed" for export
-    // purposes but stay visible; further pages append below.
-    let exhausted_already = lock(&fetch.data).exhausted;
-    if !exhausted_already {
-        loop {
+    // Write a batch, honoring cancel between rows. `Err("cancelled")` marks a
+    // user cancel (vs a write failure).
+    let mut write_batch = |batch: &[Vec<Option<String>>], rows: &mut u64| -> Result<(), String> {
+        for row in batch {
             if cancel.load(Ordering::Relaxed) {
-                let _ = std::fs::remove_file(&tmp);
-                return ExportOutcome::Cancelled(rows);
+                return Err("cancelled".to_string());
             }
-            let page = {
-                let mut session = lock(session);
-                session.fetch_more(query_id, FETCH_CHUNK)
-            };
-            let page = match page {
-                Ok(p) => p,
-                Err(e) => {
-                    let _ = std::fs::remove_file(&tmp);
-                    // A real interrupt (token) aborts the in-flight fetch and
-                    // lands here; treat it as a cancel, not a failure.
-                    if cancel.load(Ordering::Relaxed) {
-                        return ExportOutcome::Cancelled(rows);
-                    }
-                    return ExportOutcome::Failed(e.to_string());
-                }
-            };
-            if !page.current {
-                let _ = std::fs::remove_file(&tmp);
-                return ExportOutcome::Failed(
-                    "results changed mid-export (superseded) — export again".to_string(),
-                );
-            }
-            let failed = if page.rows.is_empty() {
-                None
+            write_row(row)?;
+            *rows += 1;
+        }
+        Ok(())
+    };
+
+    if let Some((_, first_page, query_id)) = fresh {
+        // First page from the fresh execution, then page to exhaustion.
+        if let Err(e) = write_batch(&first_page.rows, &mut rows) {
+            close_throwaway(&session);
+            let _ = std::fs::remove_file(&tmp);
+            return if e == "cancelled" {
+                ExportOutcome::Cancelled(rows)
             } else {
-                // Append to the grid buffer (uncapped) and the file.
-                lock(&fetch.data).rows.extend(to_shared(page.rows.clone()));
-                let mut err = None;
-                for row in &page.rows {
-                    if let Err(e) = write_row(row) {
-                        err = Some(e);
-                        break;
-                    }
-                    rows += 1;
-                }
-                err
+                ExportOutcome::Failed(e)
             };
-            if let Some(e) = failed {
-                let _ = std::fs::remove_file(&tmp);
-                return ExportOutcome::Failed(e);
-            }
-            if page.exhausted {
-                break;
+        }
+        if !first_page.exhausted {
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    close_throwaway(&session);
+                    let _ = std::fs::remove_file(&tmp);
+                    return ExportOutcome::Cancelled(rows);
+                }
+                let page = {
+                    let mut guard = lock(session.as_ref().expect("export session"));
+                    guard.fetch_more(query_id, FETCH_CHUNK)
+                };
+                match page {
+                    Ok(p) => {
+                        if let Err(e) = write_batch(&p.rows, &mut rows) {
+                            close_throwaway(&session);
+                            let _ = std::fs::remove_file(&tmp);
+                            return if e == "cancelled" {
+                                ExportOutcome::Cancelled(rows)
+                            } else {
+                                ExportOutcome::Failed(e)
+                            };
+                        }
+                        if p.exhausted {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        close_throwaway(&session);
+                        let _ = std::fs::remove_file(&tmp);
+                        if cancel.load(Ordering::Relaxed) {
+                            return ExportOutcome::Cancelled(rows);
+                        }
+                        return ExportOutcome::Failed(e.to_string());
+                    }
+                }
             }
         }
+        close_throwaway(&session);
+    } else if let Err(e) = write_batch(&buffered, &mut rows) {
+        // Buffered-only export (grid complete, or a locked query we won't re-run).
+        let _ = std::fs::remove_file(&tmp);
+        return if e == "cancelled" {
+            ExportOutcome::Cancelled(rows)
+        } else {
+            ExportOutcome::Failed(e)
+        };
     }
-    {
-        let mut data = lock(&fetch.data);
-        data.exhausted = true;
-        data.loading = false;
-    }
+
     // Finalize the file.
     let finalized: Result<(), String> = match fmt {
         ExportFormat::Csv => {
@@ -210,12 +276,19 @@ fn export_drain_blocking(
         let _ = std::fs::remove_file(&tmp);
         return ExportOutcome::Failed(format!("cannot move file into place: {e}"));
     }
+    if partial_notice {
+        return ExportOutcome::Partial(
+            rows,
+            "Exported buffered rows only — FOR UPDATE results can't be re-run".to_string(),
+        );
+    }
     ExportOutcome::Done(rows)
 }
 
 impl SqlHighlandView {
-    /// Cancel an in-flight export. The drain loop polls the flag each chunk
-    /// and discards the partial file; the grid keeps rows fetched so far.
+    /// Cancel an in-flight export. The drain loop polls the flag between
+    /// chunks and discards the partial file. The export runs on its own
+    /// throwaway session, so the connection's cancel token is not involved.
     pub(crate) fn cancel_export(&mut self, tab_id: &str, cx: &mut Context<Self>) {
         let Some(t) = self.tab_by_id(tab_id) else {
             return;
@@ -226,25 +299,17 @@ impl SqlHighlandView {
         if let Some(flag) = t.export_cancel.clone() {
             flag.store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        let conn_id = t.connection_id.clone();
-        // Also interrupt the in-flight fetch so a slow page doesn't stall the
-        // cancel until the server would have replied anyway.
-        if let Some(conn_id) = conn_id {
-            if let Some(token) = self.pool.cancel_token(&conn_id) {
-                if let Err(e) = token.cancel() {
-                    crate::logging::warn(format!("cancel request failed: {e}"));
-                }
-            }
-        }
         if let Some(t) = self.tab_by_id(tab_id) {
             t.result_meta = "Cancelling export…".into();
         }
         cx.notify();
     }
 
-    /// Start an export of the tab's full result set (paged past the grid cap
-    /// to exhaustion). Opens the native save dialog first; the drain runs on
-    /// the background executor with progress in the status bar.
+    /// Start an export of the tab's full result set. The grid buffer is used
+    /// when it already holds every row; otherwise the query is re-executed on
+    /// its own throwaway session (so the grid and other tabs are untouched).
+    /// Opens the native save dialog first; the drain runs on the background
+    /// executor with progress in the status bar.
     pub(crate) fn start_export(
         &mut self,
         tab_id: &str,
@@ -263,21 +328,28 @@ impl SqlHighlandView {
         if self.tabs[ix].exporting {
             return;
         }
-        let Some(fetch) = self.tabs[ix].fetch.clone() else {
+        if self.tabs[ix].fetch.is_none() {
             self.status = "Nothing to export — run a query first".into();
             cx.notify();
             return;
-        };
+        }
         // Snapshot everything the background drain needs; the tab may be
-        // edited or closed while it runs.
-        let columns: Vec<String> = lock(&fetch.data)
-            .columns
-            .iter()
-            .map(|c| c.name.clone())
-            .collect();
-        let query_id = fetch.query_id;
-        let session = fetch.session.clone();
+        // edited, rebound, or closed while the save dialog is open.
+        let Some(conn_id) = self.tabs[ix].connection_id.clone() else {
+            self.status = "Select a connection for this tab".into();
+            cx.notify();
+            return;
+        };
+        let Some(mut cfg) = self.connections.iter().find(|c| c.id == conn_id).cloned() else {
+            self.status = "Connection not found — pick another".into();
+            cx.notify();
+            return;
+        };
+        if let Some(pw) = self.effective_password(&cfg) {
+            cfg.password = pw;
+        }
         let sql = self.tabs[ix].last_sql.clone();
+        let binds = self.tabs[ix].last_binds.clone();
         let tab_name = self.tabs[ix].name.to_string();
         let tab_id = tab_id.to_string();
         let ext = fmt.ext();
@@ -294,27 +366,27 @@ impl SqlHighlandView {
                 _ => return, // Cancelled in the dialog or picker unavailable.
             };
             view.update(cx, |this, cx| {
-                this.begin_export_drain(&tab_id, fmt, path, columns, query_id, session, sql, cx);
+                this.begin_export_drain(&tab_id, fmt, path, cfg, conn_id, sql, binds, cx);
             })
             .ok();
         })
         .detach();
     }
 
-    /// Mark exporting and spawn the drain loop. The grid's `loading` flag is
-    /// held so scroll-fetching pauses — pages never interleave or duplicate —
-    /// and the status bar shows live progress until completion swaps it for
-    /// the exported path.
+    /// Mark exporting and spawn the drain loop. The grid is left untouched
+    /// (the drain uses its own session when it needs one), so other tabs and
+    /// the grid stay usable; the status bar shows live progress until
+    /// completion swaps it for the exported path.
     #[allow(clippy::too_many_arguments)] // one-shot UI snapshot; grouping would move the same data
     pub(crate) fn begin_export_drain(
         &mut self,
         tab_id: &str,
         fmt: ExportFormat,
         path: std::path::PathBuf,
-        columns: Vec<String>,
-        query_id: u64,
-        session: SharedSession,
+        cfg: ConnectionConfig,
+        conn_id: String,
         sql: String,
+        binds: Vec<BindParam>,
         cx: &mut Context<Self>,
     ) {
         let Some(ix) = self.tab_index(tab_id) else {
@@ -323,23 +395,24 @@ impl SqlHighlandView {
         if self.tabs[ix].exporting {
             return;
         }
-        // Re-check the fetch is still this tab's current one (a run may have
-        // landed between menu click and dialog confirm).
-        let Some(fetch) = self.tabs[ix].fetch.clone() else {
-            return;
-        };
-        if fetch.query_id != query_id {
+        // The tab may have been re-run or rebound while the save dialog was
+        // open; the snapshot would then export the wrong data.
+        if self.tabs[ix].connection_id.as_deref() != Some(conn_id.as_str())
+            || self.tabs[ix].last_sql != sql
+        {
             self.tabs[ix].output = Some(Output::error(
                 "Results changed while choosing a file — export again",
             ));
             cx.notify();
             return;
         }
+        let Some(fetch) = self.tabs[ix].fetch.clone() else {
+            return;
+        };
         self.tabs[ix].exporting = true;
         self.tabs[ix].export_rows = 0;
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.tabs[ix].export_cancel = Some(cancel.clone());
-        lock(&fetch.data).loading = true;
         cx.notify();
         // Live `Exporting… N rows` ticker, same pattern as runs.
         {
@@ -375,11 +448,19 @@ impl SqlHighlandView {
         let csv_prefs = Preferences::load();
         let csv_delim = crate::export::csv_delim(&csv_prefs.csv_delimiter);
         let csv_header = csv_prefs.csv_header;
+        // The grid buffer is the source only when it holds every row: the
+        // cursor was drained (exhausted) and the cap wasn't hit. A cursor
+        // killed by another tab sets `exhausted` too, so `capped` is checked
+        // as well — otherwise a truncated buffer would look "complete".
+        let complete = {
+            let data = lock(&fetch.data);
+            data.exhausted && !data.capped
+        };
         cx.spawn(async move |_, cx| {
             let outcome = bg
                 .spawn(async move {
                     export_drain_blocking(
-                        &session, &fetch, query_id, &columns, fmt, &path, &sheet, &sql, &cancel,
+                        &fetch, &cfg, &sql, &binds, complete, fmt, &path, &sheet, &cancel,
                         csv_delim, csv_header,
                     )
                 })
@@ -404,11 +485,6 @@ impl SqlHighlandView {
         let Some(ix) = self.tab_index(tab_id) else {
             return; // Tab closed mid-export: partial file already removed.
         };
-        // Re-fetch the tab's live fetch: a newer run replaces it, in which
-        // case the drain already aborted as superseded.
-        if let Some(fetch) = self.tabs[ix].fetch.clone() {
-            lock(&fetch.data).loading = false;
-        }
         self.tabs[ix].exporting = false;
         self.tabs[ix].export_cancel = None;
         match outcome {
@@ -422,6 +498,11 @@ impl SqlHighlandView {
                     format!("Exported {rows} rows ({}) to {name}", fmt.ext()).into();
                 cx.notify();
             }
+            ExportOutcome::Partial(rows, notice) => {
+                self.tabs[ix].export_rows = rows as usize;
+                self.tabs[ix].result_meta = format!("Exported {rows} rows — {notice}").into();
+                cx.notify();
+            }
             ExportOutcome::Cancelled(rows) => {
                 self.tabs[ix].export_rows = rows as usize;
                 self.tabs[ix].result_meta = format!("Export cancelled after {rows} rows").into();
@@ -433,5 +514,20 @@ impl SqlHighlandView {
                 cx.notify();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sql_locks_rows;
+
+    #[test]
+    fn detects_for_update() {
+        assert!(sql_locks_rows("select * from t for update"));
+        assert!(sql_locks_rows("SELECT * FROM T FOR UPDATE NOWAIT"));
+        assert!(!sql_locks_rows("select * from t"));
+        // Known false positive: text inside a string literal still matches.
+        // Harmless — it only skips the re-run and exports the buffer.
+        assert!(sql_locks_rows("select 'for update' as x from t"));
     }
 }
