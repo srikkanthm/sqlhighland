@@ -144,6 +144,9 @@ fn main() {
 
         let window_options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1100.), px(780.)), cx)),
+            // Floor so the toolbars/headers can't be squeezed past the point
+            // where their responsive collapse can help.
+            window_min_size: Some(size(px(640.), px(480.))),
             // Custom title bar rendered by the app (themed) instead of the
             // native one (which follows the OS appearance, not app themes).
             ..TitleBar::window_options()

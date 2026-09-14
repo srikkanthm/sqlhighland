@@ -230,7 +230,11 @@ impl SqlHighlandView {
             )
     }
 
-    fn render_connection_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_connection_picker(
+        &self,
+        size: ToolbarSize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let tab = self.active_tab();
         let label = self.connection_name(&tab.connection_id);
         let live = tab
@@ -243,9 +247,20 @@ impl SqlHighlandView {
         let tab_id = tab.id.clone();
         let current_conn = tab.connection_id.clone();
         let connections = self.connections.clone();
+        // Narrow widths: shorten the name (full name stays in the tooltip) and,
+        // at the minimal level, drop the label and env pill entirely.
+        let compact = size.compact();
+        let minimal = matches!(size, ToolbarSize::Minimal);
+        let shown = if minimal {
+            String::new()
+        } else {
+            shorten(&label, if compact { 16 } else { 40 })
+        };
+        let tooltip = format!("Connection for this tab — {label}");
         h_flex()
             .gap_1()
             .items_center()
+            .flex_shrink_0()
             .child(div().size(px(8.)).rounded_full().bg(if live {
                 cx.theme().success
             } else {
@@ -256,8 +271,8 @@ impl SqlHighlandView {
                     .outline()
                     .small()
                     .icon(KitIcon::Database)
-                    .label(label)
-                    .tooltip("Connection for this tab — click to change")
+                    .tooltip(tooltip)
+                    .when(!minimal, |b| b.label(shown))
                     .dropdown_menu(move |menu, _, _| {
                         // Cap + scroll: long connection lists overflow the
                         // viewport otherwise.
@@ -292,7 +307,65 @@ impl SqlHighlandView {
                         menu
                     }),
             )
-            .when_some(env_tag(tab_env, cx), |this, tag| this.child(tag))
+            .when(!minimal, |this| {
+                this.when_some(env_tag(tab_env, cx), |this, tag| this.child(tag))
+            })
+    }
+
+    /// The "⋯" overflow menu shown at the narrowest toolbar level: the
+    /// secondary actions that no longer fit as icon buttons.
+    fn render_toolbar_more(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let script = cx.entity().downgrade();
+        let commit = cx.entity().downgrade();
+        let rollback = cx.entity().downgrade();
+        let format = cx.entity().downgrade();
+        Button::new("toolbar-more")
+            .ghost()
+            .small()
+            .icon(KitIcon::Ellipsis)
+            .tooltip("More actions")
+            .dropdown_menu(move |menu, _, _| {
+                menu.item(
+                    PopupMenuItem::new("Run as Script")
+                        .icon(KitIcon::FileTerminal)
+                        .on_click({
+                            let view = script.clone();
+                            move |_, window, cx| {
+                                view.update(cx, |this, cx| {
+                                    let tab_id = this.active_tab().id.clone();
+                                    this.run_buffer_as_script(&tab_id, window, cx);
+                                })
+                                .ok();
+                            }
+                        }),
+                )
+                .item(PopupMenuItem::new("Commit").icon(KitIcon::Check).on_click({
+                    let view = commit.clone();
+                    move |_, _, cx| {
+                        view.update(cx, |this, cx| this.commit_now(cx)).ok();
+                    }
+                }))
+                .item(
+                    PopupMenuItem::new("Rollback")
+                        .icon(KitIcon::Undo2)
+                        .on_click({
+                            let view = rollback.clone();
+                            move |_, _, cx| {
+                                view.update(cx, |this, cx| this.rollback_now(cx)).ok();
+                            }
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Format")
+                        .icon(KitIcon::WandSparkles)
+                        .on_click({
+                            let view = format.clone();
+                            move |_, window, cx| {
+                                view.update(cx, |this, cx| this.format_now(window, cx)).ok();
+                            }
+                        }),
+                )
+            })
     }
 
     /// The bound connection's environment (Untagged when unbound): drives
@@ -312,6 +385,11 @@ impl SqlHighlandView {
         // Subtle ring in the bound connection's environment color (same
         // hue as its badge): none when untagged.
         let ring = env_color(self.tab_environment(tab), cx).map(|c| c.opacity(0.45));
+        // Responsive toolbar level (measured main width): full labels, icon
+        // collapse, or secondary actions in the "⋯" overflow menu.
+        let size = self.toolbar_size();
+        let compact = size.compact();
+        let minimal = matches!(size, ToolbarSize::Minimal);
         v_flex()
             .id("query-section")
             .size_full()
@@ -356,6 +434,8 @@ impl SqlHighlandView {
             }))
             .child(
                 h_flex()
+                    .w_full()
+                    .min_w_0()
                     .gap_2()
                     .items_center()
                     .when(pending, |this| {
@@ -376,65 +456,63 @@ impl SqlHighlandView {
                         Button::new("run")
                             .primary()
                             .small()
-                            .w(px(ACTION_BUTTON_W))
                             .icon(KitIcon::Play)
-                            .label("Run")
                             .tooltip("Run statement at cursor (⌘↵)")
+                            .when(!compact, |b| b.w(px(ACTION_BUTTON_W)).label("Run"))
                             .loading(tab.busy)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.run_at_cursor(window, cx);
                             })),
                     )
-                    .child(
-                        Button::new("run-script")
-                            .secondary()
-                            .small()
-                            .w(px(ACTION_BUTTON_W))
-                            .icon(KitIcon::FileTerminal)
-                            .label("Script")
-                            .tooltip("Run buffer as script (⇧⌘↵)")
-                            .loading(tab.busy)
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                let tab_id = this.active_tab().id.clone();
-                                this.run_buffer_as_script(&tab_id, window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("commit")
-                            .success()
-                            .small()
-                            .w(px(ACTION_BUTTON_W))
-                            .icon(KitIcon::Check)
-                            .label("Commit")
-                            .tooltip("Commit transaction (⇧⌘C)")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.commit_now(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("rollback")
-                            .danger()
-                            .small()
-                            .w(px(ACTION_BUTTON_W))
-                            .icon(KitIcon::Undo2)
-                            .label("Rollback")
-                            .tooltip("Roll back transaction (⇧⌘R)")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.rollback_now(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("format")
-                            .secondary()
-                            .small()
-                            .w(px(ACTION_BUTTON_W))
-                            .icon(KitIcon::WandSparkles)
-                            .label("Format")
-                            .tooltip("Format SQL (⇧⌥F)")
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.format_now(window, cx);
-                            })),
-                    )
+                    .when(!minimal, |this| {
+                        this.child(
+                            Button::new("run-script")
+                                .secondary()
+                                .small()
+                                .icon(KitIcon::FileTerminal)
+                                .tooltip("Run buffer as script (⇧⌘↵)")
+                                .when(!compact, |b| b.w(px(ACTION_BUTTON_W)).label("Script"))
+                                .loading(tab.busy)
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    let tab_id = this.active_tab().id.clone();
+                                    this.run_buffer_as_script(&tab_id, window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("commit")
+                                .success()
+                                .small()
+                                .icon(KitIcon::Check)
+                                .tooltip("Commit transaction (⇧⌘C)")
+                                .when(!compact, |b| b.w(px(ACTION_BUTTON_W)).label("Commit"))
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.commit_now(cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("rollback")
+                                .danger()
+                                .small()
+                                .icon(KitIcon::Undo2)
+                                .tooltip("Roll back transaction (⇧⌘R)")
+                                .when(!compact, |b| b.w(px(ACTION_BUTTON_W)).label("Rollback"))
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.rollback_now(cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("format")
+                                .secondary()
+                                .small()
+                                .icon(KitIcon::WandSparkles)
+                                .tooltip("Format SQL (⇧⌥F)")
+                                .when(!compact, |b| b.w(px(ACTION_BUTTON_W)).label("Format"))
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.format_now(window, cx);
+                                })),
+                        )
+                    })
+                    .when(minimal, |this| this.child(self.render_toolbar_more(cx)))
                     .when(tab.busy || tab.exporting, |this| {
                         let tab_id = tab.id.clone();
                         let exporting = tab.exporting;
@@ -447,10 +525,9 @@ impl SqlHighlandView {
                             Button::new("cancel-run")
                                 .danger()
                                 .small()
-                                .w(px(ACTION_BUTTON_W))
                                 .icon(KitIcon::X)
-                                .label("Cancel")
                                 .tooltip(tip)
+                                .when(!compact, |b| b.w(px(ACTION_BUTTON_W)).label("Cancel"))
                                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                     if exporting {
                                         this.cancel_export(&tab_id, cx);
@@ -461,7 +538,7 @@ impl SqlHighlandView {
                         )
                     })
                     .child(div().flex_1())
-                    .child(self.render_connection_picker(cx)),
+                    .child(self.render_connection_picker(size, cx)),
             )
             .child(
                 div()
@@ -505,6 +582,7 @@ impl SqlHighlandView {
                 && !tab.exporting
                 && crate::sql::statement_kind(&tab.last_sql) == crate::sql::StatementKind::Query
                 && !crate::db::is_describe_statement(&tab.last_sql);
+            let compact = self.toolbar_size().compact();
             v_flex()
                 .flex_1()
                 .min_w_0()
@@ -536,10 +614,9 @@ impl SqlHighlandView {
                             Button::new("export")
                                 .outline()
                                 .small()
-                                .w(px(ACTION_BUTTON_W))
                                 .icon(KitIcon::Download)
-                                .label("Export")
                                 .tooltip("Export all result rows to CSV or Excel")
+                                .when(!compact, |b| b.w(px(ACTION_BUTTON_W)).label("Export"))
                                 .dropdown_menu(move |menu, _, _| {
                                     let mut menu = menu.max_h(px(320.)).scrollable(true);
                                     for fmt in [ExportFormat::Csv, ExportFormat::Xlsx] {
@@ -657,7 +734,14 @@ impl SqlHighlandView {
                     .gap_2()
                     .items_center()
                     .child(div().text_color(accent).child(icon))
-                    .child(div().text_sm().text_color(accent).child(title))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .text_color(accent)
+                            .child(title),
+                    )
                     .child(div().flex_1())
                     // Icon-only ×, matching the grid's dismiss control.
                     .child(
@@ -733,7 +817,10 @@ impl SqlHighlandView {
             }
             None => (cx.theme().muted_foreground, "No connection".to_string()),
         };
+        let minimal = matches!(self.toolbar_size(), ToolbarSize::Minimal);
         h_flex()
+            .w_full()
+            .min_w_0()
             .gap_2()
             .px_2()
             .h(px(28.))
@@ -742,15 +829,31 @@ impl SqlHighlandView {
             .border_t_1()
             .border_color(cx.theme().border)
             .text_xs()
-            .child(div().text_color(cx.theme().muted_foreground).child(left))
-            .child(div().flex_1())
             .child(
                 div()
+                    .min_w_0()
+                    .truncate()
                     .text_color(cx.theme().muted_foreground)
-                    .child(self.status.clone()),
+                    .child(left),
             )
-            .child(div().size(px(8.)).rounded_full().bg(dot))
-            .child(div().text_color(cx.theme().muted_foreground).child(right))
+            .child(div().flex_1())
+            .when(!minimal, |this| {
+                this.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(self.status.clone()),
+                )
+            })
+            .child(div().flex_shrink_0().size(px(8.)).rounded_full().bg(dot))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(right),
+            )
     }
 
     /// Slim header for object-viewer tabs (schema browser): object title +
@@ -766,7 +869,14 @@ impl SqlHighlandView {
             TabKind::Query => "",
         };
         let refresh_id = tab.id.clone();
+        // Responsive: name truncates, the kind tag/connection drop out at the
+        // narrowest level, and the buttons collapse to icons.
+        let size = self.toolbar_size();
+        let compact = size.compact();
+        let minimal = matches!(size, ToolbarSize::Minimal);
         h_flex()
+            .w_full()
+            .min_w_0()
             .h(px(36.))
             .gap_2()
             .px_2()
@@ -775,26 +885,38 @@ impl SqlHighlandView {
             .border_b_1()
             .border_color(cx.theme().border)
             .child(KitIcon::Database)
-            .child(div().text_sm().font_semibold().child(tab.name.clone()))
             .child(
                 div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(kind_tag),
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .font_semibold()
+                    .child(tab.name.clone()),
             )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(self.connection_name(&tab.connection_id)),
-            )
+            .when(!minimal, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(kind_tag),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .truncate()
+                        .max_w(px(180.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(self.connection_name(&tab.connection_id)),
+                )
+            })
             .child(
                 Button::new("viewer-refresh")
                     .secondary()
                     .small()
-                    .label("Refresh")
+                    .icon(KitIcon::RefreshCw)
                     .tooltip("Re-run DESCRIBE")
+                    .when(!compact, |b| b.label("Refresh"))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.refresh_viewer(&refresh_id, window, cx);
                     })),
@@ -806,7 +928,8 @@ impl SqlHighlandView {
                         .danger()
                         .small()
                         .icon(KitIcon::X)
-                        .label("Cancel")
+                        .tooltip("Stop the description")
+                        .when(!compact, |b| b.label("Cancel"))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.cancel_run(&cancel_id, cx);
                         })),
@@ -885,6 +1008,24 @@ impl SqlHighlandView {
             .flex_1()
             .min_w_0()
             .h_full()
+            // Measure the content width each frame and flip the responsive
+            // toolbar level when it crosses a threshold (hysteresis-free: the
+            // level is a pure function of the width, so it settles).
+            .on_prepaint({
+                let width_view = cx.entity().downgrade();
+                move |bounds, _, cx| {
+                    let width = bounds.size.width.as_f32();
+                    width_view
+                        .update(cx, |this, cx| {
+                            let before = this.toolbar_size();
+                            this.main_width.set(width);
+                            if this.toolbar_size() != before {
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                }
+            })
             .on_action(cx.listener(|this, _: &CopySelection, window, cx| {
                 this.copy_selection(window, cx);
             }))
@@ -919,6 +1060,18 @@ impl SqlHighlandView {
             .child(content)
             .child(self.render_status_bar(cx))
             .into_any_element()
+    }
+}
+
+/// Shorten a label to at most `max` characters, appending an ellipsis when
+/// truncated. Used to keep connection names from pushing toolbars wide.
+fn shorten(label: &str, max: usize) -> String {
+    if label.chars().count() <= max {
+        label.to_string()
+    } else {
+        let mut s: String = label.chars().take(max.saturating_sub(1)).collect();
+        s.push('…');
+        s
     }
 }
 

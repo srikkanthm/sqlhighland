@@ -1038,3 +1038,18 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   localized — see [`docs/TTC_DESYNC.md`](TTC_DESYNC.md) for the analysis,
   diagnostics (`SQLHIGHLAND_ANO_TRACE`, `RSO_DEBUG_PACKETS`) and the planned
   on-desync dump / query-only auto-retry.
+
+## Responsive toolbars/headers (2026-09-14)
+
+- The main-window rows clipped on narrow windows because they were single
+  non-wrapping `h_flex` rows of fixed-width buttons. They now collapse
+  responsively: a content width measured via `on_prepaint` on the main root
+  (`SqlHighlandView::main_width`) selects a `ToolbarSize` — **Full** (labels),
+  **Compact** (action buttons become icon-only; connection name shortened),
+  or **Minimal** (secondary actions move into a "⋯" overflow menu; the
+  connection picker drops its label and env pill).
+- Applied to the query toolbar, viewer header, results toolbar (Export),
+  output-pane title, and status bar (text truncates instead of pushing).
+- Connection names in the picker/status/viewer header are shortened with the
+  full name kept in tooltips.
+- A `window_min_size` floor (640×480) bounds the squeeze.

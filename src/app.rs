@@ -364,6 +364,35 @@ pub struct SettingsControls {
     pub(crate) grid_row_height: u32,
 }
 
+/// Responsive level for the main-window toolbars/headers, derived from the
+/// measured content width (`SqlHighlandView::main_width`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolbarSize {
+    /// Full labels.
+    Full,
+    /// Action buttons collapse to icons; connection name shortened.
+    Compact,
+    /// Secondary actions move into a "⋯" overflow menu.
+    Minimal,
+}
+
+impl ToolbarSize {
+    pub(crate) fn for_width(width: f32) -> Self {
+        if width >= 780.0 {
+            Self::Full
+        } else if width >= 460.0 {
+            Self::Compact
+        } else {
+            Self::Minimal
+        }
+    }
+
+    /// True unless the full labels fit.
+    pub(crate) fn compact(self) -> bool {
+        self != Self::Full
+    }
+}
+
 /// Global handle to the main view, stashed at window creation. Lets
 /// window-level/global handlers (which have a window but no view) reach it —
 /// notably to `notify()` a full re-render after a theme switch, since GPUI
@@ -476,6 +505,9 @@ pub struct SqlHighlandView {
     pub(crate) tab_scroll: ScrollHandle,
     pub(crate) untitled_counter: usize,
     pub(crate) sidebar_collapsed: bool,
+    /// Measured width of the main content area, updated by `on_prepaint` on
+    /// the main root. Drives the responsive toolbars/headers (`ToolbarSize`).
+    pub(crate) main_width: std::cell::Cell<f32>,
     /// Owned splitter state for the query editor/results split. Held
     /// (not keyed) so keyboard height steps drive the same state the
     /// mouse drags — `ResizablePanel::size()` is initial-only, which is
@@ -777,6 +809,8 @@ impl SqlHighlandView {
             tab_scroll: ScrollHandle::new(),
             untitled_counter: 0,
             sidebar_collapsed: false,
+            // Starts wide; `on_prepaint` corrects it on the first frame.
+            main_width: std::cell::Cell::new(1200.0),
             editor_split: cx.new(|_| ResizableState::default()),
             dialog: ConnectionDialogState {
                 editing: None,
@@ -1012,6 +1046,11 @@ impl SqlHighlandView {
 
     pub(crate) fn active_tab(&self) -> &QueryTab {
         &self.tabs[self.active]
+    }
+
+    /// Responsive level for the toolbars/headers, from the measured main width.
+    pub(crate) fn toolbar_size(&self) -> ToolbarSize {
+        ToolbarSize::for_width(self.main_width.get())
     }
 
     fn connection_name(&self, id: &Option<String>) -> String {
