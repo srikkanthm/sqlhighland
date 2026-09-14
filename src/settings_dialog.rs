@@ -18,7 +18,7 @@ use gpui_kit::*;
 use gpui_kit_assets::IconName as KitIcon;
 
 use crate::app::{app_view, SqlHighlandView};
-use crate::config::{CompleteMode, Preferences, SavedConfig, TabsManifest, THEME_LIST};
+use crate::config::{CompleteMode, Preferences, THEME_LIST};
 
 /// Index of the "About" page within the `Settings::pages` list built in
 /// [`SqlHighlandView::open_settings_dialog`] (Themes, Editor, Results,
@@ -761,42 +761,6 @@ impl SqlHighlandView {
                                             .child(env!("CARGO_PKG_DESCRIPTION"))
                                     })
                                     .keywords(["about", "description", "database", "oracle", "driver"]),
-                                    SettingItem::render(move |_, _, _| {
-                                        v_flex().w_full().gap_1().children(
-                                            [
-                                                ("Connections", SavedConfig::default_path()),
-                                                ("Preferences", Preferences::path()),
-                                                (
-                                                    "Tabs",
-                                                    TabsManifest::manifest_path(),
-                                                ),
-                                            ]
-                                            .into_iter()
-                                            .map(|(label, path)| {
-                                                div()
-                                                    .child(
-                                                        div().text_xs().child(label),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_xs()
-                                                            .text_color(muted)
-                                                            .child(
-                                                                path.map(|p| {
-                                                                    p.to_string_lossy()
-                                                                        .into_owned()
-                                                                })
-                                                                .unwrap_or_else(|_| {
-                                                                    "unknown".to_string()
-                                                                }),
-                                                            ),
-                                                    )
-                                                    .into_any_element()
-                                            })
-                                            .collect::<Vec<_>>(),
-                                        )
-                                    })
-                                    .keywords(["about", "paths", "files", "config"]),
                                 ])]),
                         ]),
                     ),

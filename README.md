@@ -81,6 +81,21 @@ be kept in the OS keychain or prompted per run; the legacy plaintext
 Try: `SELECT level AS n FROM dual CONNECT BY level <= 5000;` then scroll
 to watch on-demand fetching kick in.
 
+## Configuration files
+
+All app state lives in the platform config dir — `~/.config/sqlhighland/` on
+macOS/Linux, `%APPDATA%\sqlhighland\` on Windows:
+
+| File | Contents |
+|---|---|
+| `connections.toml` | saved connections: host/port/service, role, TLS, password mode |
+| `preferences.toml` | theme, editor font, completion, results/export, query timeout |
+| `tabs.toml` + `tabs/<id>.sql` | open-tabs manifest and per-tab autosaved SQL drafts |
+
+Passwords are kept out of these files by default (OS keychain or per-run
+prompt); only the legacy plaintext `File` mode stores one. Everything is
+written owner-only (`0600` files in a `0700` directory).
+
 ## Developing
 
 ```sh

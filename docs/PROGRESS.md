@@ -916,3 +916,6 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   flex constraint; it now uses `flex_1()` (and `w_full()` on the description).
   Description/author come from the manifest (`CARGO_PKG_DESCRIPTION` /
   `CARGO_PKG_AUTHORS`; `authors` added to Cargo.toml), so About stays in sync.
+- About trims to the essentials: dropped the duplicate group subheader and the
+  Connections/Preferences/Tabs path list. Those locations now live in the
+  README "Configuration files" section; `PACKAGING.md` §7 keeps the same list.
