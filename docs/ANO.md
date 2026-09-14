@@ -140,9 +140,37 @@ at least one integrity algorithm (SHA256), plus no-integrity.
 - [x] Integrity/checksum negotiation (SHA-256/384/512, AES-keystream);
       required by some servers and applied per DATA packet.
 - [ ] Explicit AES128/AES192 runs (the test server picks AES256).
+- [x] Oracle 10G (O3LOGON) password verifier support for legacy accounts
+      (see below).
 - [x] Repin fork + docs. The interim `NSI_NA_REQUIRED` hard error is now a
       targeted failure only when the server requires NA but does not offer the
       ANO handshake.
+
+### Oracle 10G password verifiers (O3LOGON)
+
+A connection can complete the ANO handshake yet still fail with
+`ORA-01017: invalid username/password; logon denied` even when the password is
+correct. This happens when the account exposes **only an Oracle 10G password
+verifier** — typically because `sec_case_sensitive_logon=FALSE` and/or
+`SQLNET.ALLOWED_LOGIN_VERSION_SERVER=10` — which disables the 11G/12C verifiers
+that O5LOGON (used by both python-oracledb thin and this driver) relies on. The
+server signals this by reporting verifier type `0x939` (2361) in the
+`AUTH_VFR_DATA` flags; the JDBC *thin* driver (SQL Developer) silently falls
+back to the 10G exchange, which is why SQL Developer can connect.
+
+The fork now implements that fallback in `src/messages/auth.rs`
+(`generate_verifier_10g`): the 8-byte DES-derived verifier
+(`encryption::oracle10g_verifier`, ported from Oracle's `O3LOGON`) seeds a
+16-byte AES-128 key, the session keys are folded with MD5, and the password is
+encrypted with AES-128-CBC/PKCS#5. Algorithm ported from the decompiled
+`oracle.security.o5logon`/`o3logon` JDBC helper classes; the verifier is
+unit-tested against passlib's known vector (`username`/`password` →
+`872805F3F4C83365`). Diagnose with the connection trace: the line
+`auth verifier_type=Some(2361)` indicates the 10G path was taken.
+
+Caveat: the 10G verifier is weak (case-insensitive, DES-based) and is removed
+from Oracle 21c onward. Where possible, have the account password reset so that
+11G/12C verifiers are generated instead.
 
 ### Known limitation: cancel on a checksummed session
 
