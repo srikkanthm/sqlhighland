@@ -1029,3 +1029,12 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - Throwaway sessions (Count rows, connection-dialog "Test connection") now
   call `disconnect()` on every path instead of leaving teardown to `Drop`,
   so the cursor is released before the socket closes.
+
+## Known issue: intermittent TTC desync on ANO sessions (2026-09-14)
+
+- Occasionally a run fails with `internal error: unknown TTC message type 42 …`
+  in the output pane, then the next run works. It is a response-stream desync;
+  the app already treats it as poisoning and reconnects. Root cause not yet
+  localized — see [`docs/TTC_DESYNC.md`](TTC_DESYNC.md) for the analysis,
+  diagnostics (`SQLHIGHLAND_ANO_TRACE`, `RSO_DEBUG_PACKETS`) and the planned
+  on-desync dump / query-only auto-retry.

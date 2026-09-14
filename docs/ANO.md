@@ -204,3 +204,13 @@ works normally there.
 - `num-bigint` modexp performance is fine at session setup only.
 - Recursion/handshake ordering vs. TLS: ANO and TCPS are alternatives; don't
   run both.
+
+## 8. Known issue: intermittent TTC desync
+
+On some ANO servers a run can intermittently fail with
+`internal error: unknown TTC message type 42 …` and then succeed on the next
+run. This is a response-stream desync (the driver's poison path drops the
+session and reconnects). It is tracked in
+[`docs/TTC_DESYNC.md`](TTC_DESYNC.md), which lists the candidate causes
+(marker/timeout recovery leaving a response partially consumed, ANO per-packet
+framing) and the diagnostics (`SQLHIGHLAND_ANO_TRACE`, `RSO_DEBUG_PACKETS`).
