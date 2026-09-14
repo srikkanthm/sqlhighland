@@ -1,6 +1,6 @@
 [package]
 name = "sqlhighland"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 rust-version = "1.89"
 description = "A native, cross-platform SQL client built with Rust + GPUI. Browse schemas, query with dictionary-backed completion, page through results, and export to CSV or Excel — powered by Oracle's official pure-Rust thin driver, no Oracle Client required."
@@ -74,7 +74,7 @@ minimum-system-version = "11.0"
 # "not supported"), so callers must keep the existing client-side abandon as a
 # fallback.
 [patch.crates-io]
-oracledb = { git = "https://github.com/srikkanthm/rust-oracledb", rev = "3233a74a225ed750d194c4d8e682f1ac7d61e839" }
+oracledb = { git = "https://github.com/srikkanthm/rust-oracledb", rev = "6f31ca375b51cb2c16bed53b0fa0eb54f9476b6e" }
 
 [[bin]]
 name = "sqlhighland"
