@@ -94,7 +94,7 @@ oracledb = { git = "https://github.com/srikkanthm/rust-oracledb", rev = "52993b5
 | `src/transport.rs` | `cancel_stream()` returns a cloned plain-TCP socket, or `None` for TLS |
 | `src/client/mod.rs` | **`reset()` recovery fix** (see §4; also consumes `CONTROL` packets); `cancel_stream()`; `supports_oob()` |
 | `src/client/capabilities.rs` | parses `protocol_options`, sets `supports_oob` when the server echoes `GSO_CAN_RECV_ATTENTION` |
-| `src/messages/connect.rs` | advertises `GSO_CAN_RECV_ATTENTION` + `TNS_CHECK_OOB` **on plain TCP only**; parses `protocol_options`; connect-path errors instead of `todo!()`/`unwrap` (see §3.4) |
+| `src/messages/connect.rs` | advertises ANO (`NSI_ANO_SUPPORTED`) but **never** `GSO_CAN_RECV_ATTENTION`/`TNS_CHECK_OOB`; parses `protocol_options`; connect-path errors instead of `todo!()`/`unwrap` (see §3.4) |
 | `src/response/mod.rs` | ORA-01013 (`DB_ERR_NUM_USER_REQUESTED_CANCEL`) → `ErrorKind::Cancelled` |
 | `src/error.rs` | new `Cancelled` kind + constructors |
 | `src/constants.rs` | `DB_ERR_NUM_USER_REQUESTED_CANCEL = 1013` |
@@ -127,14 +127,18 @@ errors, not aborts:
 - `parse::<usize>().unwrap()` on a malformed listener `(ERR=…)` → falls back
   to "unexpected refuse".
 
-The out-of-band **advertisement is now plain-TCP only**: `tcps://` never sets
-`GSO_CAN_RECV_ATTENTION`/`TNS_CHECK_OOB`. Oracle's own thin driver disables
-OOB for TLS, and a TCP urgent break cannot cross a TLS stream. This was the
-only handshake behavior our fork changed, and the likely trigger.
+The out-of-band **advertisement was removed entirely** (fork `3233a74`):
+advertising `GSO_CAN_RECV_ATTENTION`/`TNS_CHECK_OOB` made servers that accept
+OOB run an attention check the client never completes — the server sent a TNS
+control packet (type 9) and waited, hanging the handshake. The connect message
+now always uses `GSO_DONT_CARE` with connect-flags-2 zero. Cancellation still
+works via the **in-band INTERRUPT marker**, which is what actually runs
+anyway (`supports_oob` is false on the test servers).
 
 `Client::reset()` now also consumes `CONTROL` packets (it previously skipped
 only `MARKER`), so a reset can never hand a control packet to a message
-parser that doesn't expect one.
+parser that doesn't expect one. The ANO handshake is also bounded by a 20s
+read timeout and writes a trace to `~/sqlhighland-ano-debug.log`.
 
 ---
 
