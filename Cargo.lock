@@ -4964,7 +4964,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 [[package]]
 name = "oracledb"
 version = "26.0.0-beta.4"
-source = "git+https://github.com/srikkanthm/rust-oracledb?rev=efb7baf601491d73742f00e5d7df52bbec55cfa5#efb7baf601491d73742f00e5d7df52bbec55cfa5"
+source = "git+https://github.com/srikkanthm/rust-oracledb?rev=528a79abff3b86074995635370fbbb171f0dd58d#528a79abff3b86074995635370fbbb171f0dd58d"
 dependencies = [
  "aes 0.9.3",
  "base16ct",
