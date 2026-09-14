@@ -161,12 +161,16 @@ back to the 10G exchange, which is why SQL Developer can connect.
 The fork now implements that fallback in `src/messages/auth.rs`
 (`generate_verifier_10g`): the 8-byte DES-derived verifier
 (`encryption::oracle10g_verifier`, ported from Oracle's `O3LOGON`) seeds a
-16-byte AES-128 key, the session keys are folded with MD5, and the password is
-encrypted with AES-128-CBC/PKCS#5. Algorithm ported from the decompiled
-`oracle.security.o5logon`/`o3logon` JDBC helper classes; the verifier is
-unit-tested against passlib's known vector (`username`/`password` →
-`872805F3F4C83365`). Diagnose with the connection trace: the line
-`auth verifier_type=Some(2361)` indicates the 10G path was taken.
+16-byte AES-128 key used to wrap the session keys, the combo key is derived
+with **PBKDF2-HMAC-SHA512** (`AUTH_PBKDF2_CSK_SALT`/`AUTH_PBKDF2_SDER_COUNT`,
+keyLen 16) when the server supplies those fields — matching JDBC's modern
+`O5Logon` path — and the password is encrypted with AES-128-CBC/PKCS#5. The
+legacy XOR/MD5 fold is only used if the PBKDF2 fields are absent. Algorithm
+ported from the decompiled `oracle.security.o5logon`/`o3logon` JDBC helper
+classes; the verifier is unit-tested against passlib's known vector
+(`username`/`password` → `872805F3F4C83365`). Diagnose with the connection
+trace: `auth verifier_type=Some(2361)` indicates the 10G path, and
+`auth 10g: combo key via PBKDF2 (keylen=16)` confirms the modern combo path.
 
 Caveat: the 10G verifier is weak (case-insensitive, DES-based) and is removed
 from Oracle 21c onward. Where possible, have the account password reset so that
