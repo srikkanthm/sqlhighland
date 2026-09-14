@@ -1,0 +1,139 @@
+# Oracle Native Network Encryption (ANO/NNE) — investigation & port plan
+
+Status: **planned**, 2026-09-14. Chosen because the user's target database sets
+`SQLNET.ENCRYPTION_SERVER=REQUIRED` and they have no control over it, so TLS
+is likely unavailable. The pure-Rust thin driver (like `python-oracledb` thin)
+does not implement ANO; `oracledb` refuses with
+`NSI_NA_REQUIRED`.
+
+## 1. Why SQL Developer connects
+
+Oracle's **JDBC Thin driver ships a 100% Java implementation of ANO**: it
+negotiates AES/RC4 encryption + MD5/SHA checksums with Diffie-Hellman, with
+client level defaulting to `ACCEPTED`. So when the server requires encryption,
+JDBC satisfies it transparently — no `sqlnet.ora` on the client. The Rust thin
+driver never got that implementation, hence the failure.
+
+## 2. Reference implementation
+
+We are porting from the pure-Go driver [`sijms/go-ora`](https://github.com/sijms/go-ora),
+which implements NNE without an Oracle Client. Key files:
+`v2/advanced_nego/{advanced_nego,comm,encrypt_service,data_integrity_service,default_service}.go`,
+`v2/network/security/general.go`, `v2/network/data_packet.go`,
+`v2/connection.go` (the hook), `v2/network/accept_packet.go`. Local copies of
+these were fetched to `/tmp/go-ora-ano/` during investigation.
+
+## 3. Protocol notes (from go-ora)
+
+### 3.1 Negotiation framing
+
+- Header (13 bytes): `DEADBEEF` (u32) · total length (u16) · version
+  `0x0B200200` (u32) · service count (u16) · error flags (u8).
+- Per service: service id (u16: 1=auth, 2=encrypt, 3=integrity, 4=supervisor),
+  sub-packet count (u16), status (u32).
+- Sub-packets: type (u16) + length (u16) + payload. Types:
+  0=string, 1=bytes, 2=ub1, 3=ub2, 4=ub4, 5=version(u32), 6=status(u16),
+  7=array.
+- The ANO exchange is carried in ordinary TNS **DATA** packets and happens
+  before encryption is activated.
+
+### 3.2 Diffie-Hellman (integrity service, id 3)
+
+Server sends (sub-packet 8): `dhGenLen` (u16), `dhPrimLen` (u16),
+generator bytes, prime bytes, server public key bytes, IV bytes. Client
+computes `publicKey = gen^priv mod prime`, `sharedKey = serverPub^priv mod
+prime` (fixed-width to `ceil(dhGenLen/8)`), and returns its public key. The
+`sharedKey` + server `IV` become the session key material.
+
+### 3.3 Algorithms
+
+- Encryption: `1`=RC4_40, `2`=DES56C, `6`=RC4_256, `8`=RC4_56, `10`=RC4_128,
+  **`15`=AES128, `16`=AES192, `17`=AES256**. Client offers
+  `RC4_40,RC4_56,RC4_128,RC4_256,DES56C,AES128,AES192,AES256`; server picks.
+- Integrity: `1`=MD5, `3`=SHA1, `4`=SHA512, `5`=SHA256, `6`=SHA384.
+
+### 3.4 Crypto construction
+
+- AES (16/24/32-byte key from `sharedKey`): AES-CBC with an **all-zero IV**.
+  Encrypt pads the plaintext with N zero bytes to a multiple of 16 and appends
+  one byte `N+1`; decrypt reads that trailing byte, requires `len-1` to be a
+  multiple of 16, strips padding.
+- Integrity uses the negotiated hash plus a keystream derived from
+  `sharedKey`/`IV`:
+  - MD5/SHA1: `keyGen = RC4(last5(sharedKey) || 0xFF || IV)`; derive 5 bytes;
+    `encryptor = RC4(k5 || 90)`, `decryptor = RC4(k5 || 180)`.
+  - SHA256/384/512: `keyGen = AES-CBC(sharedKey[:5] || 0xFF … , IV[:16])`;
+    run it over 32 zero bytes to get `key(16)` + `iv(16)`; then keystreams are
+    AES-CBC with `key[5]=90` / `key[5]=180`. `Compute(input) = H(input ||
+    keystream(hash_size))`; `Validate` recomputes over `input` minus trailing
+    hash bytes.
+
+### 3.5 Wire transform (per DATA packet body)
+
+- Send: if hash → `data ||= H(data)`; if encrypt → `data = Encrypt(data)`;
+  if either → append a single `0x00` "folding key" byte.
+- Receive: strip the trailing folding byte, `Decrypt`, then `Validate`
+  (reverse order).
+- Only **DATA** packets are transformed; CONNECT/ACCEPT/MARKER/control are not.
+
+### 3.6 Trigger
+
+In go-ora, after ACCEPT: if `ACFL0 & 1 != 0 && ACFL0 & 4 == 0 && ACFL1 & 8 == 0`
+(accept payload bytes 14/15), run `Write → Read → StartServices`. The client
+must **not** send `NSI_DISABLE_NA` when it wants ANO. `StartServices` order is
+integrity(3) → encrypt(2) → auth(1) → supervisor(4).
+
+## 4. Rust port plan
+
+New module in the fork, e.g. `src/advanced_nego/`:
+
+- `mod.rs` — negotiation driver (header/subpacket codec, service list, the
+  `write → read → start` sequence).
+- `dh.rs` — Diffie-Hellman with `num-bigint` (server supplies group params).
+- `crypt.rs` — AES-CBC cryptor + integrity hashes (keystream derivation).
+- Wire into `Client`/`Transport`:
+  - `messages/connect.rs`: stop setting `NSI_DISABLE_NA` (advertise NA) when
+    ANO is enabled; store `ACFL0`/`ACFL1`.
+  - `client/mod.rs`: after `connect_phase_one`, run the ANO negotiation before
+    the TTC protocol/auth messages.
+  - transport: transform `PACKET_TYPE_DATA` bodies on send/receive once the
+    cryptor/hash are active.
+- Crates: `aes`, `cbc` (already present), add `rc4`, `md-5`, `sha1`, `num-bigint`,
+  `num-traits`.
+- Keep it behind the fork; SQLHighland needs no API change (it becomes
+  transparent).
+
+## 5. Test strategy
+
+We need a server that requires NA. The user's Oracle 19.19 container
+`highlanddb` (localhost:1521) currently has NA off, and flipping it on would
+break the existing `live`/`cancel_live` tests. Options:
+
+1. A **second** Oracle container (e.g. `highlanddb-ano`) with
+   `SQLNET.ENCRYPTION_SERVER=REQUIRED` and `SQLNET.ENCRYPTION_TYPES_SERVER=(AES256,AES192,AES128)`
+   in `sqlnet.ora`, mapped to a different port.
+2. Temporarily toggle NA on the existing container during development (breaks
+   other tests while enabled).
+
+Verification: connect with the ported driver to the NA-required instance and
+compare a trivial query with `sqlplus`/SQL Developer; cover AES256/192/128 and
+at least one integrity algorithm (SHA256), plus no-integrity.
+
+## 6. Progress checklist
+
+- [ ] Decide/wire up the NA-required test Oracle.
+- [ ] `dh.rs` + unit tests (fixed group/vectors).
+- [ ] `crypt.rs` AES-CBC + integrity + unit tests against go-ora vectors.
+- [ ] Negotiation codec + service lists.
+- [ ] Client hook (accept flags, negotiation sequence, NSI flag change).
+- [ ] Transport DATA transform.
+- [ ] End-to-end against the NA server (AES256, SHA256).
+- [ ] Repin fork; docs; remove the interim NA error note.
+
+## 7. Risks
+
+- Exact DH parameter sizes and padding are server-supplied, but the cryptor
+  edge cases (padding byte, folding key, empty payloads) must match exactly.
+- `num-bigint` modexp performance is fine at session setup only.
+- Recursion/handshake ordering vs. TLS: ANO and TCPS are alternatives; don't
+  run both.
