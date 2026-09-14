@@ -143,8 +143,8 @@ impl SqlHighlandView {
         // Remembered for the export audit tab.
         self.tabs[ix].last_sql = sql.clone();
         // Retained so an export can re-execute on its own session (the worker
-        // moves the originals into the driver).
-        self.tabs[ix].last_binds = binds.clone();
+        // moves the originals into the driver). Previous values are wiped.
+        self.tabs[ix].set_last_binds(&binds);
         // Executed table names boost future suggestion rankings.
         self.bump_usage(&conn_id, &sql);
         // Warm the suggestion cache alongside the run (no-op when fresh),

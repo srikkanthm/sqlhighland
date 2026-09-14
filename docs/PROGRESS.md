@@ -1014,3 +1014,15 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   on the same connection can run queries during an export; the grid buffer is
   not grown (cap's memory guard respected). `FOR UPDATE` results that aren't
   complete export the buffered rows with a notice (re-running would re-lock).
+
+### Export memory hardening (follow-up)
+
+- The export drain no longer clones the whole grid buffer up front: the
+  buffered rows are read only on the buffered path, and even then in
+  `FETCH_CHUNK`-sized batches under short locks (constant-ish memory instead
+  of a 2× spike).
+- The re-run path releases its first page before paging the rest, and
+  explicitly disconnects the throwaway session on a connect/`start_query`
+  failure.
+- Retained bind values (`QueryTab.last_binds`, used for export re-execution)
+  are zeroized on overwrite and on tab close.

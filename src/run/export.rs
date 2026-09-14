@@ -81,18 +81,6 @@ fn export_drain_blocking(
     use std::sync::atomic::Ordering;
     let tmp = path.with_extension("part");
 
-    // Rows already buffered by the grid, plus their column names.
-    let (buffered, buffered_columns): (Vec<Vec<Option<String>>>, Vec<String>) = {
-        let data = lock(&fetch.data);
-        (
-            data.rows
-                .iter()
-                .map(|r| r.iter().map(|c| c.as_deref().map(str::to_string)).collect())
-                .collect(),
-            data.columns.iter().map(|c| c.name.clone()).collect(),
-        )
-    };
-
     let locked = sql_locks_rows(sql);
     let re_run = !complete && !locked && !sql.is_empty();
     let partial_notice = locked && !complete;
@@ -116,13 +104,23 @@ fn export_drain_blocking(
                 fresh = Some((columns, page, id));
                 session = Some(s);
             }
-            Err(e) => return ExportOutcome::Failed(e.to_string()),
+            Err(e) => {
+                // Release the (possibly connected) session promptly.
+                lock(&s).disconnect();
+                return ExportOutcome::Failed(e.to_string());
+            }
         }
     }
 
+    // Columns come from the fresh execution, or from the grid buffer (names
+    // only — the buffered rows themselves are cloned lazily below).
     let columns: Vec<String> = match &fresh {
         Some((cols, _, _)) => cols.iter().map(|c| c.name.clone()).collect(),
-        None => buffered_columns,
+        None => lock(&fetch.data)
+            .columns
+            .iter()
+            .map(|c| c.name.clone())
+            .collect(),
     };
 
     // Open the writer (CSV streams; XLSX uses its constant-memory worksheet).
@@ -192,6 +190,7 @@ fn export_drain_blocking(
 
     if let Some((_, first_page, query_id)) = fresh {
         // First page from the fresh execution, then page to exhaustion.
+        let first_exhausted = first_page.exhausted;
         if let Err(e) = write_batch(&first_page.rows, &mut rows) {
             close_throwaway(&session);
             let _ = std::fs::remove_file(&tmp);
@@ -201,7 +200,9 @@ fn export_drain_blocking(
                 ExportOutcome::Failed(e)
             };
         }
-        if !first_page.exhausted {
+        // Release the first page's rows before paging the rest.
+        drop(first_page);
+        if !first_exhausted {
             loop {
                 if cancel.load(Ordering::Relaxed) {
                     close_throwaway(&session);
@@ -239,14 +240,31 @@ fn export_drain_blocking(
             }
         }
         close_throwaway(&session);
-    } else if let Err(e) = write_batch(&buffered, &mut rows) {
-        // Buffered-only export (grid complete, or a locked query we won't re-run).
-        let _ = std::fs::remove_file(&tmp);
-        return if e == "cancelled" {
-            ExportOutcome::Cancelled(rows)
-        } else {
-            ExportOutcome::Failed(e)
-        };
+    } else {
+        // Buffered-only export (grid complete, or a locked query we won't
+        // re-run). Snapshot in chunks so a huge complete grid isn't duplicated
+        // in memory all at once; the length is fixed up front (a snapshot).
+        let total = lock(&fetch.data).rows.len();
+        let mut start = 0usize;
+        while start < total {
+            let batch: Vec<Vec<Option<String>>> = {
+                let data = lock(&fetch.data);
+                data.rows[start..total]
+                    .iter()
+                    .take(FETCH_CHUNK)
+                    .map(|r| r.iter().map(|c| c.as_deref().map(str::to_string)).collect())
+                    .collect()
+            };
+            if let Err(e) = write_batch(&batch, &mut rows) {
+                let _ = std::fs::remove_file(&tmp);
+                return if e == "cancelled" {
+                    ExportOutcome::Cancelled(rows)
+                } else {
+                    ExportOutcome::Failed(e)
+                };
+            }
+            start += batch.len();
+        }
     }
 
     // Finalize the file.

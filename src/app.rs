@@ -256,6 +256,30 @@ pub(crate) struct QueryTab {
     pub(crate) _subs: Vec<Subscription>,
 }
 
+impl QueryTab {
+    /// Replace the retained bind values, wiping the previous ones (they may
+    /// hold sensitive literals and are only kept for export re-execution).
+    pub(crate) fn set_last_binds(&mut self, binds: &[crate::db::BindParam]) {
+        self.wipe_last_binds();
+        self.last_binds = binds.to_vec();
+    }
+
+    /// Zeroize and drop the retained bind values.
+    pub(crate) fn wipe_last_binds(&mut self) {
+        use zeroize::Zeroize as _;
+        for b in &mut self.last_binds {
+            b.value.zeroize();
+        }
+        self.last_binds.clear();
+    }
+}
+
+impl Drop for QueryTab {
+    fn drop(&mut self) {
+        self.wipe_last_binds();
+    }
+}
+
 /// Tab flavor: a full SQL editor, or an object viewer (DESCRIBE grid,
 // no editor) opened from the schema browser. Viewers are ephemeral and
 // reuse the run/results pipeline. The editor entity is kept but
