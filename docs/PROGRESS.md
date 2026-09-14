@@ -919,3 +919,23 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - About trims to the essentials: dropped the duplicate group subheader and the
   Connections/Preferences/Tabs path list. Those locations now live in the
   README "Configuration files" section; `PACKAGING.md` §7 keeps the same list.
+
+## Connect crash fix: no panics in the handshake (2026-09-14)
+
+- A `SIGABRT` reported on another Oracle server traced to
+  `ConnectMessage::deserialize` in the fork. The connect path had panics:
+  `todo!()` on an unexpected response packet, `todo!()` when the server
+  requires Native Network Encryption, and `parse::<usize>().unwrap()` on a
+  malformed listener `(ERR=…)`. All three now return errors; the
+  unexpected-packet arm logs and names the numeric packet type.
+- Likely trigger: the fork advertised out-of-band attention
+  (`GSO_CAN_RECV_ATTENTION` + `TNS_CHECK_OOB`) on every Unix socket, including
+  `tcps://`. Oracle's own thin driver disables OOB for TLS. The advertisement
+  is now **plain-TCP only** (`connect_oob_flags`, with a unit test).
+- `Client::reset()` now also consumes `CONTROL` packets (it previously skipped
+  only `MARKER`), so a reset can never hand a control packet to a message
+  parser that doesn't expect it.
+- Fork commit `52993b5`; re-pinned `[patch.crates-io]`. Verified: fork
+  `cargo test --lib` (incl. the new per-protocol OOB test) + clippy clean;
+  SQLHighland clippy/fmt, 122 lib tests, and the live plain-TCP cancel test
+  green.

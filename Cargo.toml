@@ -74,7 +74,7 @@ minimum-system-version = "11.0"
 # "not supported"), so callers must keep the existing client-side abandon as a
 # fallback.
 [patch.crates-io]
-oracledb = { git = "https://github.com/srikkanthm/rust-oracledb", rev = "49bb38a05fd2fe325361726ea016216f3eacbd9b" }
+oracledb = { git = "https://github.com/srikkanthm/rust-oracledb", rev = "52993b57ae798fd207db5830153970e9428fd6cb" }
 
 [[bin]]
 name = "sqlhighland"

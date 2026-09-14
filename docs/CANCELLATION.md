@@ -59,17 +59,18 @@ for real. An explicit sidebar Connect stores the token up front.
 
 - Repo: `https://github.com/srikkanthm/rust-oracledb` (branch `main`)
 - Base: upstream `26.0.0-beta.4` era (fork commits sit on top of `466c453`)
-- Pinned commit: `49bb38a05fd2fe325361726ea016216f3eacbd9b`
+- Pinned commit: `52993b57ae798fd207db5830153970e9428fd6cb`
 - Commits added on top of upstream:
   - `4412161` Add plain TCP cancellation API
   - `9a4fcb1` Use out-of-band break for cancellation; map ORA-01013 to Cancelled
   - `49bb38a` Advertise OOB capability and fix interrupt recovery
+  - `52993b5` Advertise OOB only on plain TCP; never panic in the connect path
 
 Pinned from `Cargo.toml`:
 
 ```toml
 [patch.crates-io]
-oracledb = { git = "https://github.com/srikkanthm/rust-oracledb", rev = "49bb38a05fd2fe325361726ea016216f3eacbd9b" }
+oracledb = { git = "https://github.com/srikkanthm/rust-oracledb", rev = "52993b57ae798fd207db5830153970e9428fd6cb" }
 ```
 
 ### 3.1 Public API added
@@ -91,9 +92,9 @@ oracledb = { git = "https://github.com/srikkanthm/rust-oracledb", rev = "49bb38a
 | `src/connection/mod.rs` | `CancelHandle` (independent socket clone; tries OOB first on Unix, else the in-band marker); `Connection::{cancel_handle,cancel,supports_oob}` |
 | `src/connection/conn_impl.rs` | stores `cancel_stream` / packet-size / OOB capability; wires the handle |
 | `src/transport.rs` | `cancel_stream()` returns a cloned plain-TCP socket, or `None` for TLS |
-| `src/client/mod.rs` | **`reset()` recovery fix** (see §4); `cancel_stream()`; `supports_oob()` |
+| `src/client/mod.rs` | **`reset()` recovery fix** (see §4; also consumes `CONTROL` packets); `cancel_stream()`; `supports_oob()` |
 | `src/client/capabilities.rs` | parses `protocol_options`, sets `supports_oob` when the server echoes `GSO_CAN_RECV_ATTENTION` |
-| `src/messages/connect.rs` | advertises `GSO_CAN_RECV_ATTENTION` + `TNS_CHECK_OOB`; parses `protocol_options` |
+| `src/messages/connect.rs` | advertises `GSO_CAN_RECV_ATTENTION` + `TNS_CHECK_OOB` **on plain TCP only**; parses `protocol_options`; connect-path errors instead of `todo!()`/`unwrap` (see §3.4) |
 | `src/response/mod.rs` | ORA-01013 (`DB_ERR_NUM_USER_REQUESTED_CANCEL`) → `ErrorKind::Cancelled` |
 | `src/error.rs` | new `Cancelled` kind + constructors |
 | `src/constants.rs` | `DB_ERR_NUM_USER_REQUESTED_CANCEL = 1013` |
@@ -113,6 +114,28 @@ oracledb = { git = "https://github.com/srikkanthm/rust-oracledb", rev = "49bb38a
 - The server reports the abort as **ORA-01013**, which the driver maps to
   `ErrorKind::Cancelled`. The connection stays usable afterward.
 
+### 3.4 Connect-path hardening (2026-09-14)
+
+A crash report (`SIGABRT` inside `ConnectMessage::deserialize`) on a
+different Oracle server exposed panics in the connect handshake. They are now
+errors, not aborts:
+
+- `_ => todo!()` on an unexpected response packet → a clear error that also
+  logs and names the numeric packet type.
+- `todo!()` when the server requires Native Network Encryption
+  (`SQLNET.ENCRYPTION_SERVER=REQUIRED`) → a "not implemented" error.
+- `parse::<usize>().unwrap()` on a malformed listener `(ERR=…)` → falls back
+  to "unexpected refuse".
+
+The out-of-band **advertisement is now plain-TCP only**: `tcps://` never sets
+`GSO_CAN_RECV_ATTENTION`/`TNS_CHECK_OOB`. Oracle's own thin driver disables
+OOB for TLS, and a TCP urgent break cannot cross a TLS stream. This was the
+only handshake behavior our fork changed, and the likely trigger.
+
+`Client::reset()` now also consumes `CONTROL` packets (it previously skipped
+only `MARKER`), so a reset can never hand a control packet to a message
+parser that doesn't expect one.
+
 ---
 
 ## 4. Root cause: the hang after an interrupt
@@ -123,23 +146,28 @@ reset marker and waited for *two* markers — but the caller had already
 consumed the server's reset marker, so the loop blocked on a marker that
 never came.
 
-The fix (fork commit `49bb38a`, `src/client/mod.rs`) is to discard marker
-packets and return the **first non-marker (data) packet**, which carries the
-operation's actual result/error:
+The fix (fork commits `49bb38a`, then `52993b5`, `src/client/mod.rs`) is to
+discard marker packets (and consume control packets) and return the **first
+data packet**, which carries the operation's actual result/error:
 
 ```rust
 loop {
     let packet = self.transport.receive_packet()?;
-    if packet.packet_type != constants::PACKET_TYPE_MARKER {
-        return Ok(packet);
+    match packet.packet_type {
+        constants::PACKET_TYPE_MARKER => continue,
+        constants::PACKET_TYPE_CONTROL => {
+            self.process_control_packet(packet)?;
+            continue;
+        }
+        _ => return Ok(packet),
     }
 }
 ```
 
 This is the change that made cancellation return promptly and keep the
 connection alive. The OOB advertisement and `supports_oob` plumbing are
-still present for servers that accept urgent breaks, but are inert on a
-server that reports `false`.
+still present for plain-TCP servers that accept urgent breaks, but are inert
+on a server that reports `false` (and never advertised over `tcps://`).
 
 ---
 
@@ -248,6 +276,7 @@ proven with unit tests.
    disables them for `tcps` (`python-oracledb` `protocol.pyx`:
    `if use_tcps: self._caps.supports_oob = False`); Oracle Net's break is TCP
    urgent data (the `DISABLE_OOB` sqlnet parameter). The fork mirrors this:
+   it never advertises OOB on `tcps://` (fork commit `52993b5`), and
    `Transport::cancel_stream` returns `None` when `tls_stream.is_some()`
    (`src/transport.rs:257`).
 2. **The in-band marker cannot be injected from another thread.** It must be
