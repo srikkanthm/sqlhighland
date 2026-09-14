@@ -112,10 +112,10 @@ jobs:
           sudo xcodebuild -downloadComponent MetalToolchain
           xcrun --sdk macosx metal --version
       - name: Clippy
-        run: cargo clippy --features gui --all-targets -- -D warnings
+        run: cargo clippy --features gui-test --all-targets -- -D warnings
       - name: Headless UI tests
         run: >
-          cargo test --features gui
+          cargo test --features gui-test
           --test menus --test browser_tree --test themes --test ui_picker
 
   # Informational: surfaces RustSec advisories in the dependency tree. Kept

@@ -868,3 +868,25 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   `-downloadComponent` while `metal` is already installed (an Xcode probe
   workflow confirmed it; the step is now conditional).
 - Docs: `PACKAGING.md` §8 (release flow) + README pointer.
+
+## CI: GUI test deps gated behind `gui-test` (2026-09-13)
+
+- Root cause of the long-red `Core (no gui)` and `MSRV (1.89)` jobs: the
+  non-optional `[dev-dependencies] gpui-kit` was pulled into every
+  test/`--all-targets` build, dragging in `gpui-pre-linux` — fontconfig on
+  Ubuntu, and a rustc 1.90–1.92 requirement (`wgpu`→`ordered-float`,
+  `gpui-pre-linux`→`oo7`, `gpui-component`→`tree-sitter-language`). The core
+  library's own deps never needed any of it.
+- Fix: dropped the dev-dependency and added
+  `gui-test = ["gui", "gpui-kit/test-support"]`; the four headless UI test
+  targets now declare `required-features = ["gui-test"]`. `core`/`msrv` keep
+  their `--all-targets` sweep and never build GUI crates. The CI `gui` job
+  lints/tests with `--features gui-test`; README/ARCHITECTURE commands match.
+- Verified: default linux dep graph is GUI-free; `cargo check --all-targets`
+  and `cargo +1.89.0 check --all-targets` clean (no rust-version violations);
+  all 4 UI suites pass, 122 lib tests pass, `clippy --features gui-test
+  --all-targets -D warnings` clean.
+- Also bumped CI actions to Node 24 runtimes: `actions/checkout@v7` (both
+  workflows), `actions/upload-artifact@v7`, `softprops/action-gh-release@v3`.
+  `rustsec/audit-check@v2` has no Node 24 release, so its warning remains
+  (non-blocking).

@@ -88,14 +88,14 @@ cargo check                     # lib only, no Metal toolchain needed
 cargo test --lib                # 122 unit tests (no DB required)
 cargo test --test live          # 11 integration tests, needs Oracle up
 cargo test --test cancel_live -- --ignored   # interrupt test, needs plain-TCP Oracle
-cargo test --features gui --test menus --test ui_picker \
+cargo test --features gui-test --test menus --test ui_picker \
     --test browser_tree --test themes   # headless UI tests
-cargo clippy --features gui --all-targets   # must stay clean
+cargo clippy --features gui-test --all-targets   # must stay clean
 ```
 
 GUI code lives behind the `gui` feature so DB logic and tests build without
-Xcode/Metal. The headless UI tests also require `--features gui`, but no
-window server. Pinned dependency highlights: `oracledb 26.0.0-beta.4` via a
+Xcode/Metal. The headless UI tests use `gui-test` (gui + the kit's
+`test-support`) but need no window server. Pinned dependency highlights: `oracledb 26.0.0-beta.4` via a
 pinned git patch to `srikkanthm/rust-oracledb` (adds plain-TCP cancellation;
 see [`docs/CANCELLATION.md`](docs/CANCELLATION.md)), `gpui-pre 0.3.4`,
 `gpui-kit 0.6.1`.

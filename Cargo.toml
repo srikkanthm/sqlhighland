@@ -44,6 +44,10 @@ rust_xlsxwriter = { version = "=0.99.0", features = ["constant_memory"] }
 default = []
 # Build/run the desktop app with: cargo run --features gui
 gui = ["dep:gpui", "dep:gpui-kit", "dep:gpui-kit-assets", "dep:lsp-types"]
+# gui + the kit's test-support for the headless UI tests. Kept separate from
+# `gui` so the GUI-free `core`/`msrv` targets never pull gpui-pre-linux (and
+# its fontconfig/wgpu/oo7 tree) on Linux.
+gui-test = ["gui", "gpui-kit/test-support"]
 
 # Desktop packaging via cargo-packager (https://github.com/crabnebula-dev/cargo-packager).
 #   cargo install cargo-packager --locked
@@ -76,30 +80,26 @@ name = "sqlhighland"
 path = "src/main.rs"
 required-features = ["gui"]
 
-[dev-dependencies]
-# Headless UI tests (dialogs, focus, scrolling). Merges features with the
-# optional gui dep; only built for test targets.
-gpui-kit = { version = "=0.6.1", features = ["test-support", "tree-sitter-sql"] }
-
 [[test]]
 name = "ui_picker"
 path = "tests/ui_picker.rs"
-required-features = ["gui"]
+required-features = ["gui-test"]
 
 [[test]]
 name = "menus"
 path = "tests/menus.rs"
-required-features = ["gui"]
+required-features = ["gui-test"]
 
-# gui-gated tests: these import `sqlhighland::app` / `guitheme`, so without
-# `required-features` a plain `cargo test`/`clippy --all-targets` fails to
-# compile them.
+# Headless UI tests: these import `sqlhighland::app` / `guitheme` and use the
+# kit's test-support, so they need `gui-test`. Gating them (rather than a
+# plain `gpui-kit` dev-dependency) keeps gpui-pre-linux out of the GUI-free
+# core/MSRV target set.
 [[test]]
 name = "browser_tree"
 path = "tests/browser_tree.rs"
-required-features = ["gui"]
+required-features = ["gui-test"]
 
 [[test]]
 name = "themes"
 path = "tests/themes.rs"
-required-features = ["gui"]
+required-features = ["gui-test"]

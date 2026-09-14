@@ -113,9 +113,9 @@ src/
 ## Verify a split
 
 ```sh
-cargo clippy --features gui --all-targets   # must stay clean
+cargo clippy --features gui-test --all-targets   # must stay clean
 cargo test --lib                            # core unit tests
-cargo test --features gui --test menus --test browser_tree --test themes
+cargo test --features gui-test --test menus --test browser_tree --test themes
 ```
 
 ## Remaining large files
