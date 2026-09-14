@@ -172,6 +172,17 @@ classes; the verifier is unit-tested against passlib's known vector
 trace: `auth verifier_type=Some(2361)` indicates the 10G path, and
 `auth 10g: combo key via PBKDF2 (keylen=16)` confirms the modern combo path.
 
+### Debug trace
+
+The driver writes a per-connection trace to `~/sqlhighland-ano-debug.log`
+(ACCEPT flags, the ANO handshake, and auth pair lengths/verifier type) **only
+when `SQLHIGHLAND_ANO_TRACE` is set**; normal runs never touch the home
+directory. To capture it, launch the app from a terminal:
+
+```
+SQLHIGHLAND_ANO_TRACE=1 /Applications/SQLHighland.app/Contents/MacOS/SQLHighland
+```
+
 Caveat: the 10G verifier is weak (case-insensitive, DES-based) and is removed
 from Oracle 21c onward. Where possible, have the account password reset so that
 11G/12C verifiers are generated instead.
