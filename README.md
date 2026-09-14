@@ -48,6 +48,9 @@ development — see [`docs/PROGRESS.md`](docs/PROGRESS.md) for the build log and
   OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret
   Service), or **Ask every time**. App
   state is written owner-only (`0600` files in a `0700` dir) and fsynced.
+- **Settings** (`⌘,`) — theme and editor font are **filterable dropdowns**; the
+  results row cap and query timeout are free-form fields (blank/0 = unlimited);
+  the CSV delimiter is a field with quick presets; grid density is a slider.
 - **Status bar** — action status left (`Running…` / `N rows · M ms` /
   `Fetching more…`), connection status right.
 

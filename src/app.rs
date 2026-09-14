@@ -20,8 +20,8 @@ use crate::complete::{
     qualifier_before, word_at,
 };
 use crate::config::{
-    CompleteMode, Preferences, SavedConfig, SavedTab, TabsManifest, GRID_ROW_HEIGHT_MAX,
-    GRID_ROW_HEIGHT_MIN,
+    CompleteMode, Preferences, SavedConfig, SavedTab, TabsManifest, FONT_FAMILIES,
+    GRID_ROW_HEIGHT_MAX, GRID_ROW_HEIGHT_MIN, THEME_LIST,
 };
 use crate::conn_picker::{PendingPick, PickAfter};
 use crate::db::SharedSession;
@@ -46,6 +46,8 @@ use gpui_kit::component::list::ListItem;
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::resizable::ResizableState;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
+use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
+use gpui_kit::component::select::{SelectEvent, SelectState};
 use gpui_kit::component::slider::{SliderEvent, SliderState, SliderValue};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
@@ -301,6 +303,26 @@ impl ExportFormat {
 
 // (ExportOutcome/file_stem/unix_timestamp/export_drain_blocking live in run.rs)
 
+/// A (label, value) choice for the font-family `Select`, so "Theme default"
+/// can map to the empty string while still showing a friendly label.
+#[derive(Clone)]
+pub(crate) struct ChoiceItem {
+    pub(crate) label: SharedString,
+    pub(crate) value: SharedString,
+}
+
+impl SearchableListItem for ChoiceItem {
+    type Value = SharedString;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.value
+    }
+}
+
 /// Global handle to the main view, stashed at window creation. Lets
 /// window-level/global handlers (which have a window but no view) reach it —
 /// notably to `notify()` a full re-render after a theme switch, since GPUI
@@ -463,6 +485,14 @@ pub struct SqlHighlandView {
     pub(crate) grid_row_height: u32,
     /// Settings → Results density slider (row height).
     pub(crate) grid_density_slider: Entity<SliderState>,
+    /// Settings → Results query timeout field (seconds; blank/0 = unlimited).
+    pub(crate) query_timeout_input: Entity<InputState>,
+    /// Settings → Results CSV delimiter field.
+    pub(crate) csv_delim_input: Entity<InputState>,
+    /// Settings → Themes searchable dropdown.
+    pub(crate) theme_select: Entity<SelectState<SearchableVec<SharedString>>>,
+    /// Settings → Editor → Font searchable dropdown.
+    pub(crate) font_select: Entity<SelectState<SearchableVec<ChoiceItem>>>,
     /// Free-form results-grid row cap field (Settings → Results). `0` or
     /// empty means unlimited.
     pub(crate) result_cap_input: Entity<InputState>,
@@ -597,6 +627,43 @@ impl SqlHighlandView {
                 .step(1.)
                 .default_value(SliderValue::Single(grid_row_height as f32))
         });
+        // Settings → Results query timeout (seconds; blank/0 = unlimited).
+        let timeout_secs = Preferences::load().query_timeout_secs;
+        let query_timeout_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("60")
+                .default_value(if timeout_secs == 0 {
+                    String::new()
+                } else {
+                    timeout_secs.to_string()
+                })
+        });
+        // Settings → Results CSV delimiter (single character; "tab" for tab).
+        let delim = Preferences::load().csv_delimiter;
+        let csv_delim_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(",")
+                .default_value(crate::export::csv_delim_display(&delim))
+        });
+        // Settings → Themes searchable dropdown.
+        let theme_items: Vec<SharedString> = THEME_LIST
+            .iter()
+            .map(|name| SharedString::from(*name))
+            .collect();
+        let theme_select = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(theme_items), None, window, cx).searchable(true)
+        });
+        // Settings → Editor → Font searchable dropdown.
+        let font_items: Vec<ChoiceItem> = FONT_FAMILIES
+            .iter()
+            .map(|(label, value)| ChoiceItem {
+                label: SharedString::from(*label),
+                value: SharedString::from(*value),
+            })
+            .collect();
+        let font_select = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(font_items), None, window, cx).searchable(true)
+        });
 
         // Cmd+Enter runs the statement under the cursor. Scoped to the
         // editor's own `Input` key context; the handler double-checks focus.
@@ -711,6 +778,10 @@ impl SqlHighlandView {
             result_cap: prefs.result_cap,
             grid_row_height,
             grid_density_slider,
+            query_timeout_input,
+            csv_delim_input,
+            theme_select,
+            font_select,
             result_cap_input,
             _subs: Vec::new(),
         };
@@ -784,6 +855,97 @@ impl SqlHighlandView {
                     }
                 }
             });
+            this._subs.push(sub);
+        }
+        // Query timeout field: blank/0 = unlimited, otherwise seconds.
+        {
+            let input = this.query_timeout_input.clone();
+            let input_sub = input.clone();
+            let sub = cx.subscribe_in(&input, window, move |_, _, ev: &InputEvent, _, cx| {
+                if !matches!(
+                    ev,
+                    InputEvent::Change | InputEvent::Blur | InputEvent::PressEnter { .. }
+                ) {
+                    return;
+                }
+                let text = input_sub.read(cx).value().to_string();
+                let trimmed = text.trim();
+                let parsed = if trimmed.is_empty() {
+                    Some(0u64)
+                } else if trimmed.bytes().all(|b| b.is_ascii_digit()) {
+                    trimmed.parse::<u64>().ok()
+                } else {
+                    None
+                };
+                if let Some(secs) = parsed {
+                    let mut prefs = Preferences::load();
+                    if prefs.query_timeout_secs != secs {
+                        prefs.query_timeout_secs = secs;
+                        let _ = prefs.save();
+                    }
+                }
+            });
+            this._subs.push(sub);
+        }
+        // CSV delimiter field (single character; "tab" normalizes to a tab).
+        {
+            let input = this.csv_delim_input.clone();
+            let input_sub = input.clone();
+            let sub = cx.subscribe_in(&input, window, move |_, _, ev: &InputEvent, _, cx| {
+                if !matches!(
+                    ev,
+                    InputEvent::Change | InputEvent::Blur | InputEvent::PressEnter { .. }
+                ) {
+                    return;
+                }
+                let text = input_sub.read(cx).value().to_string();
+                let delim = crate::export::csv_delim_from_input(&text);
+                let mut prefs = Preferences::load();
+                if prefs.csv_delimiter != delim {
+                    prefs.csv_delimiter = delim;
+                    let _ = prefs.save();
+                }
+            });
+            this._subs.push(sub);
+        }
+        // Theme dropdown: apply + persist on confirm.
+        {
+            let select = this.theme_select.clone();
+            let sub = cx.subscribe_in(
+                &select,
+                window,
+                move |this, _, ev: &SelectEvent<SearchableVec<SharedString>>, window, cx| {
+                    if let SelectEvent::Confirm(Some(name)) = ev {
+                        let mut prefs = Preferences::load();
+                        prefs.theme = name.to_string();
+                        if let Err(e) = prefs.save() {
+                            this.status = format!("Preferences save failed: {e:#}").into();
+                        }
+                        crate::guitheme::apply_preferences(&prefs, Some(window), cx);
+                        cx.notify();
+                    }
+                },
+            );
+            this._subs.push(sub);
+        }
+        // Font dropdown: apply + persist on confirm.
+        {
+            let select = this.font_select.clone();
+            let sub = cx.subscribe_in(
+                &select,
+                window,
+                move |this, _, ev: &SelectEvent<SearchableVec<ChoiceItem>>, _, cx| {
+                    if let SelectEvent::Confirm(Some(value)) = ev {
+                        let mut prefs = Preferences::load();
+                        prefs.font_family = value.to_string();
+                        if let Err(e) = prefs.save() {
+                            this.status = format!("Preferences save failed: {e:#}").into();
+                        }
+                        crate::guitheme::apply_font_prefs(&prefs, cx);
+                        cx.notify();
+                    }
+                },
+            );
             this._subs.push(sub);
         }
         this.restore_tabs(window, cx);

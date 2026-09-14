@@ -981,3 +981,15 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - Tests: new `format_count` unit tests + updated preference-defaults test;
   `cargo clippy --features gui --all-targets -- -D warnings` and the gui lib
   tests (124) are green.
+
+## Settings inputs & filterable dropdowns (2026-09-14)
+
+- **Query timeout** is now a free-form field (seconds; blank/0 = unlimited),
+  replacing the fixed picker.
+- **CSV delimiter** is a field (single character; `tab` / `\t` normalizes to a
+  real tab) with quick preset buttons (Comma/Semicolon/Tab/Pipe) beside it.
+- **Theme** and **editor font family** are searchable dropdowns (the kit's
+  `Select` backed by `SearchableVec`), replacing the hand-rolled click-lists;
+  the font list expanded to ~14 common monospace families.
+- `settings_pick_row` removed (no callers left). New
+  `export::csv_delim_from_input` / `csv_delim_display` helpers with unit tests.

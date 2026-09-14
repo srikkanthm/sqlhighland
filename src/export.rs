@@ -13,6 +13,33 @@ pub fn csv_delim(s: &str) -> char {
     s.chars().next().unwrap_or(',')
 }
 
+/// Normalize a delimiter typed into Settings into its stored form: blank stays
+/// blank (comma fallback at use), a literal tab or the words `tab` / `\t`
+/// become a real tab, anything else keeps its first character.
+pub fn csv_delim_from_input(text: &str) -> String {
+    if text.contains('\t') {
+        return "\t".to_string();
+    }
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("tab") || trimmed == "\\t" {
+        return "\t".to_string();
+    }
+    trimmed
+        .chars()
+        .next()
+        .map(|c| c.to_string())
+        .unwrap_or_default()
+}
+
+/// Human form of a stored delimiter for the Settings field (`"\t"` → `tab`).
+pub fn csv_delim_display(value: &str) -> String {
+    if value == "\t" {
+        "tab".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
 /// CSV header line from column names.
 pub fn csv_header_line(headers: &[String]) -> String {
     csv_header_line_with(headers, ',')
@@ -145,6 +172,22 @@ mod tests {
     fn xlsx_builder_is_send_for_background_tasks() {
         // The drain loop owns the builder on the background executor.
         assert_send::<XlsxBuilder>();
+    }
+
+    #[test]
+    fn csv_delim_input_normalizes() {
+        assert_eq!(csv_delim_from_input(""), "");
+        assert_eq!(csv_delim_from_input("   "), "");
+        assert_eq!(csv_delim_from_input(";"), ";");
+        assert_eq!(csv_delim_from_input("|extra"), "|");
+        assert_eq!(csv_delim_from_input("tab"), "\t");
+        assert_eq!(csv_delim_from_input("TAB"), "\t");
+        assert_eq!(csv_delim_from_input("\\t"), "\t");
+        assert_eq!(csv_delim_from_input("\t"), "\t");
+        // Round trip through the display form.
+        assert_eq!(csv_delim_from_input(&csv_delim_display("\t")), "\t");
+        assert_eq!(csv_delim_display(","), ",");
+        assert_eq!(csv_delim_display("\t"), "tab");
     }
 
     #[test]

@@ -7,11 +7,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::{img, px, App, Context, Entity, ObjectFit, Window};
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::setting::{
-    RenderOptions, SelectIndex, SettingGroup, SettingItem, SettingPage, Settings,
-};
+use gpui_kit::component::select::Select;
+use gpui_kit::component::setting::{SelectIndex, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_kit::component::slider::{Slider, SliderValue};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
@@ -20,7 +19,7 @@ use gpui_kit::*;
 use gpui_kit_assets::IconName as KitIcon;
 
 use crate::app::{app_view, SqlHighlandView};
-use crate::config::{CompleteMode, Preferences, THEME_LIST};
+use crate::config::{CompleteMode, Preferences};
 
 /// Index of the "About" page within the `Settings::pages` list built in
 /// [`SqlHighlandView::open_settings_dialog`] (Themes, Editor, Results,
@@ -138,6 +137,36 @@ impl SqlHighlandView {
         density_slider.update(cx, |state, cx| {
             state.set_value(SliderValue::Single(row_height as f32), window, cx);
         });
+        // Seed the query-timeout and delimiter fields.
+        let timeout_input = view.read(cx).query_timeout_input.clone();
+        let timeout_secs = Preferences::load().query_timeout_secs;
+        timeout_input.update(cx, |state, cx| {
+            state.set_value(
+                if timeout_secs == 0 {
+                    String::new()
+                } else {
+                    timeout_secs.to_string()
+                },
+                window,
+                cx,
+            );
+        });
+        let delim_input = view.read(cx).csv_delim_input.clone();
+        let delim = Preferences::load().csv_delimiter;
+        delim_input.update(cx, |state, cx| {
+            state.set_value(crate::export::csv_delim_display(&delim), window, cx);
+        });
+        // Seed the theme/font dropdowns with the current selection.
+        let theme_select = view.read(cx).theme_select.clone();
+        let theme = Preferences::load().theme_name();
+        theme_select.update(cx, |state, cx| {
+            state.set_selected_value(&SharedString::from(theme.clone()), window, cx);
+        });
+        let font_select = view.read(cx).font_select.clone();
+        let font = Preferences::load().font_family;
+        font_select.update(cx, |state, cx| {
+            state.set_selected_value(&SharedString::from(font.clone()), window, cx);
+        });
         // A targeted open (About) uses a unique id so the kit builds fresh
         // state on the requested page; a normal open keeps the persistent id
         // (and its remembered page/search).
@@ -150,67 +179,12 @@ impl SqlHighlandView {
         };
         window.open_dialog(cx, move |dialog, _, cx| {
             let muted = cx.theme().muted_foreground;
-            let hover_bg = cx.theme().accent;
             let cap_input = cap_input.clone();
             let density_slider = density_slider.clone();
-            // Reloaded on every rebuild so the check mark follows the
-            // selection while the dialog stays open.
-            let current = Preferences::load().theme_name();
-            let theme_list_view = view.clone();
-            let theme_list = move |_: &RenderOptions, _: &mut Window, _: &mut App| {
-                let mut rows = Vec::new();
-                for (row_ix, name) in THEME_LIST.into_iter().enumerate() {
-                    let selected = name == current;
-                    let id = ("settings-theme", row_ix);
-                    let row_view = theme_list_view.clone();
-                    rows.push(
-                        div()
-                            .id(id)
-                            .w_full()
-                            .p_2()
-                            .rounded_md()
-                            .hover(move |this| this.bg(hover_bg))
-                            .on_click(move |_, window, cx| {
-                                let view = row_view.clone();
-                                view.update(cx, |this, cx| {
-                                    let mut prefs = Preferences::load();
-                                    prefs.theme = name.to_string();
-                                    if let Err(e) = prefs.save() {
-                                        this.status =
-                                            format!("Preferences save failed: {e:#}").into();
-                                    }
-                                    crate::guitheme::apply_preferences(&prefs, Some(window), cx);
-                                    // Full view re-render: GPUI only repaints
-                                    // dirty views, and window refreshes alone
-                                    // reuse cached ones. Root too: its background
-                                    // paints behind the transparent sidebar/status.
-                                    cx.notify();
-                                    gpui_kit::component::Root::update(
-                                        window,
-                                        cx,
-                                        |_, _, cx| cx.notify(),
-                                    );
-                            });
-                            window.refresh();
-                        })
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .items_center()
-                                    .child(div().flex_1().text_sm().child(name))
-                                    .when(selected, |this| {
-                                        this.child(
-                                            div()
-                                                .text_color(muted)
-                                                .child(KitIcon::Check),
-                                        )
-                                    }),
-                            )
-                            .into_any_element(),
-                    );
-                }
-                v_flex().gap_1().children(rows)
-            };
+            let timeout_input = timeout_input.clone();
+            let delim_input = delim_input.clone();
+            let theme_select = theme_select.clone();
+            let font_select = font_select.clone();
             // Reloaded on every rebuild so switches follow live prefs.
             let current_mode = Preferences::load().completion;
             let show_system = Preferences::load().show_system_schemas;
@@ -233,7 +207,35 @@ impl SqlHighlandView {
                             SettingPage::new("Themes")
                                 .icon(KitIcon::Palette)
                                 .groups(vec![SettingGroup::new().title("Appearance").items(
-                                    vec![SettingItem::render(theme_list).keywords([
+                                    vec![SettingItem::render(move |_, _, _| {
+                                        let select = theme_select.clone();
+                                        v_flex().gap_1().child(
+                                            div()
+                                                .id("settings-theme-select")
+                                                .w_full()
+                                                .p_2()
+                                                .rounded_md()
+                                                .child(
+                                                    v_flex()
+                                                        .gap_1()
+                                                        .child(div().text_sm().child("Theme"))
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(muted)
+                                                                .child(
+                                                                    "Filter by typing in the dropdown",
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            Select::new(&select)
+                                                                .w_full()
+                                                                .placeholder("Select a theme"),
+                                                        ),
+                                                ),
+                                        )
+                                    })
+                                    .keywords([
                                         "theme",
                                         "appearance",
                                         "color",
@@ -408,46 +410,39 @@ impl SqlHighlandView {
                                         ]),
                                     ]),
                                     SettingGroup::new().title("Font").items(vec![
-                                        SettingItem::render(move |_, _, cx| {
-                                            let current = Preferences::load().font_family;
-                                            let rows = [
-                                                ("", "Theme default"),
-                                                ("SF Mono", "SF Mono"),
-                                                ("Menlo", "Menlo"),
-                                                ("JetBrains Mono", "JetBrains Mono"),
-                                                ("Fira Code", "Fira Code"),
-                                            ];
-                                            v_flex().gap_1().children(rows.into_iter().enumerate().map(
-                                                |(ix, (value, label))| {
-                                                    let value = value.to_string();
-                                                    let ids = [
-                                                        "settings-font-default",
-                                                        "settings-font-sf",
-                                                        "settings-font-menlo",
-                                                        "settings-font-jb",
-                                                        "settings-font-fira",
-                                                    ];
-                                                    settings_pick_row(
-                                                        ids[ix],
-                                                        label.to_string(),
-                                                        None,
-                                                        current == value,
-                                                        cx,
-                                                        move |_, window, cx| {
-                                                            let mut prefs =
-                                                                Preferences::load();
-                                                            prefs.font_family = value.clone();
-                                                            Self::save_prefs_status(
-                                                                &prefs, cx,
-                                                            );
-                                                            crate::guitheme::apply_font_prefs(
-                                                                &prefs, cx,
-                                                            );
-                                                            window.refresh();
-                                                        },
-                                                    )
-                                                },
-                                            ))
+                                        SettingItem::render(move |_, _, _| {
+                                            let select = font_select.clone();
+                                            v_flex().gap_1().child(
+                                                div()
+                                                    .id("settings-font-family")
+                                                    .w_full()
+                                                    .p_2()
+                                                    .rounded_md()
+                                                    .child(
+                                                        v_flex()
+                                                            .gap_1()
+                                                            .child(
+                                                                div()
+                                                                    .text_sm()
+                                                                    .child("Family"),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(muted)
+                                                                    .child(
+                                                                        "Filter by typing in the dropdown",
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                Select::new(&select)
+                                                                    .w_full()
+                                                                    .placeholder(
+                                                                        "Theme default",
+                                                                    ),
+                                                            ),
+                                                    ),
+                                            )
                                         })
                                         .keywords(["font", "family", "mono", "typeface"]),
                                         SettingItem::render(move |_, _, cx| {
@@ -681,42 +676,33 @@ impl SqlHighlandView {
                                         ]),
                                     ]),
                                     SettingGroup::new().title("Query timeout").items(vec![
-                                        SettingItem::render(move |_, _, cx| {
-                                            const OPTS: &[(u64, &str)] = &[
-                                                (30, "30 seconds"),
-                                                (60, "1 minute"),
-                                                (120, "2 minutes"),
-                                                (300, "5 minutes"),
-                                                (0, "Unlimited"),
-                                            ];
-                                            let current =
-                                                Preferences::load().query_timeout_secs;
-                                            let ids = [
-                                                "settings-timeout-0",
-                                                "settings-timeout-1",
-                                                "settings-timeout-2",
-                                                "settings-timeout-3",
-                                                "settings-timeout-4",
-                                            ];
-                                            v_flex().gap_1().children(OPTS.iter().enumerate().map(
-                                                |(ix, (n, label))| {
-                                                    let n = *n;
-                                                    settings_pick_row(
-                                                        ids[ix],
-                                                        label.to_string(),
-                                                        None,
-                                                        current == n,
-                                                        cx,
-                                                        move |_, window, cx| {
-                                                            let mut prefs =
-                                                                Preferences::load();
-                                                            prefs.query_timeout_secs = n;
-                                                            Self::save_prefs_status(&prefs, cx);
-                                                            window.refresh();
-                                                        },
-                                                    )
-                                                },
-                                            ))
+                                        SettingItem::render(move |_, _, _| {
+                                            let input = timeout_input.clone();
+                                            v_flex().gap_1().child(
+                                                div()
+                                                    .id("settings-query-timeout")
+                                                    .w_full()
+                                                    .p_2()
+                                                    .rounded_md()
+                                                    .child(
+                                                        v_flex()
+                                                            .gap_1()
+                                                            .child(
+                                                                div()
+                                                                    .text_sm()
+                                                                    .child("Timeout (seconds)"),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(muted)
+                                                                    .child(
+                                                                        "Blank or 0 = unlimited",
+                                                                    ),
+                                                            )
+                                                            .child(Input::new(&input).w_full()),
+                                                    ),
+                                            )
                                         })
                                         .keywords([
                                             "query", "timeout", "seconds", "slow",
@@ -724,43 +710,72 @@ impl SqlHighlandView {
                                         ]),
                                     ]),
                                     SettingGroup::new().title("CSV export").items(vec![
-                                        SettingItem::render(move |_, _, cx| {
-                                            const DELIMS: &[(&str, &str)] = &[
+                                        SettingItem::render(move |_, _, _| {
+                                            let input = delim_input.clone();
+                                            let current = Preferences::load().csv_delimiter;
+                                            const PRESETS: &[(&str, &str)] = &[
                                                 (",", "Comma"),
                                                 (";", "Semicolon"),
                                                 ("\t", "Tab"),
                                                 ("|", "Pipe"),
                                             ];
-                                            let current =
-                                                Preferences::load().csv_delimiter.clone();
-                                            let ids = [
-                                                "settings-delim-0",
-                                                "settings-delim-1",
-                                                "settings-delim-2",
-                                                "settings-delim-3",
-                                            ];
-                                            v_flex().gap_1().children(
-                                                DELIMS.iter().enumerate().map(
-                                                    |(ix, (value, label))| {
-                                                        let value = value.to_string();
-                                                        settings_pick_row(
-                                                            ids[ix],
-                                                            label.to_string(),
-                                                            None,
-                                                            current == value,
-                                                            cx,
-                                                            move |_, window, cx| {
-                                                                let mut prefs =
-                                                                    Preferences::load();
-                                                                prefs.csv_delimiter =
-                                                                    value.clone();
-                                                                Self::save_prefs_status(&prefs, cx);
-                                                                window.refresh();
+                                            v_flex()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .id("settings-csv-delimiter")
+                                                        .w_full()
+                                                        .p_2()
+                                                        .rounded_md()
+                                                        .child(
+                                                            v_flex()
+                                                                .gap_1()
+                                                                .child(
+                                                                    div()
+                                                                        .text_sm()
+                                                                        .child("Delimiter"),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .text_xs()
+                                                                        .text_color(muted)
+                                                                        .child(
+                                                                            "Single character; type \"tab\" for a tab",
+                                                                        ),
+                                                                )
+                                                                .child(
+                                                                    Input::new(&input).w_full(),
+                                                                ),
+                                                        ),
+                                                )
+                                                .child(
+                                                    h_flex().gap_1().children(
+                                                        PRESETS.iter().enumerate().map(
+                                                            |(ix, (value, label))| {
+                                                                let value = value.to_string();
+                                                                let selected = current == value;
+                                                                let input = input.clone();
+                                                                Button::new(format!(
+                                                                    "settings-delim-{ix}"
+                                                                ))
+                                                                .small()
+                                                                .when(selected, |b| b.primary())
+                                                                .label(*label)
+                                                                .on_click(move |_, window, cx| {
+                                                                    let display = crate::export::csv_delim_display(&value);
+                                                                    input.update(cx, |state, cx| {
+                                                                        state.set_value(display, window, cx);
+                                                                    });
+                                                                    let mut prefs = Preferences::load();
+                                                                    if prefs.csv_delimiter != value {
+                                                                        prefs.csv_delimiter = value.clone();
+                                                                        let _ = prefs.save();
+                                                                    }
+                                                                })
                                                             },
-                                                        )
-                                                    },
-                                                ),
-                                            )
+                                                        ),
+                                                    ),
+                                                )
                                         })
                                         .keywords([
                                             "export", "csv", "delimiter", "separator",
@@ -901,38 +916,4 @@ impl SqlHighlandView {
                 )
         });
     }
-}
-
-fn settings_pick_row(
-    id: impl Into<ElementId>,
-    label: String,
-    detail: Option<String>,
-    selected: bool,
-    cx: &App,
-    apply: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> AnyElement {
-    let hover_bg = cx.theme().accent;
-    let muted = cx.theme().muted_foreground;
-    div()
-        .id(id)
-        .w_full()
-        .p_2()
-        .rounded_md()
-        .hover(move |this| this.bg(hover_bg))
-        .on_click(move |ev, window, cx| apply(ev, window, cx))
-        .child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .child(div().text_sm().child(label))
-                        .children(detail.map(|d| div().text_xs().text_color(muted).child(d))),
-                )
-                .when(selected, |this| {
-                    this.child(div().text_color(muted).child(KitIcon::Check))
-                }),
-        )
-        .into_any_element()
 }

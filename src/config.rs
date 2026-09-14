@@ -246,6 +246,25 @@ pub const THEME_LIST: [&str; 16] = [
     "Ayu Mirage",
 ];
 
+/// Monospace font families offered in Settings → Editor → Font. The empty
+/// value follows the active theme's font. Filterable in the dropdown.
+pub const FONT_FAMILIES: &[(&str, &str)] = &[
+    ("Theme default", ""),
+    ("SF Mono", "SF Mono"),
+    ("Menlo", "Menlo"),
+    ("Monaco", "Monaco"),
+    ("JetBrains Mono", "JetBrains Mono"),
+    ("Fira Code", "Fira Code"),
+    ("Hack", "Hack"),
+    ("IBM Plex Mono", "IBM Plex Mono"),
+    ("Source Code Pro", "Source Code Pro"),
+    ("Cascadia Code", "Cascadia Code"),
+    ("Victor Mono", "Victor Mono"),
+    ("Roboto Mono", "Roboto Mono"),
+    ("PT Mono", "PT Mono"),
+    ("Courier New", "Courier New"),
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Preferences {
     /// Exact registry theme name, or [`SYSTEM_THEME`]. Empty (or unknown)
