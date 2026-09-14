@@ -1,10 +1,16 @@
 # Oracle Native Network Encryption (ANO/NNE) — investigation & port plan
 
-Status: **planned**, 2026-09-14. Chosen because the user's target database sets
-`SQLNET.ENCRYPTION_SERVER=REQUIRED` and they have no control over it, so TLS
-is likely unavailable. The pure-Rust thin driver (like `python-oracledb` thin)
-does not implement ANO; `oracledb` refuses with
-`NSI_NA_REQUIRED`.
+Status: **implemented and verified** (AES encryption), 2026-09-14. The user's
+target database sets `SQLNET.ENCRYPTION_SERVER=REQUIRED` and they have no
+control over it, so TLS is unavailable; the pure-Rust thin driver (like
+`python-oracledb` thin) does not implement ANO and refused with
+`NSI_NA_REQUIRED`. Fork commit **`f1435e7`** now implements the handshake and
+AES-CBC packet encryption for plain TCP.
+
+Result: connects, queries, and cancels against a local Oracle 19c with
+`SQLNET.ENCRYPTION_SERVER=required` (`localhost:1522`), and still connects to
+the non-encrypted instance (`localhost:1521`). Integrity/checksum is not yet
+negotiated (the client offers "none"); add it if a server requires it.
 
 ## 1. Why SQL Developer connects
 
@@ -121,14 +127,22 @@ at least one integrity algorithm (SHA256), plus no-integrity.
 
 ## 6. Progress checklist
 
-- [ ] Decide/wire up the NA-required test Oracle.
-- [ ] `dh.rs` + unit tests (fixed group/vectors).
-- [ ] `crypt.rs` AES-CBC + integrity + unit tests against go-ora vectors.
-- [ ] Negotiation codec + service lists.
-- [ ] Client hook (accept flags, negotiation sequence, NSI flag change).
-- [ ] Transport DATA transform.
-- [ ] End-to-end against the NA server (AES256, SHA256).
-- [ ] Repin fork; docs; remove the interim NA error note.
+- [x] NA-required test Oracle: `highlanddb-ano` on `localhost:1522`.
+- [x] Diffie-Hellman + unit tests (`src/encryption.rs`).
+- [x] AES-CBC cryptor + unit tests (round-trip across sizes).
+- [x] Negotiation codec + service lists (`src/advanced_nego.rs`).
+- [x] Client hook: advertise ANO (drop `NSI_DISABLE_NA`), capture
+      `ACFL0/ACFL1`, run the handshake after ACCEPT, install the cryptor.
+- [x] Transport DATA transform (pad → encrypt → folding byte on send;
+      strip → decrypt on receive).
+- [x] End-to-end against the NA server: connect, `SELECT 1 FROM dual`, and
+      cancel (`cancel_live`) all pass; the non-NA instance still works.
+- [ ] Integrity/checksum negotiation (server-requested SHA/MD5). The client
+      currently offers "none"; add if a target server requires it.
+- [ ] Explicit AES128/AES192 runs (the test server picks AES256).
+- [x] Repin fork (`f1435e7`) + docs. The interim `NSI_NA_REQUIRED` hard error
+      is now a targeted failure only when the server requires NA but does not
+      offer the ANO handshake.
 
 ## 7. Risks
 

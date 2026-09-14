@@ -939,3 +939,21 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   `cargo test --lib` (incl. the new per-protocol OOB test) + clippy clean;
   SQLHighland clippy/fmt, 122 lib tests, and the live plain-TCP cancel test
   green.
+
+## Oracle ANO/NNE support (AES) (2026-09-14)
+
+- The pure-Rust thin driver can't connect to servers with
+  `SQLNET.ENCRYPTION_SERVER=REQUIRED` (Oracle's thin drivers lack native
+  encryption; the JDBC thin driver implements it, which is why SQL Developer
+  connects with no client config).
+- Ported Oracle Advanced Networking Option from go-ora into the fork
+  (`f1435e7`): advertise ANO at connect (instead of `NSI_DISABLE_NA`), run the
+  post-ACCEPT service handshake, Diffie-Hellman key agreement, and install an
+  AES-128/192/256 CBC cryptor that transparently wraps every DATA packet body.
+  The former `NSI_NA_REQUIRED` panic-turned-error is now a targeted failure
+  only when the server requires NA but doesn't offer ANO.
+- Verified against a second Oracle 19c container with encryption required
+  (`localhost:1522`): connect + query + live `cancel_live` all pass; the
+  non-encrypted instance (`localhost:1521`) is unaffected.
+- Integrity/checksum is not negotiated yet (the client offers "none"); details
+  and the port map are in `docs/ANO.md`. SQLHighland re-pinned to the fork rev.
