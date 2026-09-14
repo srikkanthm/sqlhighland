@@ -703,41 +703,66 @@ impl SqlHighlandView {
                                 .groups(vec![SettingGroup::new().title("About").items(vec![
                                     SettingItem::render(move |_, _, _| {
                                         h_flex()
-                                            .gap_3()
+                                            .gap_4()
                                             .items_center()
                                             .child(
                                                 img(ABOUT_ICON)
-                                                    .w(px(64.))
-                                                    .h(px(64.))
+                                                    .w(px(72.))
+                                                    .h(px(72.))
                                                     .flex_none()
                                                     .object_fit(ObjectFit::Contain),
                                             )
                                             .child(
-                                                v_flex().gap_1().child(
-                                                    div().text_sm().child(format!(
-                                                        "SQLHighland {} — SQL database client",
-                                                        env!("CARGO_PKG_VERSION")
-                                                    )),
-                                                ),
+                                                v_flex()
+                                                    .flex_1()
+                                                    .gap_1()
+                                                    .child(
+                                                        div()
+                                                            .text_base()
+                                                            .child("SQLHighland"),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(muted)
+                                                            .child(format!(
+                                                                "Version {}",
+                                                                env!("CARGO_PKG_VERSION")
+                                                            )),
+                                                    ),
                                             )
                                     })
-                                    .keywords(["about", "version"]),
+                                    .keywords(["about", "version", "name"]),
                                     SettingItem::render(move |_, _, _| {
-                                        v_flex().gap_1().child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(muted)
-                                                .child(
-                                                    "Oracle support today, built on a provider \
-                                                     architecture for more databases. Rust + GPUI \
-                                                     with the official thin driver (no Oracle \
-                                                     Client required).",
-                                                ),
-                                        )
+                                        h_flex()
+                                            .w_full()
+                                            .gap_2()
+                                            .text_xs()
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .child("Author"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .text_xs()
+                                                    .child(env!("CARGO_PKG_AUTHORS")),
+                                            )
                                     })
-                                    .keywords(["about", "database", "oracle", "driver"]),
+                                    .keywords(["about", "author", "authors", "made by"]),
                                     SettingItem::render(move |_, _, _| {
-                                        v_flex().gap_1().children(
+                                        div()
+                                            .w_full()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(env!("CARGO_PKG_DESCRIPTION"))
+                                    })
+                                    .keywords(["about", "description", "database", "oracle", "driver"]),
+                                    SettingItem::render(move |_, _, _| {
+                                        v_flex().w_full().gap_1().children(
                                             [
                                                 ("Connections", SavedConfig::default_path()),
                                                 ("Preferences", Preferences::path()),

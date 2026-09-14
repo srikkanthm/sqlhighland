@@ -910,3 +910,9 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
 - Verified: menu coverage test extended with `OpenAbout`; `clippy --features
   gui-test --all-targets -D warnings` clean, 4 UI suites + 122 lib tests green,
   debug launch smoke OK. Visual confirmation of the icon/menu is manual.
+- About content reworked: name and "Version x" on separate lines, an Author
+  row, and a richer description. The old single "… — SQL database client" line
+  was clipped at the content pane's edge because the header text column had no
+  flex constraint; it now uses `flex_1()` (and `w_full()` on the description).
+  Description/author come from the manifest (`CARGO_PKG_DESCRIPTION` /
+  `CARGO_PKG_AUTHORS`; `authors` added to Cargo.toml), so About stays in sync.

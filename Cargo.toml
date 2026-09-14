@@ -3,7 +3,8 @@ name = "sqlhighland"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.89"
-description = "A native, cross-platform SQL client built with Rust + GPUI."
+description = "A native, cross-platform SQL client built with Rust + GPUI. Browse schemas, query with dictionary-backed completion, page through results, and export to CSV or Excel — powered by Oracle's official pure-Rust thin driver, no Oracle Client required."
+authors = ["Srikanth Marepalli"]
 repository = "https://github.com/srikkanthm/sqlhighland"
 # Application crate: never published to crates.io.
 publish = false
