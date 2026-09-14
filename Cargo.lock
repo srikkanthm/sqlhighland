@@ -4955,7 +4955,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 [[package]]
 name = "oracledb"
 version = "26.0.0-beta.4"
-source = "git+https://github.com/srikkanthm/rust-oracledb?rev=cb62a4e1a79bf0902b38d34007ab654a9719df1e#cb62a4e1a79bf0902b38d34007ab654a9719df1e"
+source = "git+https://github.com/srikkanthm/rust-oracledb?rev=e8dfb2fde671fa47576f190abc94a611d1f6d4b5#e8dfb2fde671fa47576f190abc94a611d1f6d4b5"
 dependencies = [
  "aes 0.9.3",
  "base16ct",
@@ -6764,7 +6764,7 @@ dependencies = [
 
 [[package]]
 name = "sqlhighland"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "gpui-kit",

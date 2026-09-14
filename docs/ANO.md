@@ -137,12 +137,22 @@ at least one integrity algorithm (SHA256), plus no-integrity.
       strip → decrypt on receive).
 - [x] End-to-end against the NA server: connect, `SELECT 1 FROM dual`, and
       cancel (`cancel_live`) all pass; the non-NA instance still works.
-- [ ] Integrity/checksum negotiation (server-requested SHA/MD5). The client
-      currently offers "none"; add if a target server requires it.
+- [x] Integrity/checksum negotiation (SHA-256/384/512, AES-keystream);
+      required by some servers and applied per DATA packet.
 - [ ] Explicit AES128/AES192 runs (the test server picks AES256).
-- [x] Repin fork (`f1435e7`) + docs. The interim `NSI_NA_REQUIRED` hard error
-      is now a targeted failure only when the server requires NA but does not
-      offer the ANO handshake.
+- [x] Repin fork + docs. The interim `NSI_NA_REQUIRED` hard error is now a
+      targeted failure only when the server requires NA but does not offer the
+      ANO handshake.
+
+### Known limitation: cancel on a checksummed session
+
+An interrupt (Cancel) on a session that negotiated a checksum leaves Oracle's
+per-request checksum state desynced (the re-keying isn't observable from the
+client). The post-interrupt packet fails integrity validation, the driver
+reports an unrecoverable error and closes the transport. The error is
+poisoning, so SQLHighland drops the session and reconnects on the next run.
+Servers that only require *encryption* (no checksum) are unaffected — Cancel
+works normally there.
 
 ## 7. Risks
 
