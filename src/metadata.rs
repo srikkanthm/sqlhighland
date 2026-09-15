@@ -19,8 +19,6 @@ use crate::schema::DbEngine;
 /// Cap per dictionary query (protects huge schemas; highland-size DBs never
 /// come close).
 pub const DICT_MAX_ROWS: usize = 100_000;
-/// Stale-after duration; the view refreshes past this on next trigger.
-pub const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableKind {
@@ -56,11 +54,16 @@ pub struct MetadataCache {
 }
 
 impl MetadataCache {
-    /// True when never fetched or older than [`CACHE_TTL`].
-    pub fn is_stale(&self) -> bool {
+    /// True when the cache should be refreshed: never fetched, or older than
+    /// `ttl`. `None` means it never expires by time (only a reconnect or a
+    /// manual refresh clears it).
+    pub fn is_stale(&self, ttl: Option<std::time::Duration>) -> bool {
         match self.fetched_at {
             None => true,
-            Some(t) => t.elapsed() > CACHE_TTL,
+            Some(t) => match ttl {
+                None => false,
+                Some(ttl) => t.elapsed() > ttl,
+            },
         }
     }
 
@@ -600,8 +603,12 @@ mod tests {
         assert_eq!(cache.columns_for(Some("scott"), "emp").len(), 2);
         assert_eq!(cache.columns_for(None, "emp").len(), 2);
         assert!(cache.columns_for(None, "nope").is_empty());
-        assert!(cache.is_stale());
+        assert!(cache.is_stale(None));
+        assert!(cache.is_stale(Some(std::time::Duration::from_secs(60))));
         cache.fetched_at = Some(Instant::now());
-        assert!(!cache.is_stale());
+        // A fresh cache is never stale: `None` never expires by time, and a
+        // finite TTL only trips once elapsed exceeds it.
+        assert!(!cache.is_stale(None));
+        assert!(!cache.is_stale(Some(std::time::Duration::from_secs(3600))));
     }
 }

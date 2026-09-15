@@ -135,6 +135,7 @@ pub(crate) enum CopySel {
 pub(crate) enum ConnMenuOp {
     Connect,
     Disconnect,
+    RefreshMeta,
     Edit,
     Delete,
 }
@@ -152,6 +153,7 @@ pub(crate) fn conn_menu_item(
             view.update(cx, |this, cx| match op {
                 ConnMenuOp::Connect => this.connect_connection(&conn_id, window, cx),
                 ConnMenuOp::Disconnect => this.disconnect_connection(&conn_id, cx),
+                ConnMenuOp::RefreshMeta => this.refresh_meta(&conn_id, cx),
                 ConnMenuOp::Edit => {
                     if let Some(ix) = this.connection_index(&conn_id) {
                         this.start_edit(ix, window, cx);
@@ -359,6 +361,7 @@ pub struct SettingsControls {
     pub(crate) grid_density_slider: Entity<SliderState>,
     pub(crate) query_timeout_input: Entity<InputState>,
     pub(crate) csv_delim_input: Entity<InputState>,
+    pub(crate) metadata_ttl_input: Entity<InputState>,
     pub(crate) theme_select: Entity<SelectState<SearchableVec<SharedString>>>,
     pub(crate) font_select: Entity<SelectState<SearchableVec<ChoiceItem>>>,
     pub(crate) grid_row_height: u32,
@@ -548,6 +551,11 @@ pub struct SqlHighlandView {
     pub(crate) complete_auto: bool,
     /// Include SYS/SYSTEM/etc. objects in suggestions. Mirrors preferences.
     pub(crate) show_system: bool,
+    /// Suggestions/dictionary cache TTL; `None` = never expires by time.
+    /// Mirrors preferences and is updated live from the Settings field.
+    pub(crate) metadata_ttl: Option<std::time::Duration>,
+    /// Settings → Editor → Suggestions cache TTL field (minutes).
+    pub(crate) metadata_ttl_input: Entity<InputState>,
     /// Show table/column detail cards on editor hover. Mirrors preferences.
     pub(crate) hover_details: bool,
     /// Results-grid row cap in effect (0 = unlimited). Mirrors the saved
@@ -711,6 +719,18 @@ impl SqlHighlandView {
                     timeout_secs.to_string()
                 })
         });
+        // Settings → Editor → Suggestions cache TTL (minutes; blank/0 =
+        // never, i.e. refresh only on reconnect or manually).
+        let ttl_secs = Preferences::load().metadata_ttl_secs;
+        let metadata_ttl_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("0")
+                .default_value(if ttl_secs == 0 {
+                    String::new()
+                } else {
+                    (ttl_secs / 60).to_string()
+                })
+        });
         // Settings → Results CSV delimiter (single character; "tab" for tab).
         let delim = Preferences::load().csv_delimiter;
         let csv_delim_input = cx.new(|cx| {
@@ -849,6 +869,8 @@ impl SqlHighlandView {
             },
             complete_auto: prefs.completion == CompleteMode::Auto,
             show_system: prefs.show_system_schemas,
+            metadata_ttl: prefs.metadata_ttl(),
+            metadata_ttl_input,
             hover_details: prefs.hover_details,
             result_cap: prefs.result_cap,
             grid_row_height,
@@ -956,6 +978,42 @@ impl SqlHighlandView {
                     let mut prefs = Preferences::load();
                     if prefs.query_timeout_secs != secs {
                         prefs.query_timeout_secs = secs;
+                        let _ = prefs.save();
+                    }
+                }
+            });
+            this._subs.push(sub);
+        }
+        // Suggestions cache TTL field (minutes; blank/0 = never).
+        {
+            let input = this.metadata_ttl_input.clone();
+            let input_sub = input.clone();
+            let sub = cx.subscribe_in(&input, window, move |this, _, ev: &InputEvent, _, cx| {
+                if !matches!(
+                    ev,
+                    InputEvent::Change | InputEvent::Blur | InputEvent::PressEnter { .. }
+                ) {
+                    return;
+                }
+                let text = input_sub.read(cx).value().to_string();
+                let trimmed = text.trim();
+                let parsed = if trimmed.is_empty() {
+                    Some(0u64)
+                } else if trimmed.bytes().all(|b| b.is_ascii_digit()) {
+                    trimmed.parse::<u64>().ok()
+                } else {
+                    None
+                };
+                if let Some(minutes) = parsed {
+                    let secs = minutes.saturating_mul(60);
+                    this.metadata_ttl = if secs == 0 {
+                        None
+                    } else {
+                        Some(std::time::Duration::from_secs(secs))
+                    };
+                    let mut prefs = Preferences::load();
+                    if prefs.metadata_ttl_secs != secs {
+                        prefs.metadata_ttl_secs = secs;
                         let _ = prefs.save();
                     }
                 }

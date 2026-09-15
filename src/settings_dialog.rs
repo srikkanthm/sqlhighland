@@ -121,6 +121,7 @@ impl SqlHighlandView {
             grid_density_slider: self.grid_density_slider.clone(),
             query_timeout_input: self.query_timeout_input.clone(),
             csv_delim_input: self.csv_delim_input.clone(),
+            metadata_ttl_input: self.metadata_ttl_input.clone(),
             theme_select: self.theme_select.clone(),
             font_select: self.font_select.clone(),
             grid_row_height: self.grid_row_height,
@@ -179,6 +180,20 @@ impl SqlHighlandView {
         delim_input.update(cx, |state, cx| {
             state.set_value(crate::export::csv_delim_display(&delim), window, cx);
         });
+        // Seed the suggestions cache TTL (minutes; blank when "never").
+        let metadata_ttl_input = controls.metadata_ttl_input;
+        let ttl_secs = Preferences::load().metadata_ttl_secs;
+        metadata_ttl_input.update(cx, |state, cx| {
+            state.set_value(
+                if ttl_secs == 0 {
+                    String::new()
+                } else {
+                    (ttl_secs / 60).to_string()
+                },
+                window,
+                cx,
+            );
+        });
         // Seed the theme/font dropdowns with the current selection.
         let theme_select = controls.theme_select;
         let theme = Preferences::load().theme_name();
@@ -206,6 +221,7 @@ impl SqlHighlandView {
             let density_slider = density_slider.clone();
             let timeout_input = timeout_input.clone();
             let delim_input = delim_input.clone();
+            let metadata_ttl_input = metadata_ttl_input.clone();
             let theme_select = theme_select.clone();
             let font_select = font_select.clone();
             // Reloaded on every rebuild so switches follow live prefs.
@@ -430,6 +446,42 @@ impl SqlHighlandView {
                                             "sys",
                                             "hidden",
                                             "filter",
+                                        ]),
+                                        SettingItem::render(move |_, _, _| {
+                                            let input = metadata_ttl_input.clone();
+                                            v_flex().gap_1().child(
+                                                div()
+                                                    .id("settings-metadata-ttl")
+                                                    .w_full()
+                                                    .p_2()
+                                                    .rounded_md()
+                                                    .child(
+                                                        v_flex()
+                                                            .gap_1()
+                                                            .child(
+                                                                div().text_sm().child(
+                                                                    "Refresh suggestions (minutes)",
+                                                                ),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(muted)
+                                                                    .child(
+                                                                        "Blank or 0 = never (refreshes on reconnect or via the connection menu)",
+                                                                    ),
+                                                            )
+                                                            .child(Input::new(&input).w_full()),
+                                                    ),
+                                            )
+                                        })
+                                        .keywords([
+                                            "suggestions",
+                                            "cache",
+                                            "refresh",
+                                            "ttl",
+                                            "expire",
+                                            "dictionary",
                                         ]),
                                     ]),
                                     SettingGroup::new().title("Font").items(vec![

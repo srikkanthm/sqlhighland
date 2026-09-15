@@ -133,6 +133,13 @@ impl SqlHighlandView {
                     connect_op,
                 ))
                 .item(conn_menu_item(
+                    "Refresh suggestions",
+                    KitIcon::RefreshCw,
+                    view.clone(),
+                    conn_id.clone(),
+                    ConnMenuOp::RefreshMeta,
+                ))
+                .item(conn_menu_item(
                     "Edit…",
                     KitIcon::SquarePen,
                     view.clone(),

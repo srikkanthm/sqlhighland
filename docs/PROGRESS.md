@@ -1066,3 +1066,18 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   `flex_1().min_h_0().overflow_hidden()` container, `render_main`'s root is
   `min_h_0`, the status bar is `flex_none`, and the results grid container is
   `min_h_0` so the virtualized table shrinks and scrolls.
+
+## Configurable suggestions cache + manual refresh (2026-09-14)
+
+- The dictionary/suggestions cache TTL is now a preference
+  (`metadata_ttl_secs`, **default 0 = never expire** while the connection is
+  active) instead of a hard-coded 15 minutes. `MetadataCache::is_stale` takes
+  `Option<Duration>`; the live value is mirrored on the view
+  (`SqlHighlandView::metadata_ttl`) and updated from Settings.
+- Settings → Editor → Suggestions gained a free-form **"Refresh suggestions
+  (minutes)"** field (blank/0 = never), matching the row-cap/timeout fields.
+- The connection context menu gained **"Refresh suggestions"**
+  (`ConnMenuOp::RefreshMeta` → `refresh_meta`), which forces a fetch now,
+  bypassing the TTL.
+- Disconnecting marks the connection's cache stale, so a reconnect refetches
+  the dictionary even when the TTL is "never".

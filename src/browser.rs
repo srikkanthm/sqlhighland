@@ -251,6 +251,16 @@ impl SqlHighlandView {
     /// background executor. No-op when fresh or already loading. Safe to
     /// call from any run/connect completion or the manual trigger.
     pub(crate) fn ensure_meta(&mut self, conn_id: &str, cx: &mut Context<Self>) {
+        self.ensure_meta_inner(conn_id, false, cx);
+    }
+
+    /// Force a dictionary refresh now (connection context menu → "Refresh
+    /// suggestions"), bypassing the TTL.
+    pub(crate) fn refresh_meta(&mut self, conn_id: &str, cx: &mut Context<Self>) {
+        self.ensure_meta_inner(conn_id, true, cx);
+    }
+
+    fn ensure_meta_inner(&mut self, conn_id: &str, force: bool, cx: &mut Context<Self>) {
         let cache = self
             .browser
             .meta
@@ -259,7 +269,7 @@ impl SqlHighlandView {
             .clone();
         let stale = {
             let c = lock(&cache);
-            c.is_stale() && !c.loading
+            (force || c.is_stale(self.metadata_ttl)) && !c.loading
         };
         if !stale {
             return;
@@ -273,7 +283,11 @@ impl SqlHighlandView {
             cfg.password = pw;
         }
         lock(&cache).loading = true;
-        self.status = "Loading suggestions…".into();
+        self.status = if force {
+            "Refreshing suggestions…".into()
+        } else {
+            "Loading suggestions…".into()
+        };
         cx.notify();
         let session = self.pool.get_or_create(conn_id, cfg.engine);
         // Engine-specific dictionary fetcher (&'static, Send+Sync).

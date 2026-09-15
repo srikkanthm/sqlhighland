@@ -59,7 +59,10 @@ impl SqlHighlandView {
             .as_deref()
             .and_then(|id| self.browser.meta.get(id))
             .cloned();
-        let stale = cache.as_ref().map(|c| lock(c).is_stale()).unwrap_or(true);
+        let stale = cache
+            .as_ref()
+            .map(|c| lock(c).is_stale(self.metadata_ttl))
+            .unwrap_or(true);
         if stale && conn_id.is_some() {
             // Bound tab with a cold cache: a refresh is possible (runs,
             // connects, and the manual trigger all call ensure_meta), so

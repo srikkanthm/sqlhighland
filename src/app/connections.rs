@@ -209,6 +209,12 @@ impl SqlHighlandView {
     pub(super) fn disconnect_connection(&mut self, conn_id: &str, cx: &mut Context<Self>) {
         self.pool.remove(conn_id);
         self.live.remove(conn_id);
+        // Mark the dictionary cache stale so a reconnect refetches it. (With
+        // the TTL set to "never", this is what keeps suggestions honest across
+        // a disconnect/reconnect.)
+        if let Some(cache) = self.browser.meta.get(conn_id) {
+            lock(cache).fetched_at = None;
+        }
         // Tabs keep their fetched rows; further paging goes stale (guarded).
         // No "Disconnected" notice: the status bar derives live state itself.
         self.status = "".into();

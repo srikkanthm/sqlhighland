@@ -306,6 +306,10 @@ pub struct Preferences {
     /// every round trip; missing (older files) → 60.
     #[serde(default = "default_query_timeout")]
     pub query_timeout_secs: u64,
+    /// Suggestions/dictionary cache TTL in seconds. 0 = never expire (the
+    /// cache refreshes only on reconnect or a manual refresh). Default 0.
+    #[serde(default = "default_metadata_ttl")]
+    pub metadata_ttl_secs: u64,
     // --- Legacy family+mode matrix (pre-flat themes). Still parsed (via
     // the original key names) so old files migrate instead of resetting;
     // never written back. ---
@@ -331,6 +335,7 @@ impl Default for Preferences {
             font_family: String::new(),
             font_size: default_font_size(),
             query_timeout_secs: default_query_timeout(),
+            metadata_ttl_secs: default_metadata_ttl(),
             legacy_family: LegacyFamily::default(),
             legacy_mode: LegacyMode::default(),
             legacy_catppuccin_dark: LegacyCatppuccinDark::default(),
@@ -364,6 +369,11 @@ fn default_font_size() -> u32 {
 
 fn default_query_timeout() -> u64 {
     60
+}
+
+/// Suggestions cache TTL default: 0 = never expire while connected.
+fn default_metadata_ttl() -> u64 {
+    0
 }
 
 /// Suggestion popup behavior for the query editor.
@@ -431,6 +441,16 @@ impl Preferences {
             LegacyMode::System => SYSTEM_THEME.to_string(),
             LegacyMode::Light => light.to_string(),
             LegacyMode::Dark => dark.to_string(),
+        }
+    }
+
+    /// Suggestions/dictionary cache TTL, or `None` when the cache never
+    /// expires (the setting is 0).
+    pub fn metadata_ttl(&self) -> Option<std::time::Duration> {
+        if self.metadata_ttl_secs == 0 {
+            None
+        } else {
+            Some(std::time::Duration::from_secs(self.metadata_ttl_secs))
         }
     }
 }
@@ -575,6 +595,9 @@ mod tests {
         assert_eq!(p.query_timeout_secs, 60);
         assert!(!p.hover_details);
         assert_eq!(p.grid_row_height, 22);
+        // Suggestions cache never expires by default.
+        assert_eq!(p.metadata_ttl_secs, 0);
+        assert!(p.metadata_ttl().is_none());
         let p: Preferences = toml::from_str("theme = \"Nord Dark\"\n").unwrap();
         assert_eq!(p.result_cap, 100_000);
         assert_eq!(p.csv_delimiter, ",");
