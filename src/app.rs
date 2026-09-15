@@ -20,8 +20,8 @@ use crate::complete::{
     qualifier_before, word_at,
 };
 use crate::config::{
-    CompleteMode, Preferences, SavedConfig, SavedTab, TabsManifest, FONT_FAMILIES,
-    GRID_ROW_HEIGHT_MAX, GRID_ROW_HEIGHT_MIN, THEME_LIST,
+    CompleteMode, FONT_FAMILIES, GRID_ROW_HEIGHT_MAX, GRID_ROW_HEIGHT_MIN, Preferences,
+    SavedConfig, SavedTab, THEME_LIST, TabsManifest, UiDensity,
 };
 use crate::conn_picker::{PendingPick, PickAfter};
 use crate::db::SharedSession;
@@ -52,6 +52,7 @@ use gpui_kit::component::slider::{SliderEvent, SliderState, SliderValue};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::tree::{tree, TreeState};
+use gpui_kit::component::Size;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -60,11 +61,6 @@ use gpui_kit_assets::IconName as KitIcon;
 const DEFAULT_SQL: &str = "SELECT user, sysdate FROM dual;";
 /// Quiet period before an editor change is flushed to its draft file.
 const DRAFT_DEBOUNCE: Duration = Duration::from_millis(1500);
-/// Fixed width for the header action buttons so Run/Commit/Rollback/Format
-/// (and Cancel/Export) render identical regardless of label length. Sized to
-/// fit the longest label ("Rollback") with icon at small size.
-const ACTION_BUTTON_W: f32 = 104.0;
-
 gpui_kit::actions!(
     sqlhighland,
     [
@@ -364,6 +360,7 @@ pub struct SettingsControls {
     pub(crate) metadata_ttl_input: Entity<InputState>,
     pub(crate) theme_select: Entity<SelectState<SearchableVec<SharedString>>>,
     pub(crate) font_select: Entity<SelectState<SearchableVec<ChoiceItem>>>,
+    pub(crate) density_select: Entity<SelectState<SearchableVec<SharedString>>>,
     pub(crate) grid_row_height: u32,
 }
 
@@ -393,6 +390,75 @@ impl ToolbarSize {
     /// True unless the full labels fit.
     pub(crate) fn compact(self) -> bool {
         self != Self::Full
+    }
+}
+
+/// Concrete sizes derived from the active [`UiDensity`].
+#[derive(Clone, Copy)]
+pub(crate) struct Density {
+    pub(crate) is_compact: bool,
+    /// Size passed to the kit's `TabBar`/`Tab`.
+    pub(crate) tab_size: Size,
+    /// Action/connection button size.
+    pub(crate) button_size: Size,
+    /// Fixed width for labelled action buttons.
+    pub(crate) action_button_w: f32,
+    /// Gap between inline controls.
+    pub(crate) gap: f32,
+    /// Sidebar connection-row vertical padding.
+    pub(crate) row_py: f32,
+    /// Sidebar icon-button size.
+    pub(crate) icon_button: f32,
+    /// Live status dot diameter.
+    pub(crate) dot: f32,
+    /// Status bar height.
+    pub(crate) status_h: f32,
+    /// Pane inner padding.
+    pub(crate) pane_pad: f32,
+    /// Environment badge width (0 = content-sized).
+    pub(crate) badge_w: f32,
+    /// Dialog inner padding.
+    pub(crate) dialog_pad: f32,
+}
+
+impl Density {
+    pub(crate) fn for_level(level: UiDensity) -> Self {
+        match level {
+            UiDensity::Compact => Self {
+                is_compact: true,
+                tab_size: Size::Small,
+                button_size: Size::XSmall,
+                action_button_w: 80.0,
+                gap: 4.0,
+                row_py: 2.0,
+                icon_button: 20.0,
+                dot: 6.0,
+                status_h: 22.0,
+                pane_pad: 4.0,
+                badge_w: 0.0,
+                dialog_pad: 6.0,
+            },
+            UiDensity::Comfortable => Self {
+                is_compact: false,
+                tab_size: Size::Medium,
+                button_size: Size::Small,
+                action_button_w: 104.0,
+                gap: 8.0,
+                row_py: 4.0,
+                icon_button: 24.0,
+                dot: 8.0,
+                status_h: 28.0,
+                pane_pad: 8.0,
+                badge_w: 48.0,
+                dialog_pad: 8.0,
+            },
+        }
+    }
+
+    /// Height for the viewer header (no editor), aligned with the compact
+    /// status bar plus room for its buttons.
+    pub(crate) fn viewer_h(&self) -> f32 {
+        self.status_h + if self.is_compact { 4.0 } else { 8.0 }
     }
 }
 
@@ -551,6 +617,8 @@ pub struct SqlHighlandView {
     pub(crate) complete_auto: bool,
     /// Include SYS/SYSTEM/etc. objects in suggestions. Mirrors preferences.
     pub(crate) show_system: bool,
+    /// Global interface density. Mirrors preferences; toggled in Settings.
+    pub(crate) ui_density: UiDensity,
     /// Suggestions/dictionary cache TTL; `None` = never expires by time.
     /// Mirrors preferences and is updated live from the Settings field.
     pub(crate) metadata_ttl: Option<std::time::Duration>,
@@ -574,6 +642,8 @@ pub struct SqlHighlandView {
     pub(crate) theme_select: Entity<SelectState<SearchableVec<SharedString>>>,
     /// Settings → Editor → Font searchable dropdown.
     pub(crate) font_select: Entity<SelectState<SearchableVec<ChoiceItem>>>,
+    /// Settings → Themes → interface density dropdown.
+    pub(crate) density_select: Entity<SelectState<SearchableVec<SharedString>>>,
     /// Free-form results-grid row cap field (Settings → Results). `0` or
     /// empty means unlimited.
     pub(crate) result_cap_input: Entity<InputState>,
@@ -757,6 +827,14 @@ impl SqlHighlandView {
         let font_select = cx.new(|cx| {
             SelectState::new(SearchableVec::new(font_items), None, window, cx).searchable(true)
         });
+        // Settings → Themes → interface density (two options).
+        let density_items: Vec<SharedString> = [UiDensity::Compact, UiDensity::Comfortable]
+            .iter()
+            .map(|d| SharedString::from(d.label()))
+            .collect();
+        let density_select = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(density_items), None, window, cx)
+        });
 
         // Cmd+Enter runs the statement under the cursor. Scoped to the
         // editor's own `Input` key context; the handler double-checks focus.
@@ -869,6 +947,7 @@ impl SqlHighlandView {
             },
             complete_auto: prefs.completion == CompleteMode::Auto,
             show_system: prefs.show_system_schemas,
+            ui_density: prefs.ui_density,
             metadata_ttl: prefs.metadata_ttl(),
             metadata_ttl_input,
             hover_details: prefs.hover_details,
@@ -879,6 +958,7 @@ impl SqlHighlandView {
             csv_delim_input,
             theme_select,
             font_select,
+            density_select,
             result_cap_input,
             _subs: Vec::new(),
         };
@@ -1081,6 +1161,31 @@ impl SqlHighlandView {
             );
             this._subs.push(sub);
         }
+        // Interface-density dropdown: apply + persist on confirm.
+        {
+            let select = this.density_select.clone();
+            let sub = cx.subscribe_in(
+                &select,
+                window,
+                move |this, _, ev: &SelectEvent<SearchableVec<SharedString>>, _, cx| {
+                    if let SelectEvent::Confirm(Some(label)) = ev {
+                        let density = if label.as_ref() == UiDensity::Comfortable.label() {
+                            UiDensity::Comfortable
+                        } else {
+                            UiDensity::Compact
+                        };
+                        let mut prefs = Preferences::load();
+                        prefs.ui_density = density;
+                        if let Err(e) = prefs.save() {
+                            this.status = format!("Preferences save failed: {e:#}").into();
+                        }
+                        this.ui_density = density;
+                        cx.notify();
+                    }
+                },
+            );
+            this._subs.push(sub);
+        }
         this.restore_tabs(window, cx);
         // Give the window an initial focus target. Without this, GPUI has no
         // focused dispatch node until the user clicks the editor, so the
@@ -1109,6 +1214,11 @@ impl SqlHighlandView {
     /// Responsive level for the toolbars/headers, from the measured main width.
     pub(crate) fn toolbar_size(&self) -> ToolbarSize {
         ToolbarSize::for_width(self.main_width.get())
+    }
+
+    /// Concrete sizes for the active interface density.
+    pub(crate) fn density(&self) -> Density {
+        Density::for_level(self.ui_density)
     }
 
     fn connection_name(&self, id: &Option<String>) -> String {

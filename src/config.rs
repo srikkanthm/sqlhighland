@@ -277,6 +277,9 @@ pub struct Preferences {
     /// Include SYS/SYSTEM/etc. objects in suggestions. Default hidden.
     #[serde(default)]
     pub show_system_schemas: bool,
+    /// Global interface density. Default Compact.
+    #[serde(default)]
+    pub ui_density: UiDensity,
     /// Show table/column detail cards when hovering the editor. Off by
     /// default (the cards are informative but can be noisy).
     #[serde(default)]
@@ -327,6 +330,7 @@ impl Default for Preferences {
             theme: SYSTEM_THEME.to_string(),
             completion: CompleteMode::default(),
             show_system_schemas: false,
+            ui_density: UiDensity::default(),
             hover_details: false,
             result_cap: default_result_cap(),
             grid_row_height: default_grid_row_height(),
@@ -384,6 +388,26 @@ pub enum CompleteMode {
     Auto,
     /// Popup only on the manual shortcut (ctrl-space).
     Manual,
+}
+
+/// Global interface density: how tightly tabs, toolbars, the sidebar, the
+/// status bar, and padding are sized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum UiDensity {
+    /// Tight sizing across the shell (the default).
+    #[default]
+    Compact,
+    /// The roomier legacy sizing.
+    Comfortable,
+}
+
+impl UiDensity {
+    pub fn label(self) -> &'static str {
+        match self {
+            UiDensity::Compact => "Compact",
+            UiDensity::Comfortable => "Comfortable",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -598,6 +622,7 @@ mod tests {
         // Suggestions cache never expires by default.
         assert_eq!(p.metadata_ttl_secs, 0);
         assert!(p.metadata_ttl().is_none());
+        assert_eq!(p.ui_density, UiDensity::Compact);
         let p: Preferences = toml::from_str("theme = \"Nord Dark\"\n").unwrap();
         assert_eq!(p.result_cap, 100_000);
         assert_eq!(p.csv_delimiter, ",");

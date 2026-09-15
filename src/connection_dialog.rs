@@ -18,8 +18,8 @@ use gpui_kit::component::*;
 use gpui_kit::*;
 use zeroize::Zeroizing;
 
-use crate::app::{env_color, PendingPassword, SqlHighlandView};
-use crate::config::SavedConfig;
+use crate::app::{env_color, Density, PendingPassword, SqlHighlandView};
+use crate::config::{Preferences, SavedConfig};
 use crate::conn_picker::PickAfter;
 use crate::model::{ConnectionConfig, Environment, OracleRole, PasswordMode, ServiceKind};
 use crate::schema::DbEngine;
@@ -208,6 +208,7 @@ impl SqlHighlandView {
             let save_view = view.clone();
             let pending = pending_cell.clone();
             let muted = cx.theme().muted_foreground;
+            let d = Density::for_level(Preferences::load().ui_density);
             // Plain clone for the scrollbar overlay (same handle the
             // scroll area tracks, so the thumb stays in sync).
             let scroll_sb = (*scroll_handle).clone();
@@ -233,7 +234,7 @@ impl SqlHighlandView {
                                 .track_scroll(&scroll_handle)
                                 .child(
                                     v_flex()
-                                        .gap_2()
+                                        .gap(px(d.gap))
                                         .w_full()
                                         // Gutter for the overlaid scrollbar track
                                         // (16px): without it the thumb sits on top
@@ -465,8 +466,8 @@ impl SqlHighlandView {
                                                                 };
                                                             div()
                                             .id(("conn-env", ix))
-                                            .px_2()
-                                            .py_1()
+                                            .px(px(d.pane_pad))
+                                            .py(px(d.row_py))
                                             .rounded_md()
                                             .cursor_pointer()
                                             .bg(bg)
@@ -503,7 +504,7 @@ impl SqlHighlandView {
                 )
                 .footer(
                     h_flex()
-                        .gap_2()
+                        .gap(px(d.gap))
                         .child({
                             let cell = test_cell.clone();
                             let testing = matches!(*cell.borrow(), TestState::Testing);
@@ -723,8 +724,9 @@ fn dialog_pills<T: Copy + PartialEq + 'static>(
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let accent = cx.theme().accent;
+    let d = Density::for_level(Preferences::load().ui_density);
     h_flex()
-        .gap_1()
+        .gap(px(d.gap))
         .children(options.iter().enumerate().map(|(ix, (value, label))| {
             let value = *value;
             let selected = current == value;
@@ -732,8 +734,8 @@ fn dialog_pills<T: Copy + PartialEq + 'static>(
             div()
                 .id((id_base, ix))
                 .test_support()
-                .px_2()
-                .py_1()
+                .px(px(d.pane_pad))
+                .py(px(d.row_py))
                 .rounded_md()
                 .cursor_pointer()
                 .bg(if selected {
@@ -759,8 +761,9 @@ fn dialog_pills<T: Copy + PartialEq + 'static>(
 /// nothing else; alerts and custom footers (picker, bind, delete)
 /// keep their own.
 pub(crate) fn dialog_footer(cancel_id: &'static str, confirm: Button) -> impl IntoElement {
+    let d = Density::for_level(Preferences::load().ui_density);
     h_flex()
-        .gap_2()
+        .gap(px(d.gap))
         .child(div().flex_1())
         .child(
             Button::new(cancel_id)

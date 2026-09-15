@@ -335,7 +335,7 @@ impl SqlHighlandView {
                         .child(div().text_sm().child(r.name.clone()))
                         .child(div().text_xs().text_color(muted).child(r.detail.clone())),
                 );
-                if let Some(tag) = env_tag(r.env, cx) {
+                if let Some(tag) = env_tag(r.env, 0.0, cx) {
                     line = line.child(tag);
                 }
                 scroll_body = scroll_body.child(

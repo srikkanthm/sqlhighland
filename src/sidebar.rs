@@ -27,6 +27,7 @@ impl SqlHighlandView {
         let cfg = &self.connections[ix];
         let is_live = self.live.contains(&cfg.id);
         let view = cx.entity().downgrade();
+        let d = self.density();
         let conn_id = cfg.id.clone();
         let browser_open = self.browser.open.contains(&cfg.id);
         let toggle_id = conn_id.clone();
@@ -36,10 +37,10 @@ impl SqlHighlandView {
         // connection context menu, and anything inside its hitbox fires
         // both menus on right-click (one menu per hitbox, last wins).
         let row_body = h_flex()
-            .gap_2()
+            .gap(px(d.gap))
             .items_stretch()
-            .px_2()
-            .py_1()
+            .px(px(d.pane_pad))
+            .py(px(d.row_py))
             // Status bar: the live indicator — success green when
             // connected, faint border tone when idle. First child
             // of the horizontal body so items_stretch gives it
@@ -66,7 +67,7 @@ impl SqlHighlandView {
                         KitIcon::ChevronRight
                     })
                     .ghost()
-                    .with_size(px(24.))
+                    .with_size(px(d.icon_button))
                     .tooltip("Browse schema")
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.toggle_browser(&toggle_id, window, cx);
@@ -76,7 +77,7 @@ impl SqlHighlandView {
                 Button::new(("conn-icon", ix))
                     .icon(KitIcon::Database)
                     .ghost()
-                    .with_size(px(24.))
+                    .with_size(px(d.icon_button))
                     // Live state reads from the icon + the 3px
                     // status bar, not a full-row wash.
                     .text_color(if is_live {
@@ -101,11 +102,14 @@ impl SqlHighlandView {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .text_sm()
+                                    .when(d.is_compact, |e| e.text_xs())
+                                    .when(!d.is_compact, |e| e.text_sm())
                                     .truncate()
                                     .child(cfg.name.clone()),
                             )
-                            .when_some(env_tag(cfg.environment, cx), |this, tag| this.child(tag)),
+                            .when_some(env_tag(cfg.environment, d.badge_w, cx), |this, tag| {
+                                this.child(tag)
+                            }),
                     ),
             );
         let row = div()
@@ -201,6 +205,7 @@ impl SqlHighlandView {
     }
 
     pub(crate) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let d = self.density();
         if self.sidebar_collapsed {
             // Slim rail: just expand + settings. Connections (and adding)
             // live only in the expanded pane — the rail stays a narrow
@@ -249,7 +254,7 @@ impl SqlHighlandView {
                 .child(
                     div()
                         .w_full()
-                        .h(px(36.))
+                        .h(px(d.viewer_h()))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -257,7 +262,7 @@ impl SqlHighlandView {
                             Button::new("expand")
                                 .icon(KitIcon::PanelLeftOpen)
                                 .ghost()
-                                .small()
+                                .with_size(d.button_size)
                                 .tooltip("Expand connections")
                                 .on_click(cx.listener(Self::toggle_sidebar)),
                         ),
@@ -266,7 +271,7 @@ impl SqlHighlandView {
                 .child(
                     div()
                         .w_full()
-                        .h(px(28.))
+                        .h(px(d.status_h))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -274,7 +279,7 @@ impl SqlHighlandView {
                             Button::new("rail-settings")
                                 .icon(KitIcon::Settings)
                                 .ghost()
-                                .small()
+                                .with_size(d.button_size)
                                 .tooltip("Settings (⌘,)")
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                     this.open_settings(window, cx);
@@ -323,9 +328,9 @@ impl SqlHighlandView {
             // element-level registration double-fires the action.
             .child(
                 h_flex()
-                    .h(px(36.))
-                    .gap_1()
-                    .px_2()
+                    .h(px(d.viewer_h()))
+                    .gap(px(d.gap))
+                    .px(px(d.pane_pad))
                     .items_center()
                     .border_b_1()
                     .border_color(cx.theme().border)
@@ -333,7 +338,8 @@ impl SqlHighlandView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_sm()
+                            .when(d.is_compact, |e| e.text_xs())
+                            .when(!d.is_compact, |e| e.text_sm())
                             .truncate()
                             .child(format!("Connections ({})", self.connections.len())),
                     )
@@ -341,15 +347,15 @@ impl SqlHighlandView {
                         Button::new("collapse")
                             .icon(KitIcon::PanelLeftClose)
                             .ghost()
-                            .small()
+                            .with_size(d.button_size)
                             .on_click(cx.listener(Self::toggle_sidebar)),
                     ),
             )
             .child(
                 div()
                     .w_full()
-                    .h(px(36.))
-                    .px_1()
+                    .h(px(d.viewer_h()))
+                    .px(px((d.pane_pad / 2.0).max(2.0)))
                     .flex()
                     .items_center()
                     .child(
@@ -358,9 +364,9 @@ impl SqlHighlandView {
                             .w_full()
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .px_2()
-                            .py_1()
+                            .gap(px(d.gap))
+                            .px(px(d.pane_pad))
+                            .py(px(d.row_py))
                             .rounded_md()
                             .cursor_pointer()
                             .text_color(cx.theme().muted_foreground)
@@ -369,7 +375,12 @@ impl SqlHighlandView {
                                 this.start_add(window, cx);
                             }))
                             .child(KitIcon::Plus)
-                            .child(div().text_sm().child("Add New Connection")),
+                            .child(
+                                div()
+                                    .when(d.is_compact, |e| e.text_xs())
+                                    .when(!d.is_compact, |e| e.text_sm())
+                                    .child("Add New Connection"),
+                            ),
                     ),
             )
             .child(
@@ -378,7 +389,7 @@ impl SqlHighlandView {
                     .w_full()
                     .min_w_0()
                     .overflow_y_scrollbar()
-                    .p_1()
+                    .p(px(d.row_py))
                     .child(if self.connections.is_empty() {
                         div()
                             .w_full()
@@ -403,8 +414,8 @@ impl SqlHighlandView {
                     .w_full()
                     .flex()
                     .items_center()
-                    .px_1()
-                    .py_1()
+                    .px(px((d.pane_pad / 2.0).max(2.0)))
+                    .py(px(d.row_py))
                     .border_t_1()
                     .border_color(cx.theme().border)
                     .cursor_pointer()
@@ -415,7 +426,7 @@ impl SqlHighlandView {
                         Button::new("settings-labeled")
                             .icon(KitIcon::Settings)
                             .ghost()
-                            .small()
+                            .with_size(d.button_size)
                             .w_full()
                             .justify_start()
                             .label("Settings")

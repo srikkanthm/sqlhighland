@@ -18,7 +18,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use gpui_kit_assets::IconName as KitIcon;
 
-use crate::app::{app_view, SettingsControls, SqlHighlandView};
+use crate::app::{app_view, Density, SettingsControls, SqlHighlandView};
 use crate::config::{CompleteMode, Preferences};
 
 /// Index of the "About" page within the `Settings::pages` list built in
@@ -124,6 +124,7 @@ impl SqlHighlandView {
             metadata_ttl_input: self.metadata_ttl_input.clone(),
             theme_select: self.theme_select.clone(),
             font_select: self.font_select.clone(),
+            density_select: self.density_select.clone(),
             grid_row_height: self.grid_row_height,
         }
     }
@@ -205,6 +206,12 @@ impl SqlHighlandView {
         font_select.update(cx, |state, cx| {
             state.set_selected_value(&SharedString::from(font.clone()), window, cx);
         });
+        // Seed the interface-density dropdown.
+        let density_select = controls.density_select;
+        let density_label = Preferences::load().ui_density.label();
+        density_select.update(cx, |state, cx| {
+            state.set_selected_value(&SharedString::from(density_label), window, cx);
+        });
         // A targeted open (About) uses a unique id so the kit builds fresh
         // state on the requested page; a normal open keeps the persistent id
         // (and its remembered page/search).
@@ -224,9 +231,13 @@ impl SqlHighlandView {
             let metadata_ttl_input = metadata_ttl_input.clone();
             let theme_select = theme_select.clone();
             let font_select = font_select.clone();
+            let density_select = density_select.clone();
             // Reloaded on every rebuild so switches follow live prefs.
             let current_mode = Preferences::load().completion;
             let show_system = Preferences::load().show_system_schemas;
+            let dialog_density = Density::for_level(Preferences::load().ui_density);
+            let pad = px(dialog_density.dialog_pad);
+            let gap = px(dialog_density.gap);
             let complete_view = view.clone();
             let system_view = view.clone();
             let system_selected = show_system;
@@ -252,7 +263,7 @@ impl SqlHighlandView {
                                             div()
                                                 .id("settings-theme-select")
                                                 .w_full()
-                                                .p_2()
+                                                .p(pad)
                                                 .rounded_md()
                                                 .child(
                                                     v_flex()
@@ -280,6 +291,42 @@ impl SqlHighlandView {
                                         "color",
                                         "dark",
                                         "light",
+                                    ]),
+                                    SettingItem::render(move |_, _, _| {
+                                        let select = density_select.clone();
+                                        v_flex().gap_1().child(
+                                            div()
+                                                .id("settings-density-select")
+                                                .w_full()
+                                                .p(pad)
+                                                .rounded_md()
+                                                .child(
+                                                    v_flex()
+                                                        .gap_1()
+                                                        .child(
+                                                            div()
+                                                                .text_sm()
+                                                                .child("Interface density"),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(muted)
+                                                                .child(
+                                                                    "Compact tightens tabs, toolbars, and rows",
+                                                                ),
+                                                        )
+                                                        .child(Select::new(&select).w_full()),
+                                                ),
+                                        )
+                                    })
+                                    .keywords([
+                                        "density",
+                                        "compact",
+                                        "comfortable",
+                                        "interface",
+                                        "spacing",
+                                        "appearance",
                                     ])],
                                 )]),
                             SettingPage::new("Editor")
@@ -292,11 +339,11 @@ impl SqlHighlandView {
                                             div()
                                                 .id("settings-complete-toggle")
                                                 .w_full()
-                                                .p_2()
+                                                .p(pad)
                                                 .rounded_md()
                                                 .child(
                                                     h_flex()
-                                                        .gap_2()
+                                                        .gap(gap)
                                                         .items_center()
                                                         .child(
                                                             v_flex().flex_1()
@@ -371,11 +418,11 @@ impl SqlHighlandView {
                                                 div()
                                                     .id("settings-system-schemas")
                                                     .w_full()
-                                                    .p_2()
+                                                    .p(pad)
                                                     .rounded_md()
                                                     .child(
                                                         h_flex()
-                                                            .gap_2()
+                                                            .gap(gap)
                                                             .items_center()
                                                             .child(
         v_flex()
@@ -453,7 +500,7 @@ impl SqlHighlandView {
                                                 div()
                                                     .id("settings-metadata-ttl")
                                                     .w_full()
-                                                    .p_2()
+                                                    .p(pad)
                                                     .rounded_md()
                                                     .child(
                                                         v_flex()
@@ -491,7 +538,7 @@ impl SqlHighlandView {
                                                 div()
                                                     .id("settings-font-family")
                                                     .w_full()
-                                                    .p_2()
+                                                    .p(pad)
                                                     .rounded_md()
                                                     .child(
                                                         v_flex()
@@ -525,11 +572,11 @@ impl SqlHighlandView {
                                             div()
                                                 .id("settings-font-size")
                                                 .w_full()
-                                                .p_2()
+                                                .p(pad)
                                                 .rounded_md()
                                                 .child(
                                                     h_flex()
-                                                        .gap_2()
+                                                        .gap(gap)
                                                         .items_center()
                                                         .child(
                                                             v_flex().flex_1()
@@ -611,11 +658,11 @@ impl SqlHighlandView {
                                                 div()
                                                     .id("settings-hover-details")
                                                     .w_full()
-                                                    .p_2()
+                                                    .p(pad)
                                                     .rounded_md()
                                                     .child(
                                                         h_flex()
-                                                            .gap_2()
+                                                            .gap(gap)
                                                             .items_center()
                                                             .child(
                                                                 v_flex().flex_1()
@@ -663,7 +710,7 @@ impl SqlHighlandView {
                                                 div()
                                                     .id("settings-result-cap")
                                                     .w_full()
-                                                    .p_2()
+                                                    .p(pad)
                                                     .rounded_md()
                                                     .child(
                                                         v_flex()
@@ -701,14 +748,14 @@ impl SqlHighlandView {
                                                 div()
                                                     .id("settings-grid-density")
                                                     .w_full()
-                                                    .p_2()
+                                                    .p(pad)
                                                     .rounded_md()
                                                     .child(
                                                         v_flex()
-                                                            .gap_2()
+                                                            .gap(gap)
                                                             .child(
                                                                 h_flex()
-                                                                    .gap_2()
+                                                                    .gap(gap)
                                                                     .items_center()
                                                                     .child(
                                                                         v_flex()
@@ -757,7 +804,7 @@ impl SqlHighlandView {
                                                 div()
                                                     .id("settings-query-timeout")
                                                     .w_full()
-                                                    .p_2()
+                                                    .p(pad)
                                                     .rounded_md()
                                                     .child(
                                                         v_flex()
@@ -795,12 +842,12 @@ impl SqlHighlandView {
                                                 ("|", "Pipe"),
                                             ];
                                             v_flex()
-                                                .gap_2()
+                                                .gap(gap)
                                                 .child(
                                                     div()
                                                         .id("settings-csv-delimiter")
                                                         .w_full()
-                                                        .p_2()
+                                                        .p(pad)
                                                         .rounded_md()
                                                         .child(
                                                             v_flex()
@@ -860,11 +907,11 @@ impl SqlHighlandView {
                                                 div()
                                                     .id("settings-csv-header")
                                                     .w_full()
-                                                    .p_2()
+                                                    .p(pad)
                                                     .rounded_md()
                                                     .child(
                                                         h_flex()
-                                                            .gap_2()
+                                                            .gap(gap)
                                                             .items_center()
                                                             .child(
                                                                 v_flex().flex_1()
@@ -950,7 +997,7 @@ impl SqlHighlandView {
                                     SettingItem::render(move |_, _, _| {
                                         h_flex()
                                             .w_full()
-                                            .gap_2()
+                                            .gap(gap)
                                             .text_xs()
                                             .child(
                                                 div()
@@ -981,7 +1028,7 @@ impl SqlHighlandView {
                 )
                 .footer(
                     h_flex()
-                        .gap_2()
+                        .gap(gap)
                         .child(div().flex_1())
                         .child(Button::new("settings-done").label("Done").on_click(
                             move |_, window, cx| {
