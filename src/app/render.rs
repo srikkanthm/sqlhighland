@@ -1287,7 +1287,7 @@ impl Render for SqlHighlandView {
             .child(
                 v_flex()
                     .size_full()
-                    .child(TitleBar::new().child("SQLHighland"))
+                    .child(TitleBar::new())
                     .child(div().flex_1().min_h_0().child(content)),
             )
             .children(Root::render_dialog_layer(window, cx))
