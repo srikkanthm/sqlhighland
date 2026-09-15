@@ -77,7 +77,9 @@ fn export_drain_blocking(
     cancel: &Arc<std::sync::atomic::AtomicBool>,
     csv_delim: char,
     csv_header: bool,
-    fetch_size: usize,
+    // Rows per page for the drain, from the export setting (independent of the
+    // grid's fetch size).
+    export_page: usize,
 ) -> ExportOutcome {
     use std::sync::atomic::Ordering;
     let tmp = path.with_extension("part");
@@ -97,7 +99,7 @@ fn export_drain_blocking(
             if let Err(e) = guard.connect(cfg) {
                 Err(e)
             } else {
-                guard.start_query(sql, fetch_size, binds)
+                guard.start_query(sql, export_page, binds)
             }
         };
         match started {
@@ -212,7 +214,7 @@ fn export_drain_blocking(
                 }
                 let page = {
                     let mut guard = lock(session.as_ref().expect("export session"));
-                    guard.fetch_more(query_id, fetch_size)
+                    guard.fetch_more(query_id, export_page)
                 };
                 match page {
                     Ok(p) => {
@@ -252,7 +254,7 @@ fn export_drain_blocking(
                 let data = lock(&fetch.data);
                 data.rows[start..total]
                     .iter()
-                    .take(fetch_size)
+                    .take(export_page)
                     .map(|r| r.iter().map(|c| c.as_deref().map(str::to_string)).collect())
                     .collect()
             };
@@ -467,8 +469,9 @@ impl SqlHighlandView {
         let csv_prefs = Preferences::load();
         let csv_delim = crate::export::csv_delim(&csv_prefs.csv_delimiter);
         let csv_header = csv_prefs.csv_header;
-        // Results fetch size (Settings → Results) for the drain's pages.
-        let fetch_size = self.fetch_size.max(1);
+        // Export page size (Settings → Results) for the drain — independent
+        // of the grid's fetch size.
+        let export_page = self.export_fetch_size.max(1);
         // The grid buffer is the source only when it holds every row: the
         // cursor was drained (exhausted) and the cap wasn't hit. A cursor
         // killed by another tab sets `exhausted` too, so `capped` is checked
@@ -481,8 +484,18 @@ impl SqlHighlandView {
             let outcome = bg
                 .spawn(async move {
                     export_drain_blocking(
-                        &fetch, &cfg, &sql, &binds, complete, fmt, &path, &sheet, &cancel,
-                        csv_delim, csv_header, fetch_size,
+                        &fetch,
+                        &cfg,
+                        &sql,
+                        &binds,
+                        complete,
+                        fmt,
+                        &path,
+                        &sheet,
+                        &cancel,
+                        csv_delim,
+                        csv_header,
+                        export_page,
                     )
                 })
                 .await;

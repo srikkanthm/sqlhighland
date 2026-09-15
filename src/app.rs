@@ -367,6 +367,7 @@ impl SearchableListItem for ChoiceItem {
 pub struct SettingsControls {
     pub(crate) result_cap_input: Entity<InputState>,
     pub(crate) fetch_size_input: Entity<InputState>,
+    pub(crate) export_fetch_size_input: Entity<InputState>,
     pub(crate) grid_density_slider: Entity<SliderState>,
     pub(crate) query_timeout_input: Entity<InputState>,
     pub(crate) csv_delim_input: Entity<InputState>,
@@ -657,9 +658,12 @@ pub struct SqlHighlandView {
     /// Results-grid row cap in effect (0 = unlimited). Mirrors the saved
     /// preference and is updated live from the Settings field.
     pub(crate) result_cap: usize,
-    /// Rows fetched per page (initial load, each scroll fetch, export drain).
+    /// Rows fetched per page for the grid (initial load, each scroll fetch).
     /// Mirrors the saved preference and is updated live from Settings.
     pub(crate) fetch_size: usize,
+    /// Rows fetched per page when draining an export (independent of the
+    /// grid's `fetch_size`). Mirrors the preference, updated live.
+    pub(crate) export_fetch_size: usize,
     /// Results-grid row height in points (compactness). Mirrors the saved
     /// preference and is updated live from the Settings slider.
     pub(crate) grid_row_height: u32,
@@ -680,6 +684,8 @@ pub struct SqlHighlandView {
     pub(crate) result_cap_input: Entity<InputState>,
     /// Free-form results fetch size field (Settings → Results).
     pub(crate) fetch_size_input: Entity<InputState>,
+    /// Free-form export fetch size field (Settings → Results).
+    pub(crate) export_fetch_size_input: Entity<InputState>,
     /// Window-lifetime subscriptions (OS appearance observer for System
     /// theme mode). Kept alive by ownership, like per-tab `_subs`.
     pub(crate) _subs: Vec<Subscription>,
@@ -810,6 +816,14 @@ impl SqlHighlandView {
             InputState::new(window, cx)
                 .placeholder("50")
                 .default_value(fetch_size_value.to_string())
+        });
+        // Settings → Results export fetch size (rows per page when exporting).
+        let export_fetch_size_value =
+            crate::config::clamp_export_fetch_size(Preferences::load().export_fetch_size);
+        let export_fetch_size_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("1000")
+                .default_value(export_fetch_size_value.to_string())
         });
         let grid_density_slider = cx.new(|_| {
             SliderState::new()
@@ -995,6 +1009,7 @@ impl SqlHighlandView {
             hover_details: prefs.hover_details,
             result_cap: prefs.result_cap,
             fetch_size: crate::config::clamp_fetch_size(prefs.fetch_size),
+            export_fetch_size: crate::config::clamp_export_fetch_size(prefs.export_fetch_size),
             grid_row_height,
             grid_density_slider,
             query_timeout_input,
@@ -1004,6 +1019,7 @@ impl SqlHighlandView {
             density_select,
             result_cap_input,
             fetch_size_input,
+            export_fetch_size_input,
             _subs: Vec::new(),
         };
         // Follow the OS appearance while the theme mode is System. The
@@ -1079,6 +1095,38 @@ impl SqlHighlandView {
                     let mut prefs = Preferences::load();
                     if prefs.fetch_size != size {
                         prefs.fetch_size = size;
+                        let _ = prefs.save();
+                    }
+                }
+            });
+            this._subs.push(sub);
+        }
+        // Persist the free-form export fetch size as it is edited.
+        {
+            let input = this.export_fetch_size_input.clone();
+            let input_sub = input.clone();
+            let sub = cx.subscribe_in(&input, window, move |this, _, ev: &InputEvent, _, cx| {
+                if !matches!(
+                    ev,
+                    InputEvent::Change | InputEvent::Blur | InputEvent::PressEnter { .. }
+                ) {
+                    return;
+                }
+                let text = input_sub.read(cx).value().to_string();
+                let trimmed = text.trim();
+                let parsed = if trimmed.is_empty() {
+                    Some(0usize)
+                } else if trimmed.bytes().all(|b| b.is_ascii_digit()) {
+                    trimmed.parse::<usize>().ok()
+                } else {
+                    None
+                };
+                if let Some(n) = parsed {
+                    let size = crate::config::clamp_export_fetch_size(n);
+                    this.export_fetch_size = size;
+                    let mut prefs = Preferences::load();
+                    if prefs.export_fetch_size != size {
+                        prefs.export_fetch_size = size;
                         let _ = prefs.save();
                     }
                 }

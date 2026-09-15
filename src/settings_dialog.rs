@@ -119,6 +119,7 @@ impl SqlHighlandView {
         SettingsControls {
             result_cap_input: self.result_cap_input.clone(),
             fetch_size_input: self.fetch_size_input.clone(),
+            export_fetch_size_input: self.export_fetch_size_input.clone(),
             grid_density_slider: self.grid_density_slider.clone(),
             query_timeout_input: self.query_timeout_input.clone(),
             csv_delim_input: self.csv_delim_input.clone(),
@@ -168,6 +169,13 @@ impl SqlHighlandView {
         let fetch_size = crate::config::clamp_fetch_size(Preferences::load().fetch_size);
         fetch_input.update(cx, |state, cx| {
             state.set_value(fetch_size.to_string(), window, cx);
+        });
+        // Seed the export fetch-size field.
+        let export_fetch_input = controls.export_fetch_size_input;
+        let export_fetch_size =
+            crate::config::clamp_export_fetch_size(Preferences::load().export_fetch_size);
+        export_fetch_input.update(cx, |state, cx| {
+            state.set_value(export_fetch_size.to_string(), window, cx);
         });
         // Seed the query-timeout and delimiter fields.
         let timeout_input = controls.query_timeout_input;
@@ -233,6 +241,7 @@ impl SqlHighlandView {
             let muted = cx.theme().muted_foreground;
             let cap_input = cap_input.clone();
             let fetch_input = fetch_input.clone();
+            let export_fetch_input = export_fetch_input.clone();
             let density_slider = density_slider.clone();
             let timeout_input = timeout_input.clone();
             let delim_input = delim_input.clone();
@@ -783,6 +792,42 @@ impl SqlHighlandView {
                                         .keywords([
                                             "results", "fetch", "size", "page", "rows",
                                             "chunk", "paging",
+                                        ]),
+                                        SettingItem::render(move |_, _, _| {
+                                            let input = export_fetch_input.clone();
+                                            v_flex().gap_1().child(
+                                                div()
+                                                    .id("settings-export-fetch-size")
+                                                    .w_full()
+                                                    .p(pad)
+                                                    .rounded_md()
+                                                    .child(
+                                                        v_flex()
+                                                            .gap_1()
+                                                            .child(
+                                                                div()
+                                                                    .text_sm()
+                                                                    .child("Export fetch size"),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(muted)
+                                                                    .child(
+                                                                        "Rows loaded per page when exporting (larger = fewer round trips). Default 1000",
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                Input::new(&input)
+                                                                    .w_full()
+                                                                    .with_size(control),
+                                                            ),
+                                                    ),
+                                            )
+                                        })
+                                        .keywords([
+                                            "results", "export", "fetch", "size", "page",
+                                            "rows", "csv", "excel",
                                         ]),
                                     ]),
                                     SettingGroup::new().title("Grid").items(vec![

@@ -288,10 +288,15 @@ pub struct Preferences {
     /// means unlimited (page until the cursor is exhausted).
     #[serde(default = "default_result_cap")]
     pub result_cap: usize,
-    /// Rows fetched per page: the initial load and each scroll fetch, and
-    /// the export drain. Clamped to [`FETCH_SIZE_MIN`]..=[`FETCH_SIZE_MAX`].
+    /// Rows fetched per page for the grid: the initial load and each scroll
+    /// fetch. Clamped to [`FETCH_SIZE_MIN`]..=[`FETCH_SIZE_MAX`].
     #[serde(default = "default_fetch_size")]
     pub fetch_size: usize,
+    /// Rows fetched per page when draining an export. Independent of the
+    /// grid's [`fetch_size`](Self::fetch_size): a large page keeps a big
+    /// export to few round trips. Clamped like the grid size.
+    #[serde(default = "default_export_fetch_size")]
+    pub export_fetch_size: usize,
     /// Results-grid row height in points (compactness). Clamped to
     /// [`GRID_ROW_HEIGHT_MIN`]..=[`GRID_ROW_HEIGHT_MAX`] on load/use.
     #[serde(default = "default_grid_row_height")]
@@ -338,6 +343,7 @@ impl Default for Preferences {
             hover_details: false,
             result_cap: default_result_cap(),
             fetch_size: default_fetch_size(),
+            export_fetch_size: default_export_fetch_size(),
             grid_row_height: default_grid_row_height(),
             csv_delimiter: default_csv_delimiter(),
             csv_header: default_true(),
@@ -365,10 +371,23 @@ fn default_fetch_size() -> usize {
     50
 }
 
+fn default_export_fetch_size() -> usize {
+    1000
+}
+
 /// Clamp a fetch size into the supported range (blank/0 → default).
 pub fn clamp_fetch_size(n: usize) -> usize {
     if n == 0 {
         default_fetch_size()
+    } else {
+        n.clamp(FETCH_SIZE_MIN, FETCH_SIZE_MAX)
+    }
+}
+
+/// Clamp an export fetch size into the supported range (blank/0 → default).
+pub fn clamp_export_fetch_size(n: usize) -> usize {
+    if n == 0 {
+        default_export_fetch_size()
     } else {
         n.clamp(FETCH_SIZE_MIN, FETCH_SIZE_MAX)
     }
@@ -636,7 +655,9 @@ mod tests {
         let p = Preferences::default();
         assert_eq!(p.result_cap, 100_000);
         assert_eq!(p.fetch_size, 50);
+        assert_eq!(p.export_fetch_size, 1000);
         assert_eq!(clamp_fetch_size(0), 50);
+        assert_eq!(clamp_export_fetch_size(0), 1000);
         assert_eq!(p.csv_delimiter, ",");
         assert!(p.csv_header);
         assert_eq!(p.font_family, "");
