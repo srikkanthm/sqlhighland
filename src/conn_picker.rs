@@ -14,7 +14,8 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::app::{env_tag, SqlHighlandView};
+use crate::app::{env_tag, Density, SqlHighlandView};
+use crate::config::Preferences;
 use crate::model::Environment;
 
 /// A run deferred for connection choice: the statement waits while the user
@@ -235,6 +236,8 @@ impl SqlHighlandView {
                 window.focus(&search.read(cx).focus_handle(cx), cx);
             }
             let muted = cx.theme().muted_foreground;
+            // Interface density: match the dialogs' compact sizing.
+            let d = Density::for_level(Preferences::load().ui_density);
             // Highlighted-match wash (same selected language as the
             // dialog pills): the row Enter will take, live with hover
             // and the filter.
@@ -257,9 +260,9 @@ impl SqlHighlandView {
                     .collect()
             };
             let mut body = v_flex()
-                .gap_1()
+                .gap(px(d.gap))
                 .w_full()
-                .child(Input::new(&search).w_full());
+                .child(Input::new(&search).w_full().with_size(d.control_size));
             if rows.is_empty() {
                 body = body.child(div().text_sm().text_color(muted).child(match pick_mode {
                     PickAfter::Run => "No connections yet — add one to run this statement.",
@@ -306,12 +309,11 @@ impl SqlHighlandView {
                 .track_scroll(&scroll_handle)
                 .flex()
                 .flex_col()
-                .gap_1()
-                // Gutter for the overlaid scrollbar track (see dialog).
-                // NOTE: this used to live inside each row so the
-                // first-match wash spanned full width, but per-row
-                // restyle made hover laggy — container-level stays.
-                .pr_5();
+                .gap(px(d.gap));
+            // No right gutter here: it would shrink the rows, so the hover /
+            // first-match wash stopped short of the dialog's right edge. The
+            // scrollbar overlay sits on the wrap (full width); the inset that
+            // keeps text clear of it lives on each row's content instead.
             for (rix, r) in shown.iter().enumerate() {
                 let pick_view = view.clone();
                 let pick_tab = tab_id.clone();
@@ -321,18 +323,26 @@ impl SqlHighlandView {
                 let hover_active = active.clone();
                 let conn_id = r.id.clone();
                 let mut line = h_flex()
-                    .gap_2()
+                    .gap(px(d.gap))
                     .items_center()
                     .w_full()
-                    .px_2()
-                    .py_1()
+                    .px(px(d.pane_pad))
+                    // Keep row text/labels clear of the overlaid scrollbar
+                    // while the row background still spans the full width.
+                    .pr_5()
+                    .py(px(d.row_py))
                     .rounded_md()
                     .cursor_pointer()
                     .hover(|this| this.bg(muted.opacity(0.15)));
                 line = line.child(
                     v_flex()
                         .flex_1()
-                        .child(div().text_sm().child(r.name.clone()))
+                        .child(
+                            div()
+                                .when(d.is_compact, |e| e.text_xs())
+                                .when(!d.is_compact, |e| e.text_sm())
+                                .child(r.name.clone()),
+                        )
                         .child(div().text_xs().text_color(muted).child(r.detail.clone())),
                 );
                 if let Some(tag) = env_tag(r.env, 0.0, cx) {
@@ -392,13 +402,14 @@ impl SqlHighlandView {
             let esc_view = view.clone();
             let esc_tab = tab_id.clone();
             let mut footer = h_flex()
-                .gap_2()
+                .gap(px(d.gap))
                 .child(div().flex_1())
                 // Footer buttons sit after the search field in Tab order.
                 // The dialog X is hidden (Esc cancels).
                 .child(
                     Button::new("pick-cancel")
                         .label("Cancel")
+                        .with_size(d.control_size)
                         .tab_index(100)
                         .on_click(move |_, window, cx: &mut App| {
                             cancel_view
@@ -417,6 +428,7 @@ impl SqlHighlandView {
                     Button::new("pick-add")
                         .primary()
                         .label("Add connection…")
+                        .with_size(d.control_size)
                         .tab_index(101)
                         .on_click(move |_, window, cx: &mut App| {
                             window.close_dialog(cx);
