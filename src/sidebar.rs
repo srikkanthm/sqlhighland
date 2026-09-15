@@ -74,17 +74,23 @@ impl SqlHighlandView {
                     })),
             )
             .child(
-                Button::new(("conn-icon", ix))
-                    .icon(KitIcon::Database)
-                    .ghost()
-                    .with_size(px(d.icon_button))
+                // Plain icon, not a Button: it's an indicator only. A Button
+                // would take focus and paint a hover surface, making a
+                // non-action look interactive.
+                div()
+                    .flex_none()
+                    .size(px(d.icon_button))
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     // Live state reads from the icon + the 3px
                     // status bar, not a full-row wash.
                     .text_color(if is_live {
                         cx.theme().success
                     } else {
                         cx.theme().muted_foreground
-                    }),
+                    })
+                    .child(KitIcon::Database),
             )
             .child(
                 v_flex()

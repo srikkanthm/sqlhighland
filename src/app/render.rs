@@ -5,6 +5,8 @@
 //! Split out of `app.rs`; the inherent impl is re-opened here so the
 //! view's behavior is unchanged (`impl` blocks may live in any module).
 
+use std::rc::Rc;
+
 use super::*;
 
 impl SqlHighlandView {
@@ -197,7 +199,19 @@ impl SqlHighlandView {
         let d = self.density();
         TabBar::new("query-tabs")
             .w_full()
+            // Underline tabs have no inner padding, so without this the first
+            // tab (and its active underline) sits flush under the centered
+            // split handle/grip. Match the editor's own inset so the first
+            // tab lines up with the pane content.
+            .pl(px(d.pane_pad))
             .with_size(d.tab_size)
+            // Underline gives the active tab a primary-color bar; the default
+            // filled variant resolves to `tab_active` (== background), which is
+            // near-indistinguishable from the bar itself in most themes. Keep
+            // the strip's usual `tab_bar` fill (Underline defaults to
+            // transparent) so only the active-tab indicator changes.
+            .with_variant(TabVariant::Underline)
+            .bg(cx.theme().tab_bar)
             .selected_index(self.active)
             .track_scroll(&self.tab_scroll)
             .on_click(cx.listener(|this, ix: &usize, window, cx| {
@@ -999,6 +1013,7 @@ impl SqlHighlandView {
                             // mouse drags share it, so neither fights the other.
                             // The panel's `.size()` below is initial-only.
                             .with_state(&self.editor_split)
+                            .with_handle_appearance(resize_grip())
                             .child(
                                 resizable_panel()
                                     .size(px(editor_h))
@@ -1123,6 +1138,39 @@ pub(crate) fn env_tag(env: Environment, width: f32, cx: &App) -> Option<AnyEleme
     )
 }
 
+/// Painted grip for a resize divider: a transparent ~6px strip centered on
+/// the boundary carrying a small pill that brightens on hover and while
+/// dragging. The kit's built-in handle only paints a 1px hairline; this keeps
+/// the same hit area (the kit still owns the drag) and changes only the paint.
+fn resize_grip() -> gpui_kit::base::ResizeHandleRenderer {
+    Rc::new(|ctx, _window, cx| {
+        // Horizontal axis == a vertical divider between side-by-side panels.
+        let vertical_divider = ctx.axis().is_horizontal();
+        let weak = cx.theme().border;
+        let strong = cx.theme().ring;
+        let wash = cx.theme().accent.opacity(0.15);
+
+        let mut strip = div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .group_hover("handle", move |this| this.bg(wash));
+        let mut grip = div()
+            .rounded_full()
+            .bg(if ctx.is_active() { strong } else { weak })
+            .group_hover("handle", move |this| this.bg(strong));
+        if vertical_divider {
+            strip = strip.relative().left(px(-3.)).w(px(6.)).h_full();
+            grip = grip.w(px(2.)).h(px(24.));
+        } else {
+            strip = strip.relative().top(px(-3.)).h(px(6.)).w_full();
+            grip = grip.h(px(2.)).w(px(24.));
+        }
+        Some(strip.child(grip).into_any_element())
+    })
+}
+
 impl Render for SqlHighlandView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = if self.sidebar_collapsed {
@@ -1134,6 +1182,7 @@ impl Render for SqlHighlandView {
         } else {
             h_resizable("main-split")
                 .with_state(&self.main_split)
+                .with_handle_appearance(resize_grip())
                 // Record only real drags (this callback fires on mouse-up, not
                 // for our programmatic re-pins), so the remembered width is
                 // the user's choice.

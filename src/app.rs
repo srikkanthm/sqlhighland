@@ -49,7 +49,7 @@ use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::select::{SelectEvent, SelectState};
 use gpui_kit::component::slider::{SliderEvent, SliderState, SliderValue};
-use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::tab::{Tab, TabBar, TabVariant};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::tree::{tree, TreeState};
 use gpui_kit::component::Size;
