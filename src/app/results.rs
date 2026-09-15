@@ -157,8 +157,17 @@ impl TableDelegate for ResultsDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let name = self.column(col_ix, cx).name;
+        // `h_full + items_center`: the kit's header wrapper centers a
+        // content-sized child, but a full-height one defeats it and the
+        // label sticks to the top (visible once the grid density grows the
+        // rows). The row-number column's header hugs the same edge as its
+        // right-aligned body cells.
         div()
-            .size_full()
+            .w_full()
+            .h_full()
+            .flex()
+            .items_center()
+            .when(col_ix == 0, |this| this.justify_end())
             .child(SelectableText::new(format!("col-th-{col_ix}"), name))
     }
 
@@ -171,10 +180,14 @@ impl TableDelegate for ResultsDelegate {
     ) -> impl IntoElement {
         // Grid column 0 renders the 1-based row number, muted and
         // right-aligned like SQL Developer; data columns shift by one.
+        // Every branch fills the (possibly tall) row and centers vertically.
         if col_ix == 0 {
             return div()
                 .w_full()
-                .text_right()
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_end()
                 .text_color(cx.theme().muted_foreground)
                 .child(format!("{}", row_ix + 1))
                 .into_any_element();
@@ -192,8 +205,17 @@ impl TableDelegate for ResultsDelegate {
         match cell {
             // Single-line ellipsis: wrapping text forces tall rows and
             // expensive multi-line layout per cell.
-            Some(text) => div().truncate().child(text).into_any_element(),
+            Some(text) => div()
+                .h_full()
+                .flex()
+                .items_center()
+                .truncate()
+                .child(text)
+                .into_any_element(),
             None => div()
+                .h_full()
+                .flex()
+                .items_center()
                 .text_color(cx.theme().muted_foreground)
                 .child("NULL")
                 .into_any_element(),
