@@ -150,6 +150,7 @@ impl SqlHighlandView {
             has_result: false,
             output: None,
             busy: false,
+            run_kind: None,
             run_token: 0,
             run_started: None,
             pending_txn: false,

@@ -238,6 +238,7 @@ impl SqlHighlandView {
             let dialog_density = Density::for_level(Preferences::load().ui_density);
             let pad = px(dialog_density.dialog_pad);
             let gap = px(dialog_density.gap);
+            let control = dialog_density.control_size;
             let complete_view = view.clone();
             let system_view = view.clone();
             let system_selected = show_system;
@@ -316,7 +317,7 @@ impl SqlHighlandView {
                                                                     "Compact tightens tabs, toolbars, and rows",
                                                                 ),
                                                         )
-                                                        .child(Select::new(&select).w_full()),
+                                                        .child(Select::new(&select).w_full().with_size(control)),
                                                 ),
                                         )
                                     })
@@ -518,7 +519,7 @@ impl SqlHighlandView {
                                                                         "Blank or 0 = never (refreshes on reconnect or via the connection menu)",
                                                                     ),
                                                             )
-                                                            .child(Input::new(&input).w_full()),
+                                                            .child(Input::new(&input).w_full().with_size(control)),
                                                     ),
                                             )
                                         })
@@ -822,7 +823,7 @@ impl SqlHighlandView {
                                                                         "Blank or 0 = unlimited",
                                                                     ),
                                                             )
-                                                            .child(Input::new(&input).w_full()),
+                                                            .child(Input::new(&input).w_full().with_size(control)),
                                                     ),
                                             )
                                         })
@@ -866,7 +867,7 @@ impl SqlHighlandView {
                                                                         ),
                                                                 )
                                                                 .child(
-                                                                    Input::new(&input).w_full(),
+                                                                    Input::new(&input).w_full().with_size(control),
                                                                 ),
                                                         ),
                                                 )
@@ -1030,11 +1031,14 @@ impl SqlHighlandView {
                     h_flex()
                         .gap(gap)
                         .child(div().flex_1())
-                        .child(Button::new("settings-done").label("Done").on_click(
-                            move |_, window, cx| {
-                                window.close_dialog(cx);
-                            },
-                        )),
+                        .child(
+                            Button::new("settings-done")
+                                .label("Done")
+                                .with_size(control)
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                }),
+                        ),
                 )
         });
     }

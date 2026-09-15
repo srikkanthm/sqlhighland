@@ -289,7 +289,11 @@ impl SqlHighlandView {
             "Loading suggestions…".into()
         };
         cx.notify();
-        let session = self.pool.get_or_create(conn_id, cfg.engine);
+        // Fetch on a throwaway session (connect → fetch → disconnect): the
+        // dictionary must never contend for the run's pooled session lock, or
+        // a query would wait for suggestions to load. The cache itself lives
+        // on in `browser.meta` independently of this session.
+        let session = crate::session::throwaway_session(cfg.engine);
         // Engine-specific dictionary fetcher (&'static, Send+Sync).
         let provider = crate::metadata::provider_for(cfg.engine);
         let bg = cx.background_executor().clone();
@@ -314,18 +318,17 @@ impl SqlHighlandView {
             let outcome = bg
                 .spawn(async move {
                     let mut s = lock(&session);
-                    if !s.is_connected() {
-                        if let Err(e) = s.connect(&cfg).map_err(|e| e.to_string()) {
-                            let e = e.to_string();
-                            return Parts {
-                                tables: Err(e.clone()),
-                                columns: Err(e.clone()),
-                                sequences: Err(e.clone()),
-                                fks: Err(e),
-                            };
-                        }
+                    if let Err(e) = s.connect(&cfg).map_err(|e| e.to_string()) {
+                        let e = e.to_string();
+                        s.disconnect();
+                        return Parts {
+                            tables: Err(e.clone()),
+                            columns: Err(e.clone()),
+                            sequences: Err(e.clone()),
+                            fks: Err(e),
+                        };
                     }
-                    Parts {
+                    let parts = Parts {
                         tables: provider
                             .fetch_tables(&mut **s, include_system, &own_schema)
                             .map_err(|e| e.to_string()),
@@ -338,7 +341,11 @@ impl SqlHighlandView {
                         fks: provider
                             .fetch_fks(&mut **s, include_system, &own_schema)
                             .map_err(|e| e.to_string()),
-                    }
+                    };
+                    // Data is owned; drop the server session now rather than
+                    // leaving a second connection open per database.
+                    s.disconnect();
+                    parts
                 })
                 .await;
             view.update(cx, |this, cx| {

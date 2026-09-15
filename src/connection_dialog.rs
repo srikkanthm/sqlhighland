@@ -435,7 +435,7 @@ impl SqlHighlandView {
                                                         .text_color(muted)
                                                         .child("Environment"),
                                                 )
-                                                .child(h_flex().gap_1().children(
+                                                .child(h_flex().gap(px(d.gap)).children(
                                                     Environment::ALL.iter().enumerate().map(
                                                         |(ix, env)| {
                                                             let selected = current_env == *env;
@@ -511,6 +511,7 @@ impl SqlHighlandView {
                             let test_view = view.clone();
                             Button::new("dlg-test")
                                 .label("Test connection")
+                                .with_size(d.control_size)
                                 .loading(testing)
                                 .disabled(testing)
                                 .on_click(move |_, _window, cx: &mut App| {
@@ -552,18 +553,23 @@ impl SqlHighlandView {
                         .child(
                             Button::new("dlg-cancel")
                                 .label("Cancel")
+                                .with_size(d.control_size)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
-                        .child(Button::new("dlg-save").primary().label("Save").on_click(
-                            move |_, window, cx: &mut App| {
-                                save_view
-                                    .update(cx, |this, cx| {
-                                        this.save_from_dialog(window, cx);
-                                    })
-                                    .ok();
-                                window.close_dialog(cx);
-                            },
-                        )),
+                        .child(
+                            Button::new("dlg-save")
+                                .primary()
+                                .label("Save")
+                                .with_size(d.control_size)
+                                .on_click(move |_, window, cx: &mut App| {
+                                    save_view
+                                        .update(cx, |this, cx| {
+                                            this.save_from_dialog(window, cx);
+                                        })
+                                        .ok();
+                                    window.close_dialog(cx);
+                                }),
+                        ),
                 )
         });
     }
@@ -701,7 +707,8 @@ pub(crate) fn dialog_field(
     muted: Hsla,
 ) -> impl IntoElement {
     let label: SharedString = label.into();
-    let mut input = Input::new(state).w_full();
+    let d = Density::for_level(Preferences::load().ui_density);
+    let mut input = Input::new(state).w_full().with_size(d.control_size);
     if password {
         input = input.content_type(InputContentType::Password);
     }

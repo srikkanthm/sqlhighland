@@ -9,7 +9,7 @@ use std::time::Duration;
 use gpui::{Context, Window};
 
 use crate::app::{
-    describe_fetch, to_shared, ExportFormat, FetchState, Output, ResultData, ScriptResume,
+    describe_fetch, to_shared, ExportFormat, FetchState, Output, ResultData, RunKind, ScriptResume,
     SqlHighlandView,
 };
 use crate::bind_dialog::PendingBind;

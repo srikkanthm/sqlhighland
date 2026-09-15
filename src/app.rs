@@ -20,8 +20,8 @@ use crate::complete::{
     qualifier_before, word_at,
 };
 use crate::config::{
-    CompleteMode, FONT_FAMILIES, GRID_ROW_HEIGHT_MAX, GRID_ROW_HEIGHT_MIN, Preferences,
-    SavedConfig, SavedTab, THEME_LIST, TabsManifest, UiDensity,
+    CompleteMode, Preferences, SavedConfig, SavedTab, TabsManifest, UiDensity, FONT_FAMILIES,
+    GRID_ROW_HEIGHT_MAX, GRID_ROW_HEIGHT_MIN, THEME_LIST,
 };
 use crate::conn_picker::{PendingPick, PickAfter};
 use crate::db::SharedSession;
@@ -195,6 +195,16 @@ impl Output {
     }
 }
 
+/// Which run currently owns a tab's `busy` flag, so the Run and Script
+/// buttons can each show their own spinner.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunKind {
+    /// A single statement at the cursor (`run_sql`).
+    Statement,
+    /// A buffer/`@` script run (`run_script`).
+    Script,
+}
+
 /// One query tab: editor + grid + run state + connection binding.
 pub(crate) struct QueryTab {
     pub(crate) id: String,
@@ -215,6 +225,8 @@ pub(crate) struct QueryTab {
     /// the grid (or placeholder) without re-running.
     pub(crate) output: Option<Output>,
     pub(crate) busy: bool,
+    /// Which run owns `busy` (None when idle). Drives the per-button spinners.
+    pub(crate) run_kind: Option<RunKind>,
     /// Generation of the tab's latest run. Bumped on every Run and on Cancel;
     /// late completions whose token mismatches are discarded. This is what
     /// makes Cancel work without driver break support (beta.3 has none):
@@ -401,6 +413,8 @@ pub(crate) struct Density {
     pub(crate) tab_size: Size,
     /// Action/connection button size.
     pub(crate) button_size: Size,
+    /// Form control size (dialog inputs, selects, switches, footer buttons).
+    pub(crate) control_size: Size,
     /// Fixed width for labelled action buttons.
     pub(crate) action_button_w: f32,
     /// Gap between inline controls.
@@ -428,12 +442,13 @@ impl Density {
                 is_compact: true,
                 tab_size: Size::Small,
                 button_size: Size::XSmall,
+                control_size: Size::Small,
                 action_button_w: 80.0,
                 gap: 4.0,
                 row_py: 2.0,
                 icon_button: 20.0,
                 dot: 6.0,
-                status_h: 22.0,
+                status_h: 26.0,
                 pane_pad: 4.0,
                 badge_w: 0.0,
                 dialog_pad: 6.0,
@@ -442,12 +457,13 @@ impl Density {
                 is_compact: false,
                 tab_size: Size::Medium,
                 button_size: Size::Small,
+                control_size: Size::Medium,
                 action_button_w: 104.0,
                 gap: 8.0,
                 row_py: 4.0,
                 icon_button: 24.0,
                 dot: 8.0,
-                status_h: 28.0,
+                status_h: 32.0,
                 pane_pad: 8.0,
                 badge_w: 48.0,
                 dialog_pad: 8.0,
@@ -582,6 +598,17 @@ pub struct SqlHighlandView {
     /// mouse drags — `ResizablePanel::size()` is initial-only, which is
     /// why an `editor_h` field never moved the panel.
     pub(crate) editor_split: Entity<ResizableState>,
+    /// Owned splitter state for the sidebar | main split. Owned (not the
+    /// kit's keyed state) so the fixed sidebar can be re-pinned to its
+    /// remembered width when the window resizes: the kit otherwise rescales
+    /// a fixed panel proportionally with its flexible sibling.
+    pub(crate) main_split: Entity<ResizableState>,
+    /// Remembered sidebar width (px). Updated on user drags via
+    /// [`ResizablePanelEvent::Resized`], re-applied on window resize.
+    pub(crate) sidebar_width: f32,
+    /// Last full-window width seen, so the sidebar is re-pinned only when the
+    /// container actually changed — never mid-drag.
+    pub(crate) last_window_w: std::cell::Cell<f32>,
     /// Connection add/edit dialog: open form, pending option pills, and stable
     /// editor entities. See [`ConnectionDialogState`].
     pub(crate) dialog: ConnectionDialogState,
@@ -832,9 +859,8 @@ impl SqlHighlandView {
             .iter()
             .map(|d| SharedString::from(d.label()))
             .collect();
-        let density_select = cx.new(|cx| {
-            SelectState::new(SearchableVec::new(density_items), None, window, cx)
-        });
+        let density_select =
+            cx.new(|cx| SelectState::new(SearchableVec::new(density_items), None, window, cx));
 
         // Cmd+Enter runs the statement under the cursor. Scoped to the
         // editor's own `Input` key context; the handler double-checks focus.
@@ -910,6 +936,9 @@ impl SqlHighlandView {
             // Starts wide; `on_prepaint` corrects it on the first frame.
             main_width: std::cell::Cell::new(1200.0),
             editor_split: cx.new(|_| ResizableState::default()),
+            main_split: cx.new(|_| ResizableState::default()),
+            sidebar_width: 264.0,
+            last_window_w: std::cell::Cell::new(0.0),
             dialog: ConnectionDialogState {
                 editing: None,
                 pending_env: Environment::default(),

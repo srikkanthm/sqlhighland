@@ -242,6 +242,7 @@ impl SqlHighlandView {
             cfg.password = pw;
         }
         self.tabs[ix].busy = true;
+        self.tabs[ix].run_kind = Some(RunKind::Script);
         self.tabs[ix].output = None;
         self.tabs[ix].run_token = self.tabs[ix].run_token.wrapping_add(1);
         self.tabs[ix].run_started = Some(std::time::Instant::now());
@@ -402,6 +403,7 @@ impl SqlHighlandView {
                     return; // Cancelled or superseded: discard.
                 }
                 this.tabs[ix].busy = false;
+                this.tabs[ix].run_kind = None;
                 this.tabs[ix].run_started = None;
                 let summary = |errors: usize| {
                     format!(

@@ -464,7 +464,7 @@ impl SqlHighlandView {
                             .icon(KitIcon::Play)
                             .tooltip("Run statement at cursor (⌘↵)")
                             .when(!compact, |b| b.w(px(d.action_button_w)).label("Run"))
-                            .loading(tab.busy)
+                            .loading(tab.busy && tab.run_kind == Some(RunKind::Statement))
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.run_at_cursor(window, cx);
                             })),
@@ -472,12 +472,12 @@ impl SqlHighlandView {
                     .when(!minimal, |this| {
                         this.child(
                             Button::new("run-script")
-                                .secondary()
+                                .info()
                                 .with_size(d.button_size)
                                 .icon(KitIcon::FileTerminal)
                                 .tooltip("Run buffer as script (⇧⌘↵)")
                                 .when(!compact, |b| b.w(px(d.action_button_w)).label("Script"))
-                                .loading(tab.busy)
+                                .loading(tab.busy && tab.run_kind == Some(RunKind::Script))
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                     let tab_id = this.active_tab().id.clone();
                                     this.run_buffer_as_script(&tab_id, window, cx);
@@ -507,7 +507,7 @@ impl SqlHighlandView {
                         )
                         .child(
                             Button::new("format")
-                                .secondary()
+                                .warning()
                                 .with_size(d.button_size)
                                 .icon(KitIcon::WandSparkles)
                                 .tooltip("Format SQL (⇧⌥F)")
@@ -578,8 +578,6 @@ impl SqlHighlandView {
         } else {
             let view = cx.entity().downgrade();
             let tab_id = tab.id.clone();
-            let exp_view = view.clone();
-            let exp_tab = tab.id.clone();
             // "Count rows" only makes sense for a settled, wrapable query
             // result (not DESCRIBE / object viewers).
             let can_count = tab.has_result
@@ -587,60 +585,12 @@ impl SqlHighlandView {
                 && !tab.exporting
                 && crate::sql::statement_kind(&tab.last_sql) == crate::sql::StatementKind::Query
                 && !crate::db::is_describe_statement(&tab.last_sql);
-            let compact = self.toolbar_size().compact();
             let d = self.density();
             v_flex()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
                 .overflow_hidden()
-                .child(
-                    h_flex()
-                        .w_full()
-                        .justify_end()
-                        .items_center()
-                        .gap(px(d.gap))
-                        .px(px(d.pane_pad))
-                        .pt(px(d.pane_pad))
-                        .pb(px((d.pane_pad / 2.0).max(2.0)))
-                        .child(
-                            Button::new("dismiss-results")
-                                .ghost()
-                                .with_size(d.button_size)
-                                .icon(KitIcon::X)
-                                .tooltip("Dismiss results (⌘J)")
-                                .on_click(cx.listener({
-                                    let dismiss_tab = tab.id.clone();
-                                    move |this, _: &ClickEvent, _, cx| {
-                                        this.dismiss_results(&dismiss_tab, cx);
-                                    }
-                                })),
-                        )
-                        .child(
-                            Button::new("export")
-                                .outline()
-                                .with_size(d.button_size)
-                                .icon(KitIcon::Download)
-                                .tooltip("Export all result rows to CSV or Excel")
-                                .when(!compact, |b| b.w(px(d.action_button_w)).label("Export"))
-                                .dropdown_menu(move |menu, _, _| {
-                                    let mut menu = menu.max_h(px(320.)).scrollable(true);
-                                    for fmt in [ExportFormat::Csv, ExportFormat::Xlsx] {
-                                        let view = exp_view.clone();
-                                        let tab_id = exp_tab.clone();
-                                        menu = menu.item(PopupMenuItem::new(fmt.label()).on_click(
-                                            move |_, window, cx| {
-                                                view.update(cx, |this, cx| {
-                                                    this.start_export(&tab_id, fmt, window, cx);
-                                                })
-                                                .ok();
-                                            },
-                                        ));
-                                    }
-                                    menu
-                                }),
-                        ),
-                )
                 .child(
                     div()
                         .flex_1()
@@ -697,7 +647,6 @@ impl SqlHighlandView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let output = tab.output.clone().unwrap_or(Output::info(""));
-        let tab_id = tab.id.clone();
         let d = self.density();
         // Sync the read-only view from the message (only when different,
         // so caret and selection survive repaints). A view-entity update
@@ -750,21 +699,7 @@ impl SqlHighlandView {
                             .text_color(accent)
                             .child(title),
                     )
-                    .child(div().flex_1())
-                    // Icon-only ×, matching the grid's dismiss control.
-                    .child(
-                        Button::new("output-dismiss")
-                            .ghost()
-                            .with_size(d.button_size)
-                            .icon(KitIcon::X)
-                            .tooltip("Dismiss results (⌘J)")
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                // Dismiss means show only the query window:
-                                // the whole bottom pane (output or grid)
-                                // goes away until the next run.
-                                this.dismiss_results(&tab_id, cx);
-                            })),
-                    ),
+                    .child(div().flex_1()),
             )
             .child(
                 div()
@@ -787,7 +722,7 @@ impl SqlHighlandView {
             )
     }
 
-    fn render_status_bar(&self, cx: &App) -> impl IntoElement {
+    fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = self.active_tab();
         let fetching = tab
             .table
@@ -827,6 +762,14 @@ impl SqlHighlandView {
         };
         let minimal = matches!(self.toolbar_size(), ToolbarSize::Minimal);
         let d = self.density();
+        // Bottom-pane actions moved here from the old results toolbar row so
+        // the grid loses a full row of chrome. Export only applies to a grid
+        // result; Dismiss appears whenever a bottom pane is showing.
+        let show_export = tab.output.is_none() && tab.has_result;
+        let show_dismiss = !tab.hide_results && (tab.has_result || tab.output.is_some());
+        let export_view = cx.entity().downgrade();
+        let export_tab = tab.id.clone();
+        let dismiss_tab = tab.id.clone();
         h_flex()
             .w_full()
             .min_w_0()
@@ -864,6 +807,43 @@ impl SqlHighlandView {
                     .text_color(cx.theme().muted_foreground)
                     .child(right),
             )
+            .when(show_export, |this| {
+                this.child(
+                    Button::new("status-export")
+                        .ghost()
+                        .with_size(d.button_size)
+                        .icon(KitIcon::Download)
+                        .tooltip("Export all result rows to CSV or Excel")
+                        .dropdown_menu(move |menu, _, _| {
+                            let mut menu = menu.max_h(px(320.)).scrollable(true);
+                            for fmt in [ExportFormat::Csv, ExportFormat::Xlsx] {
+                                let view = export_view.clone();
+                                let tab_id = export_tab.clone();
+                                menu = menu.item(PopupMenuItem::new(fmt.label()).on_click(
+                                    move |_, window, cx| {
+                                        view.update(cx, |this, cx| {
+                                            this.start_export(&tab_id, fmt, window, cx);
+                                        })
+                                        .ok();
+                                    },
+                                ));
+                            }
+                            menu
+                        }),
+                )
+            })
+            .when(show_dismiss, |this| {
+                this.child(
+                    Button::new("status-dismiss")
+                        .ghost()
+                        .with_size(d.button_size)
+                        .icon(KitIcon::X)
+                        .tooltip("Dismiss results (⌘J)")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.dismiss_results(&dismiss_tab, cx);
+                        })),
+                )
+            })
     }
 
     /// Slim header for object-viewer tabs (schema browser): object title +
@@ -950,6 +930,10 @@ impl SqlHighlandView {
 
     fn render_main(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let tab = self.active_tab();
+        // Default editor height: half the window. `.size()` is initial-only,
+        // so this seeds the query split's first layout (clamped to its range);
+        // the kit keeps panels proportional as the window is resized.
+        let editor_h = (window.viewport_size().height.as_f32() * 0.5).clamp(160.0, 900.0);
         // Object-viewer tabs (schema browser): grid only, no editor.
         // Layout mirrors the query split (resizable panel + body) on
         // purpose: the grid is virtualized and needs the resizable's
@@ -1017,7 +1001,7 @@ impl SqlHighlandView {
                             .with_state(&self.editor_split)
                             .child(
                                 resizable_panel()
-                                    .size(px(300.))
+                                    .size(px(editor_h))
                                     .size_range(px(160.)..px(900.))
                                     // Grow 0 holds the editor at its size on
                                     // tall windows; shrink 1 lets it give room
@@ -1149,9 +1133,27 @@ impl Render for SqlHighlandView {
                 .into_any_element()
         } else {
             h_resizable("main-split")
+                .with_state(&self.main_split)
+                // Record only real drags (this callback fires on mouse-up, not
+                // for our programmatic re-pins), so the remembered width is
+                // the user's choice.
+                .on_resize({
+                    let view = cx.entity().downgrade();
+                    move |state, _, cx| {
+                        let w: f32 = state
+                            .read(cx)
+                            .sizes()
+                            .first()
+                            .map(|p| (*p).into())
+                            .unwrap_or(0.0);
+                        if w > 0.0 {
+                            view.update(cx, |this, _| this.sidebar_width = w).ok();
+                        }
+                    }
+                })
                 .child(
                     resizable_panel()
-                        .size(px(264.))
+                        .size(px(self.sidebar_width))
                         .size_range(px(180.)..px(480.))
                         .flex_none()
                         .child(self.render_sidebar(cx)),
@@ -1202,6 +1204,37 @@ impl Render for SqlHighlandView {
             .on_action(cx.listener(|this, _: &ShrinkEditor, window, cx| {
                 this.step_editor_h(-1, window, cx);
             }))
+            // Re-pin the fixed sidebar after any container-size change. The
+            // kit rescales a fixed panel proportionally with its flexible
+            // sibling (which is why a fresh launch could show a fat sidebar);
+            // this restores the remembered width once the frame has laid out.
+            .on_prepaint({
+                let view = cx.entity().downgrade();
+                move |bounds, window, cx| {
+                    let width = bounds.size.width.as_f32();
+                    let scheduled = view
+                        .update(cx, |this, _| {
+                            if (this.last_window_w.get() - width).abs() <= 0.5 {
+                                return None;
+                            }
+                            this.last_window_w.set(width);
+                            Some((this.main_split.clone(), this.sidebar_width))
+                        })
+                        .ok()
+                        .flatten();
+                    let Some((state, sidebar_width)) = scheduled else {
+                        return;
+                    };
+                    window.defer(cx, move |window, cx| {
+                        state.update(cx, |s, cx| {
+                            let cur: f32 = s.sizes().first().map(|p| (*p).into()).unwrap_or(0.0);
+                            if (cur - sidebar_width).abs() > 0.5 {
+                                s.resize_panel(0, px(sidebar_width), window, cx);
+                            }
+                        });
+                    });
+                }
+            })
             .child(
                 v_flex()
                     .size_full()

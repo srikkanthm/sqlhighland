@@ -136,6 +136,7 @@ impl SqlHighlandView {
             cfg.password = pw;
         }
         self.tabs[ix].busy = true;
+        self.tabs[ix].run_kind = Some(RunKind::Statement);
         self.tabs[ix].output = None;
         self.tabs[ix].run_token = self.tabs[ix].run_token.wrapping_add(1);
         self.tabs[ix].run_started = Some(std::time::Instant::now());
@@ -274,6 +275,7 @@ impl SqlHighlandView {
                     return; // Cancelled or superseded by a newer run: discard.
                 }
                 this.tabs[ix].busy = false;
+                this.tabs[ix].run_kind = None;
                 this.tabs[ix].run_started = None;
                 match outcome {
                     Ok(Outcome::Rows(columns, page, query_id, elapsed_ms)) => {
@@ -402,6 +404,7 @@ impl SqlHighlandView {
         let t = self.tab_by_id(tab_id).expect("checked above");
         t.run_token = t.run_token.wrapping_add(1);
         t.busy = false;
+        t.run_kind = None;
         t.run_started = None;
         t.result_meta = "Cancelled".into();
         cx.notify();
