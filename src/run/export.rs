@@ -77,6 +77,7 @@ fn export_drain_blocking(
     cancel: &Arc<std::sync::atomic::AtomicBool>,
     csv_delim: char,
     csv_header: bool,
+    fetch_size: usize,
 ) -> ExportOutcome {
     use std::sync::atomic::Ordering;
     let tmp = path.with_extension("part");
@@ -96,7 +97,7 @@ fn export_drain_blocking(
             if let Err(e) = guard.connect(cfg) {
                 Err(e)
             } else {
-                guard.start_query(sql, FETCH_CHUNK, binds)
+                guard.start_query(sql, fetch_size, binds)
             }
         };
         match started {
@@ -211,7 +212,7 @@ fn export_drain_blocking(
                 }
                 let page = {
                     let mut guard = lock(session.as_ref().expect("export session"));
-                    guard.fetch_more(query_id, FETCH_CHUNK)
+                    guard.fetch_more(query_id, fetch_size)
                 };
                 match page {
                     Ok(p) => {
@@ -251,7 +252,7 @@ fn export_drain_blocking(
                 let data = lock(&fetch.data);
                 data.rows[start..total]
                     .iter()
-                    .take(FETCH_CHUNK)
+                    .take(fetch_size)
                     .map(|r| r.iter().map(|c| c.as_deref().map(str::to_string)).collect())
                     .collect()
             };
@@ -466,6 +467,8 @@ impl SqlHighlandView {
         let csv_prefs = Preferences::load();
         let csv_delim = crate::export::csv_delim(&csv_prefs.csv_delimiter);
         let csv_header = csv_prefs.csv_header;
+        // Results fetch size (Settings → Results) for the drain's pages.
+        let fetch_size = self.fetch_size.max(1);
         // The grid buffer is the source only when it holds every row: the
         // cursor was drained (exhausted) and the cap wasn't hit. A cursor
         // killed by another tab sets `exhausted` too, so `capped` is checked
@@ -479,7 +482,7 @@ impl SqlHighlandView {
                 .spawn(async move {
                     export_drain_blocking(
                         &fetch, &cfg, &sql, &binds, complete, fmt, &path, &sheet, &cancel,
-                        csv_delim, csv_header,
+                        csv_delim, csv_header, fetch_size,
                     )
                 })
                 .await;

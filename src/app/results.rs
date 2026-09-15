@@ -227,7 +227,13 @@ impl TableDelegate for ResultsDelegate {
     }
 
     fn load_more_threshold(&self) -> usize {
-        200
+        // One page of look-ahead: prefetch the next page just before the user
+        // reaches the bottom, without over-buffering. This must scale with the
+        // configured fetch size — a fixed 200 was fine for the old 1000-row
+        // pages but is 4 pages ahead at the 50-row default (it buffered ~300
+        // rows on the first frame). Falls back to the kit default before a
+        // fetch exists.
+        self.fetch.as_ref().map(|f| f.chunk).unwrap_or(20)
     }
 
     fn load_more(&mut self, _: &mut Window, cx: &mut Context<TableState<Self>>) {

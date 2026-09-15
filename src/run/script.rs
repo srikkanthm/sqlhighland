@@ -268,6 +268,10 @@ impl SqlHighlandView {
         let bg = cx.background_executor().clone();
         let tab_id = tab_id.to_string();
         let conn_id_bg = conn_id.clone();
+        // Results fetch size (Settings → Results); script query statements
+        // only pull the first page and discard it, so a smaller page is
+        // strictly less work.
+        let fetch_size = self.fetch_size.max(1);
         // Same live `Running… Ns` ticker as run_sql.
         {
             let view = cx.entity().downgrade();
@@ -347,7 +351,7 @@ impl SqlHighlandView {
                                 StatementKind::Query => {
                                     let inner = std::time::Instant::now();
                                     session
-                                        .start_query(&stmt_c, FETCH_CHUNK, &b)
+                                        .start_query(&stmt_c, fetch_size, &b)
                                         .map(|_| StmtOutcome::Rows(inner.elapsed().as_millis()))
                                         .map_err(|e| e.to_string())
                                 }

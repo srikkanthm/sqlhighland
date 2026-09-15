@@ -118,6 +118,7 @@ impl SqlHighlandView {
     pub fn settings_controls(&self) -> SettingsControls {
         SettingsControls {
             result_cap_input: self.result_cap_input.clone(),
+            fetch_size_input: self.fetch_size_input.clone(),
             grid_density_slider: self.grid_density_slider.clone(),
             query_timeout_input: self.query_timeout_input.clone(),
             csv_delim_input: self.csv_delim_input.clone(),
@@ -161,6 +162,12 @@ impl SqlHighlandView {
         let row_height = controls.grid_row_height;
         density_slider.update(cx, |state, cx| {
             state.set_value(SliderValue::Single(row_height as f32), window, cx);
+        });
+        // Seed the fetch-size field.
+        let fetch_input = controls.fetch_size_input;
+        let fetch_size = crate::config::clamp_fetch_size(Preferences::load().fetch_size);
+        fetch_input.update(cx, |state, cx| {
+            state.set_value(fetch_size.to_string(), window, cx);
         });
         // Seed the query-timeout and delimiter fields.
         let timeout_input = controls.query_timeout_input;
@@ -225,6 +232,7 @@ impl SqlHighlandView {
         window.open_dialog(cx, move |dialog, _, cx| {
             let muted = cx.theme().muted_foreground;
             let cap_input = cap_input.clone();
+            let fetch_input = fetch_input.clone();
             let density_slider = density_slider.clone();
             let timeout_input = timeout_input.clone();
             let delim_input = delim_input.clone();
@@ -704,7 +712,7 @@ impl SqlHighlandView {
                             SettingPage::new("Results")
                                 .icon(KitIcon::Table)
                                 .groups(vec![
-                                    SettingGroup::new().title("Row limit").items(vec![
+                                    SettingGroup::new().title("Rows").items(vec![
                                         SettingItem::render(move |_, _, _| {
                                             let cap_input = cap_input.clone();
                                             v_flex().gap_1().child(
@@ -731,13 +739,50 @@ impl SqlHighlandView {
                                                             )
                                                             .child(
                                                                 Input::new(&cap_input)
-                                                                    .w_full(),
+                                                                    .w_full()
+                                                                    .with_size(control),
                                                             ),
                                                     ),
                                             )
                                         })
                                         .keywords([
                                             "results", "limit", "rows", "cap", "grid",
+                                        ]),
+                                        SettingItem::render(move |_, _, _| {
+                                            let input = fetch_input.clone();
+                                            v_flex().gap_1().child(
+                                                div()
+                                                    .id("settings-fetch-size")
+                                                    .w_full()
+                                                    .p(pad)
+                                                    .rounded_md()
+                                                    .child(
+                                                        v_flex()
+                                                            .gap_1()
+                                                            .child(
+                                                                div()
+                                                                    .text_sm()
+                                                                    .child("Fetch size"),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(muted)
+                                                                    .child(
+                                                                        "Rows loaded per page (initial load and each scroll). Default 50",
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                Input::new(&input)
+                                                                    .w_full()
+                                                                    .with_size(control),
+                                                            ),
+                                                    ),
+                                            )
+                                        })
+                                        .keywords([
+                                            "results", "fetch", "size", "page", "rows",
+                                            "chunk", "paging",
                                         ]),
                                     ]),
                                     SettingGroup::new().title("Grid").items(vec![

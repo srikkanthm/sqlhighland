@@ -185,8 +185,11 @@ impl SqlHighlandView {
             0 => usize::MAX,
             n => n,
         };
-        // The first page is normally one chunk; never fetch past the cap.
-        let first_chunk = cap.min(FETCH_CHUNK);
+        // Results fetch size (Settings → Results): rows per page. Read from
+        // the live view field so a change applies to the next run. At least 1.
+        let fetch_size = self.fetch_size.max(1);
+        // The first page is normally one fetch; never fetch past the cap.
+        let first_chunk = cap.min(fetch_size);
         // Ticker repainting the live `Running… Ns` status twice a second.
         // Exits on its own once the run ends (token mismatch or not busy);
         // no handle needed because a newer run's ticker supersedes it.
@@ -293,7 +296,7 @@ impl SqlHighlandView {
                         let fetch = Arc::new(FetchState {
                             session: session.clone(),
                             query_id,
-                            chunk: FETCH_CHUNK,
+                            chunk: fetch_size,
                             cap,
                             data: Mutex::new(ResultData {
                                 columns,
@@ -326,7 +329,7 @@ impl SqlHighlandView {
                         let fetch = Arc::new(FetchState {
                             session: session.clone(),
                             query_id,
-                            chunk: FETCH_CHUNK,
+                            chunk: fetch_size,
                             cap,
                             data: Mutex::new(ResultData {
                                 columns: Vec::new(),

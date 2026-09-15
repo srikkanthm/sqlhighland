@@ -9,11 +9,6 @@ use std::time::{Duration, Instant};
 
 use crate::model::{ColumnInfo, ConnectionConfig, QueryResult};
 
-/// Rows per on-demand fetch (initial load fetches one chunk too).
-pub const FETCH_CHUNK: usize = 1000;
-/// Safety ceiling on total buffered rows per query.
-pub const FETCH_CAP: usize = 100_000;
-
 /// Pulled page: converted rows plus whether the server is exhausted.
 type PulledRows = (Vec<Vec<Option<String>>>, bool);
 

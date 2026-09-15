@@ -366,6 +366,7 @@ impl SearchableListItem for ChoiceItem {
 /// never reads the view itself (a nested read under a lease panics).
 pub struct SettingsControls {
     pub(crate) result_cap_input: Entity<InputState>,
+    pub(crate) fetch_size_input: Entity<InputState>,
     pub(crate) grid_density_slider: Entity<SliderState>,
     pub(crate) query_timeout_input: Entity<InputState>,
     pub(crate) csv_delim_input: Entity<InputState>,
@@ -656,6 +657,9 @@ pub struct SqlHighlandView {
     /// Results-grid row cap in effect (0 = unlimited). Mirrors the saved
     /// preference and is updated live from the Settings field.
     pub(crate) result_cap: usize,
+    /// Rows fetched per page (initial load, each scroll fetch, export drain).
+    /// Mirrors the saved preference and is updated live from Settings.
+    pub(crate) fetch_size: usize,
     /// Results-grid row height in points (compactness). Mirrors the saved
     /// preference and is updated live from the Settings slider.
     pub(crate) grid_row_height: u32,
@@ -674,6 +678,8 @@ pub struct SqlHighlandView {
     /// Free-form results-grid row cap field (Settings → Results). `0` or
     /// empty means unlimited.
     pub(crate) result_cap_input: Entity<InputState>,
+    /// Free-form results fetch size field (Settings → Results).
+    pub(crate) fetch_size_input: Entity<InputState>,
     /// Window-lifetime subscriptions (OS appearance observer for System
     /// theme mode). Kept alive by ownership, like per-tab `_subs`.
     pub(crate) _subs: Vec<Subscription>,
@@ -798,6 +804,13 @@ impl SqlHighlandView {
         let grid_row_height = Preferences::load()
             .grid_row_height
             .clamp(GRID_ROW_HEIGHT_MIN, GRID_ROW_HEIGHT_MAX);
+        // Settings → Results fetch size (rows per page).
+        let fetch_size_value = crate::config::clamp_fetch_size(Preferences::load().fetch_size);
+        let fetch_size_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("50")
+                .default_value(fetch_size_value.to_string())
+        });
         let grid_density_slider = cx.new(|_| {
             SliderState::new()
                 .min(GRID_ROW_HEIGHT_MIN as f32)
@@ -981,6 +994,7 @@ impl SqlHighlandView {
             metadata_ttl_input,
             hover_details: prefs.hover_details,
             result_cap: prefs.result_cap,
+            fetch_size: crate::config::clamp_fetch_size(prefs.fetch_size),
             grid_row_height,
             grid_density_slider,
             query_timeout_input,
@@ -989,6 +1003,7 @@ impl SqlHighlandView {
             font_select,
             density_select,
             result_cap_input,
+            fetch_size_input,
             _subs: Vec::new(),
         };
         // Follow the OS appearance while the theme mode is System. The
@@ -1036,6 +1051,39 @@ impl SqlHighlandView {
                 },
             );
             this._subs.push(cap_sub);
+        }
+        // Persist the free-form results fetch size as it is edited. Blank/0
+        // falls back to the default; non-numeric text is left unsaved.
+        {
+            let input = this.fetch_size_input.clone();
+            let input_sub = input.clone();
+            let sub = cx.subscribe_in(&input, window, move |this, _, ev: &InputEvent, _, cx| {
+                if !matches!(
+                    ev,
+                    InputEvent::Change | InputEvent::Blur | InputEvent::PressEnter { .. }
+                ) {
+                    return;
+                }
+                let text = input_sub.read(cx).value().to_string();
+                let trimmed = text.trim();
+                let parsed = if trimmed.is_empty() {
+                    Some(0usize)
+                } else if trimmed.bytes().all(|b| b.is_ascii_digit()) {
+                    trimmed.parse::<usize>().ok()
+                } else {
+                    None
+                };
+                if let Some(n) = parsed {
+                    let size = crate::config::clamp_fetch_size(n);
+                    this.fetch_size = size;
+                    let mut prefs = Preferences::load();
+                    if prefs.fetch_size != size {
+                        prefs.fetch_size = size;
+                        let _ = prefs.save();
+                    }
+                }
+            });
+            this._subs.push(sub);
         }
         // Grid density slider: preview live while dragging, persist on
         // release (avoids a preferences write per pixel).
