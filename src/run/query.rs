@@ -163,6 +163,11 @@ impl SqlHighlandView {
         self.tabs[ix].table.update(cx, |table, cx| {
             table.delegate_mut().set_fetch(None);
             table.clear_selection(cx);
+            // Fresh results always start at the top-left; otherwise a re-run
+            // keeps the previous scroll position (the user scrolled a few
+            // hundred rows, ran again, and saw the same offset).
+            table.scroll_to_row(0, cx);
+            table.scroll_to_col(0, cx);
             table.refresh(cx);
         });
         cx.notify();
@@ -322,6 +327,8 @@ impl SqlHighlandView {
                         this.tabs[ix].table.update(cx, |table, cx| {
                             table.delegate_mut().set_fetch(Some(fetch));
                             table.clear_selection(cx);
+                            table.scroll_to_row(0, cx);
+                            table.scroll_to_col(0, cx);
                             table.refresh(cx);
                         });
                     }
@@ -364,6 +371,8 @@ impl SqlHighlandView {
                         this.tabs[ix].table.update(cx, |table, cx| {
                             table.delegate_mut().set_fetch(Some(fetch));
                             table.clear_selection(cx);
+                            table.scroll_to_row(0, cx);
+                            table.scroll_to_col(0, cx);
                             table.refresh(cx);
                         });
                     }
