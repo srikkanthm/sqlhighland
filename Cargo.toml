@@ -104,3 +104,8 @@ required-features = ["gui-test"]
 name = "themes"
 path = "tests/themes.rs"
 required-features = ["gui-test"]
+
+[[test]]
+name = "tab_nav"
+path = "tests/tab_nav.rs"
+required-features = ["gui-test"]

@@ -212,6 +212,7 @@ impl SqlHighlandView {
             // transparent) so only the active-tab indicator changes.
             .with_variant(TabVariant::Underline)
             .bg(cx.theme().tab_bar)
+            .prefix(self.render_tab_nav(cx))
             .selected_index(self.active)
             .track_scroll(&self.tab_scroll)
             .on_click(cx.listener(|this, ix: &usize, window, cx| {
@@ -242,6 +243,42 @@ impl SqlHighlandView {
                     .tooltip("New tab")
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.add_tab(None, String::new(), window, cx);
+                    })),
+            )
+    }
+
+    /// Back/forward buttons for the tab strip: move to the previous/next tab
+    /// in display order. Rendered as the tab bar's prefix; disabled at the
+    /// ends.
+    fn render_tab_nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let d = self.density();
+        let can_back = self.active > 0;
+        let can_forward = self.active + 1 < self.tabs.len();
+        h_flex()
+            .gap_1()
+            .items_center()
+            .flex_shrink_0()
+            .pr_1()
+            .child(
+                Button::new("tab-nav-back")
+                    .icon(KitIcon::ArrowLeft)
+                    .ghost()
+                    .with_size(d.button_size)
+                    .tooltip("Back")
+                    .disabled(!can_back)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.nav_back(window, cx);
+                    })),
+            )
+            .child(
+                Button::new("tab-nav-forward")
+                    .icon(KitIcon::ArrowRight)
+                    .ghost()
+                    .with_size(d.button_size)
+                    .tooltip("Forward")
+                    .disabled(!can_forward)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.nav_forward(window, cx);
                     })),
             )
     }

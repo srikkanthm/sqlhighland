@@ -283,7 +283,7 @@ impl SqlHighlandView {
         }
         self.persist_tabs(cx);
         self.active = self.tabs.len() - 1;
-        self.tab_scroll.scroll_to_item(self.active);
+        self.scroll_tab_into_view(self.active);
         cx.notify();
         id
     }
@@ -326,7 +326,7 @@ impl SqlHighlandView {
             cx,
         );
         self.active = self.tabs.len() - 1;
-        self.tab_scroll.scroll_to_item(self.active);
+        self.scroll_tab_into_view(self.active);
         let sql = OracleProvider.describe_sql(&owner, &name, &own, kind);
         self.start_run(&id, sql, window, cx);
         cx.notify();
@@ -383,7 +383,7 @@ impl SqlHighlandView {
             }
             self.active = self.active.min(self.tabs.len().saturating_sub(1));
             self.persist_tabs(cx);
-            self.tab_scroll.scroll_to_item(self.active);
+            self.scroll_tab_into_view(self.active);
             // The closed editor may still own keyboard focus. Move focus to
             // the replacement active tab so repeated shortcuts keep working.
             // Viewers have no visible editor: leave focus alone.
@@ -477,7 +477,7 @@ impl SqlHighlandView {
             return;
         }
         self.active = ix;
-        self.tab_scroll.scroll_to_item(ix);
+        self.scroll_tab_into_view(ix);
         // Viewers have no visible editor: don't steal focus.
         if matches!(self.tabs[ix].kind, TabKind::Query) {
             let editor = self.tabs[ix].editor.clone();
@@ -485,6 +485,34 @@ impl SqlHighlandView {
             self.check_external_change(ix, window, cx);
         }
         cx.notify();
+    }
+
+    /// Scroll the tab strip so tab `ix` is visible.
+    ///
+    /// The kit's `TabBar` scroll area tracks more children than the tab
+    /// wrappers: its sliding indicator plus one more lead them, and a trailing
+    /// spacer follows (`children = leading + tabs + 1`, leading = 2 with the
+    /// Underline bar). So display tab `ix` is scroll child `ix + 2`; indexing
+    /// by `ix` targets the previous tab and never reveals the newly active one
+    /// going Forward. `tests/tab_nav.rs` guards the offset.
+    fn scroll_tab_into_view(&self, ix: usize) {
+        const TAB_SCROLL_LEADING: usize = 2;
+        self.tab_scroll.scroll_to_item(TAB_SCROLL_LEADING + ix);
+    }
+
+    /// Tab-strip back/forward: move to the previous/next tab in display order.
+    /// Simple adjacency (not a visit history), so it works at launch and needs
+    /// no prior visiting.
+    pub(crate) fn nav_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active > 0 {
+            self.select_tab(self.active - 1, window, cx);
+        }
+    }
+
+    pub(crate) fn nav_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active + 1 < self.tabs.len() {
+            self.select_tab(self.active + 1, window, cx);
+        }
     }
 
     pub(super) fn check_external_change(
