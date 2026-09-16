@@ -5,6 +5,8 @@
 //! Split out of `app.rs`; the inherent impl is re-opened here so the
 //! view's behavior is unchanged (`impl` blocks may live in any module).
 
+use gpui_kit::component::scroll::Scrollbar;
+
 use super::*;
 
 /// Buffered query data shared between the view and the table delegate.
@@ -141,8 +143,15 @@ impl TableDelegate for ResultsDelegate {
         // Key by position, not name: duplicate column names (common in
         // SELECT * joins) would otherwise collide element identities,
         // breaking reconciliation and defeating column virtualization.
+        //
+        // Size the column to fit its header name (never below the default), so
+        // the name is fully visible without a text-system measurement here
+        // (`column` runs per column per frame and has no window). Over-estimate
+        // the glyph width deliberately; a little extra column beats a clipped
+        // name.
+        let width = (name.chars().count() as f32 * 9.0 + 28.0).clamp(180.0, 800.0);
         Column::new(format!("col-{col_ix}"), name)
-            .width(px(180.))
+            .width(px(width))
             .paddings(compact_cell_pad())
     }
 
@@ -162,13 +171,27 @@ impl TableDelegate for ResultsDelegate {
         // label sticks to the top (visible once the grid density grows the
         // rows). The row-number column's header hugs the same edge as its
         // right-aligned body cells.
+        //
+        // The name gets a truncating text style so a long header ellipsizes
+        // (matching the body cells' `.truncate()`) instead of hard-clipping
+        // at the cell edge — `SelectableText` lays out at its natural width
+        // otherwise. No `min_w_0`/wrapper: that collapsed the label's width
+        // and ellipsized names that actually fit.
         div()
             .w_full()
             .h_full()
             .flex()
             .items_center()
             .when(col_ix == 0, |this| this.justify_end())
-            .child(SelectableText::new(format!("col-th-{col_ix}"), name))
+            .child(
+                SelectableText::new(format!("col-th-{col_ix}"), name).text_style(
+                    gpui_kit::TextStyleRefinement {
+                        white_space: Some(gpui_kit::WhiteSpace::Nowrap),
+                        text_overflow: Some(gpui_kit::TextOverflow::Truncate("…".into())),
+                        ..Default::default()
+                    },
+                ),
+            )
     }
 
     fn render_td(
@@ -224,6 +247,20 @@ impl TableDelegate for ResultsDelegate {
 
     fn has_more(&self, _: &App) -> bool {
         self.with_data(|d| !d.exhausted && !d.capped && !d.loading, false)
+    }
+
+    /// Trailing gutter for the table's overlay vertical scrollbar (16px wide).
+    /// The kit's default is 12px, which leaves the last column's right edge
+    /// under the scrollbar; reserve the full width plus a little air.
+    fn render_last_empty_col(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+            .w(Scrollbar::width() + px(6.))
+            .h_full()
+            .flex_shrink_0()
     }
 
     fn load_more_threshold(&self) -> usize {
