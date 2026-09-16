@@ -669,7 +669,7 @@ impl SqlHighlandView {
                             }
                             menu
                         })
-                        .child(render_tab_table(&tab.table, self.grid_row_height)),
+                        .child(render_tab_table(&tab.table, self.grid_row_height, cx)),
                 )
                 .into_any_element()
         }

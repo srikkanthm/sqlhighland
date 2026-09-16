@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use gpui_kit::component::scroll::Scrollbar;
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 
 use crate::sql::{SortDir, SortSpec};
 
@@ -698,18 +698,63 @@ fn compact_cell_pad() -> gpui::Edges<gpui::Pixels> {
 pub(crate) fn render_tab_table(
     table: &Entity<TableState<ResultsDelegate>>,
     row_height: u32,
+    cx: &App,
 ) -> impl IntoElement {
+    // The library's own scrollbars follow the theme's auto-hide mode (they only
+    // appear while scrolling on macOS), so use the table's public scroll handles
+    // to draw always-visible scrollbars over the same scroll state. Mouse drag,
+    // track, and hover all still work.
+    let (vhandle, hhandle) = {
+        let state = table.read(cx);
+        (
+            state.vertical_scroll_handle.clone(),
+            state.horizontal_scroll_handle.clone(),
+        )
+    };
     div()
         .size_full()
         .min_w_0()
         .overflow_hidden()
+        .relative()
+        // Reserve a strip at the bottom for the always-visible horizontal
+        // scrollbar, so the last row can scroll clear of it instead of hiding
+        // under the bar.
+        .pb(Scrollbar::width())
         // A custom `Size` only sets the row height; the cell text size is
         // inherited, so pin it here to keep the compact rows from growing.
         .text_sm()
         .child(
             DataTable::new(table)
                 .with_size(gpui_kit::component::Size::Size(px(row_height as f32)))
-                .stripe(true),
+                .stripe(true)
+                .scrollbar_visible(false, false),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(px(row_height as f32))
+                .right_0()
+                .bottom(Scrollbar::width())
+                .w(Scrollbar::width())
+                .child(
+                    Scrollbar::vertical(&vhandle)
+                        .viewport_from_layout()
+                        .max_fps(60)
+                        .mode(ScrollbarMode::Always),
+                ),
+        )
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .h(Scrollbar::width())
+                .child(
+                    Scrollbar::horizontal(&hhandle)
+                        .viewport_from_layout()
+                        .mode(ScrollbarMode::Always),
+                ),
         )
 }
 
