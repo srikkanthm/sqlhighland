@@ -771,7 +771,10 @@ impl SqlHighlandView {
             .with_data(|d| d.loading, false);
         let left = if tab.busy {
             match tab.run_started {
-                Some(started) => format!("Running… {}s", started.elapsed().as_secs()),
+                // A fixed-width clock: `Running… 0:00:07` keeps the same width
+                // for the life of the run, so the Cancel button beside it never
+                // shifts (and it stays readable past an hour).
+                Some(started) => format!("Running… {}", elapsed_clock(started.elapsed().as_secs())),
                 None => "Running…".to_string(),
             }
         } else if tab.exporting {
@@ -817,6 +820,10 @@ impl SqlHighlandView {
         let dismiss_tab = tab.id.clone();
         let cancel_tab = tab.id.clone();
         let cancel_exporting = tab.exporting;
+        // Fixed label width while a run/export ticks, so the Cancel button
+        // beside it never shifts: the clock is fixed-length but proportional
+        // digits still vary in width, and the export row count grows.
+        let left_w = if running { Some(px(140.)) } else { None };
         h_flex()
             .w_full()
             .min_w_0()
@@ -834,6 +841,7 @@ impl SqlHighlandView {
                     .min_w_0()
                     .truncate()
                     .text_color(cx.theme().muted_foreground)
+                    .when_some(left_w, |this, w| this.w(w))
                     .child(left),
             )
             .when(running, |this| {
@@ -1161,6 +1169,18 @@ fn shorten(label: &str, max: usize) -> String {
     }
 }
 
+/// Elapsed seconds as a fixed-width `HH:MM:SS`. The constant width keeps the
+/// status bar's `Running… <clock>` label from resizing (and moving the Cancel
+/// button) as time passes, while staying readable past an hour.
+fn elapsed_clock(secs: u64) -> String {
+    format!(
+        "{:02}:{:02}:{:02}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
+}
+
 /// Theme color for an environment, or `None` when untagged.
 pub(crate) fn env_color(env: Environment, cx: &App) -> Option<Hsla> {
     match env {
@@ -1349,5 +1369,25 @@ impl Render for SqlHighlandView {
                     .child(div().flex_1().min_h_0().child(content)),
             )
             .children(Root::render_dialog_layer(window, cx))
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    // Import explicitly: a `use super::*` glob would pull in GPUI's `test`
+    // macro and shadow Rust's built-in `#[test]`.
+    use super::elapsed_clock;
+
+    #[test]
+    fn elapsed_clock_is_fixed_width() {
+        assert_eq!(elapsed_clock(0), "00:00:00");
+        assert_eq!(elapsed_clock(7), "00:00:07");
+        assert_eq!(elapsed_clock(59), "00:00:59");
+        assert_eq!(elapsed_clock(60), "00:01:00");
+        assert_eq!(elapsed_clock(3599), "00:59:59");
+        assert_eq!(elapsed_clock(3600), "01:00:00");
+        assert_eq!(elapsed_clock(3661), "01:01:01");
+        assert_eq!(elapsed_clock(86399), "23:59:59");
+        assert_eq!(elapsed_clock(360_000), "100:00:00");
     }
 }
