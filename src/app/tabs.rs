@@ -412,6 +412,16 @@ impl SqlHighlandView {
             alert
                 .title("Unsaved changes")
                 .description("Save changes before closing this SQL file?")
+                // Return (the dialog's `Confirm` action) saves then closes, the
+                // primary action.
+                .on_ok({
+                    let save_id = tab_id_save.clone();
+                    let view = view.clone();
+                    move |_, window, cx| {
+                        view.update(cx, |this, cx| this.save_tab_and_close(&save_id, window, cx))
+                            .unwrap_or(false)
+                    }
+                })
                 .footer(
                     h_flex()
                         .gap_2()
@@ -435,32 +445,45 @@ impl SqlHighlandView {
                             move |_, window, cx| {
                                 save_view
                                     .update(cx, |this, cx| {
-                                        let Some(ix) = this.tab_index(&save_id) else {
-                                            return;
-                                        };
-                                        let Some(path) = this.tabs[ix].path.clone() else {
-                                            return;
-                                        };
-                                        let text =
-                                            this.tabs[ix].editor.read(cx).value().to_string();
-                                        match filetab::write(&path, &text) {
-                                            Ok(stamp) => {
-                                                this.tabs[ix].file_stamp = Some(stamp);
-                                                this.tabs[ix].dirty = false;
-                                                window.close_dialog(cx);
-                                                this.close_tab_now(&save_id, window, cx);
-                                            }
-                                            Err(err) => {
-                                                this.status = format!("Save failed: {err}").into();
-                                                cx.notify();
-                                            }
-                                        }
+                                        this.save_tab_and_close(&save_id, window, cx);
                                     })
                                     .ok();
                             }
                         })),
                 )
         });
+    }
+
+    /// Save a tab's external file, then close the tab. Returns `false` (leaving
+    /// the caller's confirm dialog open) when the save fails or the tab/path is
+    /// gone.
+    fn save_tab_and_close(
+        &mut self,
+        tab_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(ix) = self.tab_index(tab_id) else {
+            return false;
+        };
+        let Some(path) = self.tabs[ix].path.clone() else {
+            return false;
+        };
+        let text = self.tabs[ix].editor.read(cx).value().to_string();
+        match filetab::write(&path, &text) {
+            Ok(stamp) => {
+                self.tabs[ix].file_stamp = Some(stamp);
+                self.tabs[ix].dirty = false;
+                window.close_dialog(cx);
+                self.close_tab_now(tab_id, window, cx);
+                true
+            }
+            Err(err) => {
+                self.status = format!("Save failed: {err}").into();
+                cx.notify();
+                false
+            }
+        }
     }
 
     pub(crate) fn select_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -539,6 +562,19 @@ impl SqlHighlandView {
             alert
                 .title("File changed on disk")
                 .description("Reload the file or keep the current buffer?")
+                // Return (the dialog's `Confirm` action) reloads, the primary
+                // action.
+                .on_ok({
+                    let reload_id = tab_id.clone();
+                    let reload_path = path.clone();
+                    let view = view.clone();
+                    move |_, window, cx| {
+                        view.update(cx, |this, cx| {
+                            this.reload_tab(&reload_id, &reload_path, window, cx)
+                        })
+                        .unwrap_or(false)
+                    }
+                })
                 .footer(
                     h_flex()
                         .gap_2()
@@ -562,26 +598,39 @@ impl SqlHighlandView {
                                 .primary()
                                 .label("Reload")
                                 .on_click(move |_, window, cx| {
-                                    let Ok((text, stamp)) = filetab::read(&reload_path) else {
-                                        return;
-                                    };
                                     reload_view
                                         .update(cx, |this, cx| {
-                                            if let Some(tab) = this.tab_by_id(&reload_id) {
-                                                tab.editor.update(cx, |editor, cx| {
-                                                    editor.set_value(text, window, cx);
-                                                });
-                                                tab.file_stamp = Some(stamp);
-                                                tab.dirty = false;
-                                            }
-                                            window.close_dialog(cx);
-                                            cx.notify();
+                                            this.reload_tab(&reload_id, &reload_path, window, cx);
                                         })
                                         .ok();
                                 }),
                         ),
                 )
         });
+    }
+
+    /// Reload a tab's external file after an on-disk change. Returns `false`
+    /// (leaving the caller's confirm dialog open) when the file can't be read.
+    fn reload_tab(
+        &mut self,
+        tab_id: &str,
+        path: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Ok((text, stamp)) = filetab::read(path) else {
+            return false;
+        };
+        if let Some(tab) = self.tab_by_id(tab_id) {
+            tab.editor.update(cx, |editor, cx| {
+                editor.set_value(text, window, cx);
+            });
+            tab.file_stamp = Some(stamp);
+            tab.dirty = false;
+        }
+        window.close_dialog(cx);
+        cx.notify();
+        true
     }
 
     /// Cycle tabs with wrapping (`ctrl-tab` / `ctrl-shift-tab`). Focus

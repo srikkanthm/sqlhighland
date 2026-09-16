@@ -501,4 +501,12 @@ impl SqlHighlandView {
             }
         }
     }
+
+    /// True when any tab sharing the connection has uncommitted work — what a
+    /// disconnect would roll back.
+    pub(crate) fn has_pending(&self, conn_id: &str) -> bool {
+        self.tabs
+            .iter()
+            .any(|t| t.connection_id.as_deref() == Some(conn_id) && t.pending_txn)
+    }
 }

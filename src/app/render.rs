@@ -848,7 +848,7 @@ impl SqlHighlandView {
                 let tip = if cancel_exporting {
                     "Stop the export — the partial file is discarded"
                 } else {
-                    "Stop waiting — the server finishes in the background and its results are discarded"
+                    "Send cancellation request to the server"
                 };
                 this.child(
                     Button::new("status-cancel")
@@ -1135,6 +1135,12 @@ impl SqlHighlandView {
             .on_action(cx.listener(|this, _: &DismissResults, _, cx| {
                 let tab_id = this.active_tab().id.clone();
                 this.dismiss_results(&tab_id, cx);
+            }))
+            // Disconnect the active tab's connection (Shift+Cmd+D). Confirmation
+            // happens in `disconnect_active`; dialogs sit outside this root, so
+            // modals never trigger it.
+            .on_action(cx.listener(|this, _: &DisconnectTab, window, cx| {
+                this.disconnect_active(window, cx);
             }))
             // NewTab/CloseTab stay app-global (main.rs): element-level
             // duplicates double-fire, and dialogs sit outside this

@@ -37,6 +37,22 @@ impl SqlHighlandView {
                 .description(
                     "Tabs bound to it become unbound. A stored keychain password is removed too.",
                 )
+                // Return (the dialog's `Confirm` action) deletes too, so it is
+                // the default action.
+                .on_ok({
+                    let conn_id = conn_id.clone();
+                    let view = view.clone();
+                    move |_, _, cx| {
+                        view.update(cx, |this, cx| {
+                            if let Some(ix) = this.connections.iter().position(|c| c.id == conn_id)
+                            {
+                                this.delete_connection(ix, cx);
+                            }
+                        })
+                        .ok();
+                        true
+                    }
+                })
                 .footer(
                     h_flex()
                         .gap_2()
@@ -219,5 +235,79 @@ impl SqlHighlandView {
         // No "Disconnected" notice: the status bar derives live state itself.
         self.status = "".into();
         cx.notify();
+    }
+
+    /// Confirm, then disconnect the active tab's connection (Shift+Cmd+D).
+    /// Sessions are connection-scoped, so this drops the session for every tab
+    /// bound to that connection. Silent no-op when the active tab has no bound
+    /// (live) connection.
+    pub(super) fn disconnect_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(conn_id) = self.active_tab().connection_id.clone() else {
+            return;
+        };
+        if !self.live.contains(&conn_id) {
+            return;
+        }
+        let name = self.connection_name(&Some(conn_id.clone()));
+        // Surface uncommitted work: disconnecting rolls it back.
+        let description: SharedString = if self.has_pending(&conn_id) {
+            format!(
+                "Every tab using this connection will be disconnected. \
+                 Uncommitted changes on {name} will be rolled back."
+            )
+            .into()
+        } else {
+            "Every tab using this connection will be disconnected."
+                .to_string()
+                .into()
+        };
+        let title: SharedString = format!("Disconnect from “{name}”?").into();
+        let view = cx.entity().downgrade();
+        self.note_dialog_open();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            alert
+                .icon(KitIcon::TriangleAlert)
+                .title(title.clone())
+                .description(description.clone())
+                // Return (the dialog's `Confirm` action) performs the disconnect
+                // too, so the default action matches the "Disconnect" button.
+                .on_ok({
+                    let conn_id = conn_id.clone();
+                    let view = view.clone();
+                    move |_, _, cx| {
+                        view.update(cx, |this, cx| {
+                            this.disconnect_connection(&conn_id, cx);
+                        })
+                        .ok();
+                        true
+                    }
+                })
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_center()
+                        .child(
+                            Button::new("disconnect-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("disconnect-confirm")
+                                .label("Disconnect")
+                                .danger()
+                                .on_click({
+                                    let conn_id = conn_id.clone();
+                                    let view = view.clone();
+                                    move |_, window, cx| {
+                                        window.close_dialog(cx);
+                                        view.update(cx, |this, cx| {
+                                            this.disconnect_connection(&conn_id, cx);
+                                        })
+                                        .ok();
+                                    }
+                                }),
+                        ),
+                )
+        });
     }
 }

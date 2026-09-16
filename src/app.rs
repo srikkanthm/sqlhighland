@@ -87,6 +87,7 @@ gpui_kit::actions!(
         GrowEditor,
         ShrinkEditor,
         DismissResults,
+        DisconnectTab,
         OpenSql,
         SaveSql,
         SaveSqlAs,
@@ -722,6 +723,15 @@ impl SqlHighlandView {
             alert
                 .title("Unsaved changes")
                 .description("Save changes to external SQL files before quitting?")
+                // Return (the dialog's `Confirm` action) is "Save and Quit", the
+                // primary action.
+                .on_ok({
+                    let view = view.clone();
+                    move |_, window, cx| {
+                        view.update(cx, |this, cx| this.save_all_and_quit(window, cx))
+                            .unwrap_or(false)
+                    }
+                })
                 .footer(
                     h_flex()
                         .gap_2()
@@ -743,39 +753,50 @@ impl SqlHighlandView {
                                 .on_click(move |_, window, cx| {
                                     save_view
                                         .update(cx, |this, cx| {
-                                            let mut failed = None;
-                                            for tab in &mut this.tabs {
-                                                if !tab.dirty {
-                                                    continue;
-                                                }
-                                                let Some(path) = tab.path.clone() else {
-                                                    continue;
-                                                };
-                                                let text = tab.editor.read(cx).value().to_string();
-                                                match filetab::write(&path, &text) {
-                                                    Ok(stamp) => {
-                                                        tab.file_stamp = Some(stamp);
-                                                        tab.dirty = false;
-                                                    }
-                                                    Err(err) => {
-                                                        failed = Some(err.to_string());
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            if let Some(err) = failed {
-                                                this.status = format!("Save failed: {err}").into();
-                                                cx.notify();
-                                            } else {
-                                                window.close_dialog(cx);
-                                                cx.quit();
-                                            }
+                                            this.save_all_and_quit(window, cx);
                                         })
                                         .ok();
                                 }),
                         ),
                 )
         });
+    }
+
+    /// Save every dirty external SQL file and quit. Returns `false` (leaving
+    /// the caller's confirm dialog open) when a save fails.
+    pub(crate) fn save_all_and_quit(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut failed: Option<String> = None;
+        for tab in &mut self.tabs {
+            if !tab.dirty {
+                continue;
+            }
+            let Some(path) = tab.path.clone() else {
+                continue;
+            };
+            let text = tab.editor.read(cx).value().to_string();
+            match filetab::write(&path, &text) {
+                Ok(stamp) => {
+                    tab.file_stamp = Some(stamp);
+                    tab.dirty = false;
+                }
+                Err(err) => {
+                    failed = Some(err.to_string());
+                    break;
+                }
+            }
+        }
+        if let Some(err) = failed {
+            self.status = format!("Save failed: {err}").into();
+            cx.notify();
+            return false;
+        }
+        window.close_dialog(cx);
+        cx.quit();
+        true
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -960,6 +981,10 @@ impl SqlHighlandView {
         // in the kit and macOS; context-free so it fires from the
         // editor, grid, and sidebar alike.
         cx.bind_keys([KeyBinding::new("cmd-j", DismissResults, None)]);
+        // Disconnect the active tab's connection (Shift+Cmd+D). Context-free
+        // so it fires from the editor, grid, and sidebar; dialogs sit outside
+        // the root and never see it. Confirmation is always shown.
+        cx.bind_keys([KeyBinding::new("cmd-shift-d", DisconnectTab, None)]);
         // Refresh the native menu now that every binding exists: AppKit
         // resolves key equivalents from the keymap snapshot at set_menus
         // time, and main.rs runs before these bindings are registered
