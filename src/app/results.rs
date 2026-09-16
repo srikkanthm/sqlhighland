@@ -5,6 +5,8 @@
 //! Split out of `app.rs`; the inherent impl is re-opened here so the
 //! view's behavior is unchanged (`impl` blocks may live in any module).
 
+use std::collections::BTreeSet;
+
 use gpui_kit::component::scroll::Scrollbar;
 
 use crate::sql::{SortDir, SortSpec};
@@ -32,6 +34,48 @@ pub(crate) fn to_shared(rows: Vec<Vec<Option<String>>>) -> Vec<Vec<Option<Shared
         .collect()
 }
 
+/// Format a grid selection as clipboard text from `rows` (data cells only,
+/// no row-number column, no header). `None` when nothing is selected or the
+/// result is empty. A single cell is its raw display value (NULL → empty);
+/// rows are CSV lines (delimiter honored); a column is one field per line.
+/// Grid data column indices are `col_ix - 1` (col 0 is the row number).
+fn selection_text(
+    selection: &GridSelection,
+    rows: &[Vec<Option<SharedString>>],
+    delim: char,
+) -> Option<String> {
+    match selection {
+        GridSelection::None => None,
+        GridSelection::Cell(row, col) => {
+            let ci = col.checked_sub(1)?;
+            rows.get(*row)
+                .and_then(|r| r.get(ci))
+                .map(|c| c.clone().unwrap_or_default().to_string())
+        }
+        GridSelection::Rows(sel) => {
+            let lines: Vec<String> = sel
+                .iter()
+                .filter_map(|&r| rows.get(r))
+                .map(|row| crate::model::csv_row_with(row.iter().map(|c| c.as_deref()), delim))
+                .collect();
+            (!lines.is_empty()).then(|| lines.join("\n"))
+        }
+        GridSelection::Column(col) => {
+            let ci = col.checked_sub(1)?;
+            let lines: Vec<String> = rows
+                .iter()
+                .map(|row| {
+                    crate::model::csv_field(
+                        row.get(ci).and_then(|c| c.as_deref()).unwrap_or(""),
+                        delim,
+                    )
+                })
+                .collect();
+            (!lines.is_empty()).then(|| lines.join("\n"))
+        }
+    }
+}
+
 /// Links one open server-side cursor to a tab's grid.
 pub(crate) struct FetchState {
     pub(crate) session: SharedSession,
@@ -49,14 +93,36 @@ pub(crate) struct FetchState {
     pub(crate) sortable: bool,
 }
 
+/// What's selected in the grid. One mode at a time: a single cell, a set of
+/// whole rows (left `#` column clicks, Shift ranges, or select-all), or a
+/// single whole column. The kit's own single-row/cell/column selection is
+/// bypassed for mouse input; this is the source of truth for highlighting and
+/// clipboard copy.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum GridSelection {
+    #[default]
+    None,
+    /// A single grid cell `(row, col)` in a data column (col >= 1).
+    Cell(usize, usize),
+    Rows(BTreeSet<usize>),
+    Column(usize),
+}
+
 /// Table delegate over the shared [`FetchState`] of a tab's latest query.
 pub(crate) struct ResultsDelegate {
     fetch: Option<Arc<FetchState>>,
+    selection: GridSelection,
+    /// Last clicked row: the anchor a Shift-click extends a range from.
+    anchor: Option<usize>,
 }
 
 impl ResultsDelegate {
     pub(crate) fn empty() -> Self {
-        Self { fetch: None }
+        Self {
+            fetch: None,
+            selection: GridSelection::None,
+            anchor: None,
+        }
     }
 
     pub(crate) fn set_fetch(&mut self, fetch: Option<Arc<FetchState>>) {
@@ -68,6 +134,101 @@ impl ResultsDelegate {
             Some(current) => Arc::ptr_eq(current, fetch),
             None => false,
         }
+    }
+
+    /// Clear the grid selection (run start, Escape, empty-area click).
+    pub(crate) fn clear_selection(&mut self) {
+        self.selection = GridSelection::None;
+        self.anchor = None;
+    }
+
+    /// Select a single cell (data-column click). Replaces any other selection.
+    pub(crate) fn click_cell(&mut self, row_ix: usize, col_ix: usize) {
+        // Data columns only (grid col >= 1; col 0 is the row number).
+        if col_ix < 1 {
+            return;
+        }
+        self.selection = GridSelection::Cell(row_ix, col_ix);
+        self.anchor = None;
+    }
+
+    /// Apply a left-`#`-column click. `secondary` (Cmd/Ctrl) toggles the row;
+    /// `shift` replaces the set with the range from the previous anchor;
+    /// otherwise the clicked row becomes the only selection. `row_count` bounds
+    /// a Shift range so it never selects past the fetched rows.
+    pub(crate) fn click_row(
+        &mut self,
+        row_ix: usize,
+        secondary: bool,
+        shift: bool,
+        row_count: usize,
+    ) {
+        if shift {
+            if let Some(anchor) = self.anchor {
+                let (lo, hi) = if anchor <= row_ix {
+                    (anchor, row_ix)
+                } else {
+                    (row_ix, anchor)
+                };
+                let hi = hi.min(row_count.saturating_sub(1));
+                self.selection = GridSelection::Rows((lo..=hi).collect());
+                return;
+            }
+        }
+        if secondary {
+            let mut rows = match std::mem::take(&mut self.selection) {
+                GridSelection::Rows(rows) => rows,
+                _ => BTreeSet::new(),
+            };
+            if !rows.insert(row_ix) {
+                rows.remove(&row_ix);
+            }
+            self.selection = if rows.is_empty() {
+                GridSelection::None
+            } else {
+                GridSelection::Rows(rows)
+            };
+        } else {
+            self.selection = GridSelection::Rows(BTreeSet::from([row_ix]));
+        }
+        self.anchor = Some(row_ix);
+    }
+
+    /// Select a whole column (header click).
+    pub(crate) fn select_column(&mut self, col_ix: usize) {
+        self.selection = GridSelection::Column(col_ix);
+        self.anchor = None;
+    }
+
+    /// Select every buffered row (Cmd+A). No extra pages are fetched.
+    pub(crate) fn select_all_rows(&mut self, row_count: usize) {
+        self.selection = if row_count == 0 {
+            GridSelection::None
+        } else {
+            GridSelection::Rows((0..row_count).collect())
+        };
+        self.anchor = None;
+    }
+
+    pub(crate) fn is_row_selected(&self, row_ix: usize) -> bool {
+        matches!(&self.selection, GridSelection::Rows(rows) if rows.contains(&row_ix))
+    }
+
+    /// A single cell is selected (data columns only).
+    pub(crate) fn is_cell_selected(&self, row_ix: usize, col_ix: usize) -> bool {
+        matches!(self.selection, GridSelection::Cell(r, c) if r == row_ix && c == col_ix)
+    }
+
+    /// Column selection covers data columns only (col 0 is the row number).
+    pub(crate) fn is_column_selected(&self, col_ix: usize) -> bool {
+        col_ix >= 1 && matches!(self.selection, GridSelection::Column(c) if c == col_ix)
+    }
+
+    /// Clipboard text for the current selection, or `None` when nothing is
+    /// selected. Rows are CSV lines joined by newlines (no header); a column is
+    /// one value per line. `delim` is the configured CSV delimiter.
+    pub(crate) fn copy_text(&self, delim: char) -> Option<String> {
+        self.with_data(|d| selection_text(&self.selection, &d.rows, delim), None)
     }
 
     pub(crate) fn with_data<R>(&self, f: impl FnOnce(&ResultData) -> R, default: R) -> R {
@@ -163,10 +324,51 @@ impl TableDelegate for ResultsDelegate {
             .paddings(compact_cell_pad())
     }
 
-    /// Header labels as native selectable text: drag-select a name and
-    /// Cmd+C copies it through the window selection layer — no special
-    /// column-copy mode. (Column-select mode is off at the table, so a
-    /// plain header click is inert instead of selecting the column.)
+    /// Row wrapper. The library's own row click (`row_selectable`) is off, so
+    /// its thin left row-header strip bubbles here: clicking the strip selects
+    /// the row (Shift extends a range, Cmd toggles), matching the old
+    /// single-row strip behavior extended to many. Clicks on data cells stop
+    /// propagation before they reach the row.
+    ///
+    /// The row-selection highlight is a single full-width band (an absolute
+    /// child behind the cells) rather than a per-cell tint: cells carry
+    /// horizontal padding, so per-cell backgrounds leave gaps and read as
+    /// separate column selections.
+    fn render_tr(
+        &mut self,
+        row_ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> Stateful<Div> {
+        let mut row = div().id(("row", row_ix));
+        let row_count = self.with_data(|d| d.rows.len(), 0);
+        if row_ix < row_count {
+            if self.is_row_selected(row_ix) {
+                let bg = cx.theme().tokens.table_active;
+                row = row.child(div().absolute().inset_0().bg(bg));
+            }
+            if let Some(f) = &self.fetch {
+                let view = f.view.clone();
+                let tab_id = f.tab_id.clone();
+                row = row.on_click(move |event, _window, cx: &mut App| {
+                    cx.stop_propagation();
+                    let m = event.modifiers();
+                    view.update(cx, |this, cx| {
+                        this.grid_row_click(&tab_id, row_ix, m.secondary(), m.shift, cx);
+                    })
+                    .ok();
+                });
+            }
+        }
+        row
+    }
+
+    /// Header cells: a single click selects the whole column (all fetched
+    /// values); a double click sorts it (Asc -> Desc -> clear), re-running the
+    /// query server-side. The kit's own header/sort path is bypassed (it cycles
+    /// descending-first), and header labels are no longer drag-selectable —
+    /// Cmd+C on the selected column replaces label copy. The `#` header (col 0)
+    /// is inert.
     fn render_th(
         &mut self,
         col_ix: usize,
@@ -174,46 +376,53 @@ impl TableDelegate for ResultsDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let name = self.column(col_ix, cx).name;
-        // Native sort affordance (data columns only): clicking cycles
-        // Asc -> Desc -> clear and re-runs the query server-side. The kit's
-        // own sort path is bypassed — it cycles descending-first.
+        if col_ix == 0 {
+            // Row-number header: right-aligned like its cells, not clickable.
+            return div()
+                .id(("col-th", col_ix))
+                .test_support()
+                .w_full()
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_end()
+                .child(div().truncate().child(name))
+                .into_any_element();
+        }
+        // Data header. `pos` is the 1-based select-list position used by the
+        // native ORDER BY (grid col 1 is data column 1).
+        let pos = col_ix;
         let (sortable, active, view, tab_id) = match &self.fetch {
-            Some(f) if col_ix > 0 => (f.sortable, f.sort, Some(f.view.clone()), f.tab_id.clone()),
-            _ => (false, None, None, String::new()),
+            Some(f) => (f.sortable, f.sort, Some(f.view.clone()), f.tab_id.clone()),
+            None => (false, None, None, String::new()),
         };
-        let indicator = active.filter(|s| s.col == col_ix).map(|s| s.dir);
+        let indicator = active.filter(|s| s.col == pos).map(|s| s.dir);
         let next = match active {
-            Some(s) if s.col == col_ix => match s.dir {
+            Some(s) if s.col == pos => match s.dir {
                 SortDir::Asc => Some(SortSpec {
-                    col: col_ix,
+                    col: pos,
                     dir: SortDir::Desc,
                 }),
                 SortDir::Desc => None,
             },
             _ => Some(SortSpec {
-                col: col_ix,
+                col: pos,
                 dir: SortDir::Asc,
             }),
         };
+        let col_selected = self.is_column_selected(col_ix);
         // `h_full + items_center`: the kit's header wrapper centers a
         // content-sized child, but a full-height one defeats it and the
         // label sticks to the top (visible once the grid density grows the
-        // rows). The row-number column's header hugs the same edge as its
-        // right-aligned body cells.
+        // rows).
         //
-        // The name gets a truncating text style so a long header ellipsizes
-        // (matching the body cells' `.truncate()`) instead of hard-clipping
-        // at the cell edge — `SelectableText` lays out at its natural width
-        // otherwise.
-        let mut label = h_flex().gap_1().items_center().child(
-            SelectableText::new(format!("col-th-{col_ix}"), name).text_style(
-                gpui_kit::TextStyleRefinement {
-                    white_space: Some(gpui_kit::WhiteSpace::Nowrap),
-                    text_overflow: Some(gpui_kit::TextOverflow::Truncate("…".into())),
-                    ..Default::default()
-                },
-            ),
-        );
+        // `min_w_0` + `.truncate()` on the label ellipsizes a long name
+        // (matching the body cells) instead of hard-clipping at the cell edge.
+        let mut label = h_flex()
+            .min_w_0()
+            .gap_1()
+            .items_center()
+            .child(div().min_w_0().truncate().child(name));
         if let Some(dir) = indicator {
             label = label.child(
                 Icon::new(match dir {
@@ -224,27 +433,34 @@ impl TableDelegate for ResultsDelegate {
             );
         }
         div()
-            .id(("col-sort", col_ix))
+            .id(("col-th", col_ix))
+            .test_support()
             .w_full()
             .h_full()
             .flex()
             .items_center()
-            .when(col_ix == 0, |this| this.justify_end())
+            .when(col_selected, |this| this.bg(cx.theme().tokens.table_active))
             .child(label)
-            .when(sortable, |this| {
+            .when_some(view, |this, view| {
                 this.cursor_pointer()
                     .on_click(move |event, _window, cx: &mut App| {
-                        // Double-click only (SQL Developer style): a single
-                        // click on the header stays inert.
-                        if event.click_count() != 2 {
-                            return;
-                        }
-                        if let Some(view) = view.clone() {
-                            view.update(cx, |this, cx| this.sort_column(&tab_id, next, cx))
-                                .ok();
+                        // The container's empty-area click must not clear a
+                        // selection we just made here.
+                        cx.stop_propagation();
+                        if event.click_count() == 2 {
+                            if sortable {
+                                view.update(cx, |this, cx| this.sort_column(&tab_id, next, cx))
+                                    .ok();
+                            }
+                        } else {
+                            view.update(cx, |this, cx| {
+                                this.grid_header_click(&tab_id, col_ix, cx);
+                            })
+                            .ok();
                         }
                     })
             })
+            .into_any_element()
     }
 
     fn render_td(
@@ -254,48 +470,78 @@ impl TableDelegate for ResultsDelegate {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        // Grid column 0 renders the 1-based row number, muted and
-        // right-aligned like SQL Developer; data columns shift by one.
-        // Every branch fills the (possibly tall) row and centers vertically.
-        if col_ix == 0 {
-            return div()
-                .w_full()
+        // Column and single-cell selection tint their cells here; row
+        // selection is a full-width band drawn by `render_tr`. The handler
+        // stops propagation so the kit's single-cell selection — and the
+        // container's empty-area clear — never fire for a cell click.
+        let selected = col_ix >= 1
+            && (self.is_column_selected(col_ix) || self.is_cell_selected(row_ix, col_ix));
+        let (view, tab_id) = match &self.fetch {
+            Some(f) => (Some(f.view.clone()), f.tab_id.clone()),
+            None => (None, String::new()),
+        };
+        let inner = if col_ix == 0 {
+            div()
                 .h_full()
                 .flex()
                 .items_center()
                 .justify_end()
                 .text_color(cx.theme().muted_foreground)
                 .child(format!("{}", row_ix + 1))
-                .into_any_element();
-        }
-        let cell = self.with_data(
-            |d| {
-                d.rows
-                    .get(row_ix)
-                    .and_then(|row| row.get(col_ix - 1))
-                    .cloned()
-                    .flatten()
-            },
-            None,
-        );
-        match cell {
-            // Single-line ellipsis: wrapping text forces tall rows and
-            // expensive multi-line layout per cell.
-            Some(text) => div()
-                .h_full()
-                .flex()
-                .items_center()
-                .truncate()
-                .child(text)
-                .into_any_element(),
-            None => div()
-                .h_full()
-                .flex()
-                .items_center()
-                .text_color(cx.theme().muted_foreground)
-                .child("NULL")
-                .into_any_element(),
-        }
+                .into_any_element()
+        } else {
+            let cell = self.with_data(
+                |d| {
+                    d.rows
+                        .get(row_ix)
+                        .and_then(|row| row.get(col_ix - 1))
+                        .cloned()
+                        .flatten()
+                },
+                None,
+            );
+            match cell {
+                // Single-line ellipsis: wrapping text forces tall rows and
+                // expensive multi-line layout per cell.
+                Some(text) => div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .truncate()
+                    .child(text)
+                    .into_any_element(),
+                None => div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("NULL")
+                    .into_any_element(),
+            }
+        };
+        // Data cells (col >= 1) select a single cell; the `#` (col 0) is inert
+        // (it just stops propagation). Rows are selected from the library's
+        // left strip (see `render_tr`).
+        div()
+            .id(format!("grid-cell:{row_ix}:{col_ix}"))
+            .test_support()
+            .w_full()
+            .h_full()
+            .when(selected, |this| this.bg(cx.theme().tokens.table_active))
+            .child(inner)
+            .when_some(view, |this, view| {
+                this.when(col_ix != 0, |this| this.cursor_pointer())
+                    .on_click(move |_event, _window, cx: &mut App| {
+                        cx.stop_propagation();
+                        if col_ix == 0 {
+                            return;
+                        }
+                        view.update(cx, |this, cx| {
+                            this.grid_cell_click(&tab_id, row_ix, col_ix, cx);
+                        })
+                        .ok();
+                    })
+            })
     }
 
     fn has_more(&self, _: &App) -> bool {
@@ -452,4 +698,139 @@ pub(crate) fn render_tab_table(
                 .with_size(gpui_kit::component::Size::Size(px(row_height as f32)))
                 .stripe(true),
         )
+}
+
+#[cfg(test)]
+mod selection_tests {
+    // Import explicitly: a `use super::*` glob would pull in GPUI's `test`
+    // macro (re-exported by `gpui_kit::*` under test-support) and shadow
+    // Rust's built-in `#[test]`.
+    use super::{selection_text, GridSelection, ResultsDelegate};
+    use gpui_kit::SharedString;
+    use std::collections::BTreeSet;
+
+    fn sample_rows() -> Vec<Vec<Option<SharedString>>> {
+        vec![
+            vec![Some("a".into()), Some("1".into())],
+            vec![Some("b".into()), None],
+            vec![Some("c".into()), Some("3".into())],
+        ]
+    }
+
+    #[test]
+    fn click_row_replaces_toggles_and_ranges() {
+        let mut d = ResultsDelegate::empty();
+        d.click_row(2, false, false, 5);
+        assert!(d.is_row_selected(2));
+        assert!(!d.is_row_selected(1));
+        // Cmd toggles rows on, then off.
+        d.click_row(0, true, false, 5);
+        assert!(d.is_row_selected(0) && d.is_row_selected(2));
+        d.click_row(2, true, false, 5);
+        assert!(d.is_row_selected(0) && !d.is_row_selected(2));
+        // Shift extends from the last-clicked anchor (2, set by the toggle).
+        d.click_row(3, false, true, 5);
+        assert!(d.is_row_selected(2) && d.is_row_selected(3));
+        assert!(!d.is_row_selected(1));
+        // The range is clamped to the fetched rows.
+        d.click_row(9, false, true, 5);
+        assert!(d.is_row_selected(4) && !d.is_row_selected(5));
+        // A plain click replaces the whole set.
+        d.click_row(1, false, false, 5);
+        assert!(d.is_row_selected(1) && !d.is_row_selected(0));
+    }
+
+    #[test]
+    fn select_all_and_clear() {
+        let mut d = ResultsDelegate::empty();
+        d.select_all_rows(3);
+        assert!((0..3).all(|r| d.is_row_selected(r)));
+        d.clear_selection();
+        assert!(!d.is_row_selected(0));
+        // Selecting all of an empty result is a no-op, not an empty set.
+        d.select_all_rows(0);
+        assert!(d.copy_text(',').is_none());
+    }
+
+    #[test]
+    fn column_selection_excludes_row_number() {
+        let mut d = ResultsDelegate::empty();
+        // Grid col 1 is the first data column.
+        d.select_column(1);
+        assert!(d.is_column_selected(1));
+        assert!(!d.is_column_selected(0), "col 0 is the row number");
+        // A row click leaves column mode.
+        d.click_row(1, false, false, 3);
+        assert!(!d.is_column_selected(1));
+        assert!(d.is_row_selected(1));
+    }
+
+    #[test]
+    fn cell_click_selects_only_that_cell() {
+        let mut d = ResultsDelegate::empty();
+        d.click_cell(1, 1);
+        assert!(d.is_cell_selected(1, 1));
+        assert!(!d.is_cell_selected(1, 2));
+        assert!(
+            !d.is_row_selected(1),
+            "a cell click must not select the row"
+        );
+        assert!(!d.is_column_selected(1));
+        // A cell click replaces a row selection.
+        d.click_row(0, false, false, 3);
+        d.click_cell(2, 2);
+        assert!(d.is_cell_selected(2, 2));
+        assert!(!d.is_row_selected(0));
+        // The row-number column (col 0) is not a cell target.
+        d.click_cell(1, 0);
+        assert!(d.is_cell_selected(2, 2));
+    }
+
+    #[test]
+    fn copy_text_rows_and_columns() {
+        let rows = sample_rows();
+        let sel = GridSelection::Rows(BTreeSet::from([0, 2]));
+        assert_eq!(
+            selection_text(&sel, &rows, ',').as_deref(),
+            Some("a,1\nc,3")
+        );
+        // The configured delimiter is honored.
+        assert_eq!(
+            selection_text(&sel, &rows, ';').as_deref(),
+            Some("a;1\nc;3")
+        );
+        // A column copies one value per line; NULL copies empty. Grid col 2 is
+        // the second data column.
+        let sel = GridSelection::Column(2);
+        assert_eq!(selection_text(&sel, &rows, ',').as_deref(), Some("1\n\n3"));
+        // A single cell copies its raw value (NULL -> empty, no quoting).
+        assert_eq!(
+            selection_text(&GridSelection::Cell(1, 1), &rows, ',').as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            selection_text(&GridSelection::Cell(1, 2), &rows, ',').as_deref(),
+            Some("")
+        );
+        // Nothing selected / empty result copies nothing.
+        assert_eq!(selection_text(&GridSelection::None, &rows, ','), None);
+        assert_eq!(
+            selection_text(&GridSelection::Rows(BTreeSet::from([0])), &[], ','),
+            None
+        );
+    }
+
+    #[test]
+    fn column_copy_quotes_embedded_delimiter() {
+        let rows = vec![
+            vec![Some("a,b".into())],
+            vec![Some("plain".into())],
+            vec![Some("line\nbreak".into())],
+        ];
+        let sel = GridSelection::Column(1);
+        assert_eq!(
+            selection_text(&sel, &rows, ',').as_deref(),
+            Some("\"a,b\"\nplain\n\"line\nbreak\"")
+        );
+    }
 }

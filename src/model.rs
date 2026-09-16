@@ -325,7 +325,9 @@ pub fn csv_row_with<'a>(cells: impl IntoIterator<Item = Option<&'a str>>, delim:
         .join(&sep)
 }
 
-fn csv_field(value: &str, delim: char) -> String {
+/// Quote one clipboard/CSV field when it contains the delimiter, a quote,
+/// a newline, or padded whitespace (RFC 4180-style).
+pub fn csv_field(value: &str, delim: char) -> String {
     if value.contains([delim, '"', '\n', '\r'])
         || value.starts_with([' ', '\t'])
         || value.ends_with([' ', '\t'])

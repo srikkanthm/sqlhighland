@@ -256,9 +256,9 @@ impl SqlHighlandView {
         // A new run also reopens a dismissed bottom pane.
         self.tabs[ix].hide_results = false;
         self.tabs[ix].fetch = None;
-        self.tabs[ix].copy_sel = None;
         self.tabs[ix].table.update(cx, |table, cx| {
             table.delegate_mut().set_fetch(None);
+            table.delegate_mut().clear_selection();
             table.clear_selection(cx);
             table.refresh(cx);
         });

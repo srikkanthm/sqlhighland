@@ -204,9 +204,9 @@ impl SqlHighlandView {
         // A new run also reopens a dismissed bottom pane.
         self.tabs[ix].hide_results = false;
         self.tabs[ix].fetch = None;
-        self.tabs[ix].copy_sel = None;
         self.tabs[ix].table.update(cx, |table, cx| {
             table.delegate_mut().set_fetch(None);
+            table.delegate_mut().clear_selection();
             table.clear_selection(cx);
             // Fresh results always start at the top-left; otherwise a re-run
             // keeps the previous scroll position (the user scrolled a few
@@ -374,10 +374,10 @@ impl SqlHighlandView {
                         this.tabs[ix].result_meta = describe_fetch(&fetch).into();
                         this.tabs[ix].has_result = true;
                         // Fresh data invalidates any selection: indices belong
-                        // to the old result. (Also emits ClearSelection, which
-                        // resets the copy tracker via the table subscription.)
+                        // to the old result.
                         this.tabs[ix].table.update(cx, |table, cx| {
                             table.delegate_mut().set_fetch(Some(fetch));
+                            table.delegate_mut().clear_selection();
                             table.clear_selection(cx);
                             table.scroll_to_row(0, cx);
                             table.scroll_to_col(0, cx);
@@ -424,6 +424,7 @@ impl SqlHighlandView {
                         this.tabs[ix].has_result = true;
                         this.tabs[ix].table.update(cx, |table, cx| {
                             table.delegate_mut().set_fetch(Some(fetch));
+                            table.delegate_mut().clear_selection();
                             table.clear_selection(cx);
                             table.scroll_to_row(0, cx);
                             table.scroll_to_col(0, cx);

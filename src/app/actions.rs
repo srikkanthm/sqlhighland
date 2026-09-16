@@ -175,39 +175,129 @@ impl SqlHighlandView {
             .unwrap_or_default()
     }
 
-    /// Copy the grid selection to the clipboard: the most recently selected
-    /// cell or row. Silent no-op with no selection.
+    /// Copy the grid selection to the clipboard. Precedence: any native text
+    /// selection (output pane / editor) wins; then the app-owned grid
+    /// selection (rows or a whole column, honoring the CSV delimiter); then
+    /// the kit's single cell/row as a keyboard-only fallback. Silent no-op
+    /// with no selection.
     pub(super) fn copy_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Native text selection wins wherever it exists (grid header
-        // labels, output-pane message): grid cell/row copy below is the
-        // fallback when nothing is selected as text. Editor inputs match
-        // neither copy context, so native copy there is untouched.
+        // Native text selection wins wherever it exists (output-pane message,
+        // editor inputs): grid copy below is the fallback when nothing is
+        // selected as text.
         let selected = gpui_kit::base::TextSelection::selected_text(window, cx);
         if !selected.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(selected));
             return;
         }
+        let delim = crate::export::csv_delim(&Preferences::load().csv_delimiter);
         let tab = self.active_tab();
         let text = {
             let table = tab.table.read(cx);
             let delegate = table.delegate();
-            let cell = || {
-                table
-                    .selected_cell()
-                    .and_then(|(r, c)| delegate.cell_text(r, c))
-                    .map(|s| s.to_string())
-            };
-            let row = || table.selected_row().and_then(|r| delegate.row_csv(r));
-            match tab.copy_sel {
-                Some(CopySel::Cell) => cell(),
-                Some(CopySel::Row) => row(),
-                // Untracked (e.g. programmatic) selection: prefer cell, then row.
-                None => cell().or_else(row),
-            }
+            delegate.copy_text(delim).or_else(|| {
+                let cell = || {
+                    table
+                        .selected_cell()
+                        .and_then(|(r, c)| delegate.cell_text(r, c))
+                        .map(|s| s.to_string())
+                };
+                let row = || table.selected_row().and_then(|r| delegate.row_csv(r));
+                // Keyboard-only selection (mouse input drives the app-owned
+                // selection above).
+                cell().or_else(row)
+            })
         };
         if let Some(text) = text {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
+    }
+
+    /// Select a single cell (data-column click).
+    pub(crate) fn grid_cell_click(
+        &mut self,
+        tab_id: &str,
+        row_ix: usize,
+        col_ix: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.tab_index(tab_id) else {
+            return;
+        };
+        self.tabs[ix].table.update(cx, |table, cx| {
+            // Drop the kit's stale single-cell/row outline first so only the
+            // app-owned highlight shows.
+            table.clear_selection(cx);
+            table.delegate_mut().click_cell(row_ix, col_ix);
+            cx.notify();
+        });
+    }
+
+    /// Select one row from a click on the left `#` anchor column (Cmd toggles,
+    /// Shift extends a range from the anchor).
+    pub(crate) fn grid_row_click(
+        &mut self,
+        tab_id: &str,
+        row_ix: usize,
+        secondary: bool,
+        shift: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.tab_index(tab_id) else {
+            return;
+        };
+        let row_count = self.tabs[ix].table.read(cx).delegate().rows_count(cx);
+        self.tabs[ix].table.update(cx, |table, cx| {
+            // Drop the kit's stale single-cell/row outline first so only the
+            // app-owned highlight shows.
+            table.clear_selection(cx);
+            table
+                .delegate_mut()
+                .click_row(row_ix, secondary, shift, row_count);
+            cx.notify();
+        });
+    }
+
+    /// Select a whole column from a header click (all fetched values).
+    pub(crate) fn grid_header_click(
+        &mut self,
+        tab_id: &str,
+        col_ix: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.tab_index(tab_id) else {
+            return;
+        };
+        self.tabs[ix].table.update(cx, |table, cx| {
+            table.clear_selection(cx);
+            table.delegate_mut().select_column(col_ix);
+            cx.notify();
+        });
+    }
+
+    /// Select every buffered row (Cmd+A). Never fetches more pages.
+    pub(crate) fn select_all_rows(&mut self, cx: &mut Context<Self>) {
+        let tab_id = self.active_tab().id.clone();
+        let Some(ix) = self.tab_index(&tab_id) else {
+            return;
+        };
+        let row_count = self.tabs[ix].table.read(cx).delegate().rows_count(cx);
+        self.tabs[ix].table.update(cx, |table, cx| {
+            table.clear_selection(cx);
+            table.delegate_mut().select_all_rows(row_count);
+            cx.notify();
+        });
+    }
+
+    /// Clear the grid selection (empty-area click).
+    pub(crate) fn clear_grid_selection(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        let Some(ix) = self.tab_index(tab_id) else {
+            return;
+        };
+        self.tabs[ix].table.update(cx, |table, cx| {
+            table.delegate_mut().clear_selection();
+            table.clear_selection(cx);
+            cx.notify();
+        });
     }
 
     /// Dismiss the bottom pane (output or grid): show only the query

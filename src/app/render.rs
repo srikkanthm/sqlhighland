@@ -635,6 +635,8 @@ impl SqlHighlandView {
         } else {
             let view = cx.entity().downgrade();
             let tab_id = tab.id.clone();
+            let clear_view = view.clone();
+            let clear_tab = tab_id.clone();
             // "Count rows" only makes sense for a settled, wrapable query
             // result (not DESCRIBE / object viewers).
             let can_count = tab.has_result
@@ -650,11 +652,21 @@ impl SqlHighlandView {
                 .overflow_hidden()
                 .child(
                     div()
+                        .id("grid-area")
                         .flex_1()
                         .min_w_0()
                         .min_h_0()
                         .overflow_hidden()
                         .p(px(d.pane_pad))
+                        // Click on the grid background (not a cell/header —
+                        // those stop propagation) clears the selection.
+                        .on_click(move |_, _, cx: &mut App| {
+                            clear_view
+                                .update(cx, |this, cx| {
+                                    this.clear_grid_selection(&clear_tab, cx);
+                                })
+                                .ok();
+                        })
                         .context_menu(move |menu, _, _| {
                             let mut menu = menu;
                             if can_count {
@@ -1128,6 +1140,9 @@ impl SqlHighlandView {
             })
             .on_action(cx.listener(|this, _: &CopySelection, window, cx| {
                 this.copy_selection(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectAllRows, _, cx| {
+                this.select_all_rows(cx);
             }))
             .on_action(cx.listener(|this, _: &NextTab, window, cx| {
                 this.cycle_tab(1, window, cx);

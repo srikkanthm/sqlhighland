@@ -102,40 +102,27 @@ impl SqlHighlandView {
         let table = cx.new(|cx| {
             TableState::new(ResultsDelegate::empty(), window, cx)
                 .cell_selectable(true)
-                // No column-select mode: header clicks must not select
-                // whole columns — header labels are plain text, copied
-                // with a normal drag-select + Cmd+C (see render_th).
+                // Column selection is driven by the app (grid_header_click),
+                // not the kit; header labels are plain text (see render_th).
                 .col_selectable(false)
+                // Row selection is driven by the app from the library's left
+                // row-header strip (see ResultsDelegate::render_tr), so the
+                // kit's own single-row selection stays out of the way.
+                .row_selectable(false)
         });
         let tab_id = id.clone();
-        let table_tab_id = id.clone();
-        let subs = vec![
-            cx.subscribe_in(&editor, window, move |this, _, ev: &InputEvent, _, cx| {
-                if matches!(ev, InputEvent::Change) {
-                    if let Some(tab) = this.tab_by_id(&tab_id) {
-                        tab.dirty = true;
+        let subs =
+            vec![
+                cx.subscribe_in(&editor, window, move |this, _, ev: &InputEvent, _, cx| {
+                    if matches!(ev, InputEvent::Change) {
+                        if let Some(tab) = this.tab_by_id(&tab_id) {
+                            tab.dirty = true;
+                        }
+                        this.schedule_draft_save(&tab_id, cx);
+                        this.schedule_diagnostics(&tab_id, cx);
                     }
-                    this.schedule_draft_save(&tab_id, cx);
-                    this.schedule_diagnostics(&tab_id, cx);
-                }
-            }),
-            cx.subscribe_in(&table, window, move |this, _, ev: &TableEvent, _, _| {
-                let Some(tab) = this.tab_by_id(&table_tab_id) else {
-                    return;
-                };
-                match ev {
-                    TableEvent::SelectCell(..) => tab.copy_sel = Some(CopySel::Cell),
-                    TableEvent::SelectRow(..) => tab.copy_sel = Some(CopySel::Row),
-                    // Column-select mode is off at the table, so header
-                    // clicks never reach here; keyboard column nav still
-                    // can — it clears, as before.
-                    TableEvent::ClearSelection | TableEvent::SelectColumn(..) => {
-                        tab.copy_sel = None;
-                    }
-                    _ => {}
-                }
-            }),
-        ];
+                }),
+            ];
         self.tabs.push(QueryTab {
             id,
             name: name.into(),
@@ -155,7 +142,6 @@ impl SqlHighlandView {
             run_token: 0,
             run_started: None,
             pending_txn: false,
-            copy_sel: None,
             hide_results: false,
             output_text: cx.new(|cx| TextareaState::new(window, cx)),
             last_sql: String::new(),

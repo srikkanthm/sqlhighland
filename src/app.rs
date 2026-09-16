@@ -35,7 +35,6 @@ use crate::run::file_stem;
 use crate::schema::{DbEngine, OracleProvider, SchemaProvider as _};
 use crate::session::{lock, SessionPool};
 use crate::sql::{format_sql, line_at, parse_at_directive, statement_at, statement_at_range};
-use gpui_kit::base::SelectableText;
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{
@@ -50,7 +49,7 @@ use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::select::{SelectEvent, SelectState};
 use gpui_kit::component::slider::{SliderEvent, SliderState, SliderValue};
 use gpui_kit::component::tab::{Tab, TabBar, TabVariant};
-use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
+use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableState};
 use gpui_kit::component::tree::{tree, TreeState};
 use gpui_kit::component::Size;
 use gpui_kit::component::*;
@@ -66,6 +65,7 @@ gpui_kit::actions!(
     [
         RunQuery,
         CopySelection,
+        SelectAllRows,
         FormatQuery,
         CommitTxn,
         RollbackTxn,
@@ -116,15 +116,6 @@ pub(crate) use results::{
 enum WorkOutcome {
     Connected,
     Failed(String),
-}
-
-/// Which selection the user made most recently. The kit keeps
-/// `selected_cell` and `selected_row` independently (neither clears the
-/// other), so recency — not field presence — decides what Cmd+C copies.
-#[derive(Clone, Copy)]
-pub(crate) enum CopySel {
-    Cell,
-    Row,
 }
 
 #[derive(Clone, Copy)]
@@ -238,8 +229,6 @@ pub(crate) struct QueryTab {
     /// session-scoped, so commit/rollback clears this for every tab sharing
     /// the connection. The driver never autocommits.
     pub(crate) pending_txn: bool,
-    /// Most recent selection kind. See [`CopySel`].
-    pub(crate) copy_sel: Option<CopySel>,
     /// Dismissed bottom pane: Dismiss (output pane) or the grid's close
     /// button hides everything below the editor — Dismiss means show
     /// only the query window. Cleared by every new run.
@@ -923,6 +912,9 @@ impl SqlHighlandView {
         // cmd-alt-up/down are multi-cursor).
         cx.bind_keys([KeyBinding::new("cmd-enter", RunQuery, Some("Input"))]);
         cx.bind_keys([KeyBinding::new("cmd-c", CopySelection, Some("DataTable"))]);
+        // Select every buffered grid row (never fetches more pages). Grid
+        // scope keeps the editor's own Cmd+A text selection untouched.
+        cx.bind_keys([KeyBinding::new("cmd-a", SelectAllRows, Some("DataTable"))]);
         cx.bind_keys([KeyBinding::new("shift-alt-f", FormatQuery, Some("Input"))]);
         cx.bind_keys([KeyBinding::new("cmd-shift-c", CommitTxn, Some("Input"))]);
         cx.bind_keys([KeyBinding::new("cmd-shift-r", RollbackTxn, Some("Input"))]);
