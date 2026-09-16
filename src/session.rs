@@ -73,6 +73,14 @@ impl SessionPool {
         self.cancel_tokens.get(connection_id).cloned()
     }
 
+    /// Test hook: install a session for a connection directly, so headless
+    /// tests can inject a fake `DbClient` and exercise commit/rollback paths
+    /// without a database.
+    #[cfg(feature = "gui-test")]
+    pub fn debug_insert_session(&mut self, connection_id: &str, session: SharedSession) {
+        self.sessions.insert(connection_id.to_string(), session);
+    }
+
     /// Drop a connection's session, disconnecting first. Never blocks: if a
     /// query holds the session lock (e.g. disconnect clicked mid-run), the
     /// entry is dropped and the worker's own Arc keeps its session alive

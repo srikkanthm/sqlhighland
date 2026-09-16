@@ -201,10 +201,9 @@ impl SqlHighlandView {
                             this.tabs[this.active].result_meta =
                                 (if commit { "Committed" } else { "Rolled back" }).into();
                         }
-                        // The tab close happens outside this lease (it
-                        // needs a window); see below.
-                        TxnAfter::CloseTab(_) => {}
-                        TxnAfter::Quit => cx.quit(),
+                        // Closing the tab and continuing the quit both need a
+                        // window, so they run outside this lease; see below.
+                        TxnAfter::CloseTab(_) | TxnAfter::Quit => {}
                     }
                 } else {
                     let msg = batch
@@ -222,20 +221,35 @@ impl SqlHighlandView {
             })
             .ok();
 
-            // Closing needs a window, so it runs as its own app update (the
-            // view lease above is released by now). A failed commit/rollback
-            // yields no follow-up, keeping the tab open so the user can retry
+            // The tab close and the rest of the quit both need a window, so
+            // they run as their own app update (the view lease above is
+            // released by now). A failed commit/rollback yields no follow-up,
+            // leaving the tab open (or the quit aborted) so the user can retry
             // instead of losing the unsaved transaction.
-            if let Some(TxnAfter::CloseTab(tab_id)) = follow_up {
-                cx.update(|app| {
-                    let handles = app.windows();
-                    if let Some(handle) = handles.into_iter().next() {
-                        let _ = handle.update(app, |_, window, cx| {
-                            let _ =
-                                view.update(cx, |this, cx| this.close_tab_now(&tab_id, window, cx));
-                        });
-                    }
-                });
+            match follow_up {
+                Some(TxnAfter::CloseTab(tab_id)) => {
+                    cx.update(|app| {
+                        let handles = app.windows();
+                        if let Some(handle) = handles.into_iter().next() {
+                            let _ = handle.update(app, |_, window, cx| {
+                                let _ = view
+                                    .update(cx, |this, cx| this.close_tab_now(&tab_id, window, cx));
+                            });
+                        }
+                    });
+                }
+                Some(TxnAfter::Quit) => {
+                    cx.update(|app| {
+                        let handles = app.windows();
+                        if let Some(handle) = handles.into_iter().next() {
+                            let _ = handle.update(app, |_, window, cx| {
+                                let _ =
+                                    view.update(cx, |this, cx| this.quit_files_guard(window, cx));
+                            });
+                        }
+                    });
+                }
+                _ => {}
             }
         })
         .detach();

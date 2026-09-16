@@ -30,7 +30,13 @@ fn main() {
     // AllAssets embeds the complete Lucide catalog. The default `Assets`
     // bundle only covers a subset, which leaves icons like Database/Plug
     // rendering blank. `AppAssets` layers our own icon on top.
-    let app = gpui_kit::application().with_assets(AppAssets);
+    //
+    // LastWindowClosed makes the red close button quit the single-window app
+    // (macOS defaults to Explicit, which would leave it running windowless).
+    // The view's `on_window_should_close` guard runs first.
+    let app = gpui_kit::application()
+        .with_assets(AppAssets)
+        .with_quit_mode(QuitMode::LastWindowClosed);
 
     app.run(move |cx| {
         // This must be called before using any GPUI Component features.

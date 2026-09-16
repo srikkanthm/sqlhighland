@@ -122,6 +122,11 @@ path = "tests/tab_nav.rs"
 required-features = ["gui-test"]
 
 [[test]]
+name = "quit_guard"
+path = "tests/quit_guard.rs"
+required-features = ["gui-test"]
+
+[[test]]
 name = "sql_diagnostics"
 path = "tests/sql_diagnostics.rs"
 required-features = ["gui-test"]

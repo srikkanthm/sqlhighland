@@ -2,8 +2,9 @@
 //!
 //! Model: one live Oracle session per saved connection (see `session.rs`),
 //! shared by tabs. Each tab binds to a connection it can switch, and owns
-//! its editor, grid, and run state. Editor drafts auto-save (debounced) and
-//! tabs restore on launch.
+//! its editor, grid, and run state. In-memory editor drafts auto-save
+//! (debounced); external SQL files are saved explicitly and guarded on
+//! close/quit. Tabs restore on launch.
 //!
 //! Blocking Oracle calls run on the background executor; the view is only
 //! ever mutated on the UI thread.
@@ -204,7 +205,8 @@ pub(crate) enum TxnAfter {
     None,
     /// Close this tab (the close-with-uncommitted guard).
     CloseTab(String),
-    /// Quit the app (the quit-with-uncommitted guard).
+    /// Continue the quit sequence (the quit-with-uncommitted guard): once the
+    /// transactions settle, the unsaved-file stage runs and then the app quits.
     Quit,
 }
 
@@ -722,108 +724,16 @@ impl SqlHighlandView {
     }
 
     pub fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let dirty = self.tabs.iter().any(|tab| tab.dirty && tab.path.is_some());
-        if !dirty {
-            self.quit_guard(window, cx);
+        if !self.quit_needs_guard() {
+            cx.quit();
             return;
         }
-        let view = cx.entity().downgrade();
-        self.note_dialog_open();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let save_view = view.clone();
-            let discard_view = view.clone();
-            alert
-                .title("Unsaved changes")
-                .description("Save changes to external SQL files before quitting?")
-                // Return (the dialog's `Confirm` action) saves then continues;
-                // the dialog stays open if a save fails.
-                .on_ok({
-                    let view = view.clone();
-                    move |_, window, cx| {
-                        if !view
-                            .update(cx, |this, cx| this.save_all_dirty(cx))
-                            .unwrap_or(false)
-                        {
-                            return false;
-                        }
-                        window.close_dialog(cx);
-                        view.update(cx, |this, cx| this.quit_guard(window, cx)).ok();
-                        false
-                    }
-                })
-                .footer(
-                    h_flex()
-                        .gap_2()
-                        .justify_center()
-                        .child(
-                            Button::new("quit-cancel")
-                                .label("Cancel")
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(Button::new("quit-discard").label("Discard").on_click(
-                            move |_, window, cx| {
-                                window.close_dialog(cx);
-                                discard_view
-                                    .update(cx, |this, cx| this.quit_guard(window, cx))
-                                    .ok();
-                            },
-                        ))
-                        .child(
-                            Button::new("quit-save")
-                                .primary()
-                                .label("Save and Quit")
-                                .on_click(move |_, window, cx| {
-                                    if !save_view
-                                        .update(cx, |this, cx| this.save_all_dirty(cx))
-                                        .unwrap_or(false)
-                                    {
-                                        return;
-                                    }
-                                    window.close_dialog(cx);
-                                    save_view
-                                        .update(cx, |this, cx| this.quit_guard(window, cx))
-                                        .ok();
-                                }),
-                        ),
-                )
-        });
+        self.begin_quit_guard(window, cx);
     }
 
-    /// Save every dirty external SQL file. Returns `false` (leaving the caller's
-    /// dialog open) when a save fails.
-    pub(crate) fn save_all_dirty(&mut self, cx: &mut Context<Self>) -> bool {
-        let mut failed: Option<String> = None;
-        for tab in &mut self.tabs {
-            if !tab.dirty {
-                continue;
-            }
-            let Some(path) = tab.path.clone() else {
-                continue;
-            };
-            let text = tab.editor.read(cx).value().to_string();
-            match filetab::write(&path, &text) {
-                Ok(stamp) => {
-                    tab.file_stamp = Some(stamp);
-                    tab.dirty = false;
-                }
-                Err(err) => {
-                    failed = Some(err.to_string());
-                    break;
-                }
-            }
-        }
-        if let Some(err) = failed {
-            self.status = format!("Save failed: {err}").into();
-            cx.notify();
-            return false;
-        }
-        true
-    }
-
-    /// Guard the quit: if any live connection has uncommitted work, ask to commit
-    /// all or roll all back first (Return is a no-op; Escape cancels). Quits only
-    /// after the transactions settle.
-    fn quit_guard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Live connections with uncommitted work, deduped in first-seen order.
+    /// Transactions are session-scoped, so one id covers every tab sharing it.
+    fn pending_live_conns(&self) -> Vec<String> {
         let mut conn_ids: Vec<String> = Vec::new();
         for tab in &self.tabs {
             if let Some(id) = &tab.connection_id {
@@ -832,8 +742,24 @@ impl SqlHighlandView {
                 }
             }
         }
+        conn_ids
+    }
+
+    /// True when quitting (or closing the window) has something to guard:
+    /// uncommitted transactions or unsaved external SQL files. In-memory tabs
+    /// (no path) are auto-saved drafts and never guard.
+    fn quit_needs_guard(&self) -> bool {
+        let dirty_file = self.tabs.iter().any(|tab| tab.dirty && tab.path.is_some());
+        dirty_file || !self.pending_live_conns().is_empty()
+    }
+
+    /// First quit stage: if any live connection has uncommitted work, ask to
+    /// commit all or roll all back (Return is a no-op; Escape cancels). Once
+    /// the transactions settle the unsaved-file stage runs.
+    fn begin_quit_guard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let conn_ids = self.pending_live_conns();
         if conn_ids.is_empty() {
-            cx.quit();
+            self.quit_files_guard(window, cx);
             return;
         }
         let names: Vec<String> = conn_ids
@@ -873,7 +799,7 @@ impl SqlHighlandView {
                         )
                         .child(
                             Button::new("quit-txn-rollback")
-                                .label("Roll Back All and Quit")
+                                .label("Roll Back All")
                                 .danger()
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);
@@ -892,7 +818,7 @@ impl SqlHighlandView {
                         .child(
                             Button::new("quit-txn-commit")
                                 .primary()
-                                .label("Commit All and Quit")
+                                .label("Commit All")
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);
                                     commit_view
@@ -909,6 +835,104 @@ impl SqlHighlandView {
                         ),
                 )
         });
+    }
+
+    /// Second quit stage: the transactions have settled (or there were none),
+    /// so prompt to save dirty external SQL files before quitting. In-memory
+    /// tabs are auto-saved drafts and never prompt.
+    fn quit_files_guard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dirty = self.tabs.iter().any(|tab| tab.dirty && tab.path.is_some());
+        if !dirty {
+            cx.quit();
+            return;
+        }
+        let view = cx.entity().downgrade();
+        self.note_dialog_open();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let save_view = view.clone();
+            let discard_view = view.clone();
+            alert
+                .title("Unsaved changes")
+                .description("Save changes to external SQL files before quitting?")
+                // Return (the dialog's `Confirm` action) saves then quits;
+                // the dialog stays open if a save fails.
+                .on_ok({
+                    let view = view.clone();
+                    move |_, window, cx| {
+                        if !view
+                            .update(cx, |this, cx| this.save_all_dirty(cx))
+                            .unwrap_or(false)
+                        {
+                            return false;
+                        }
+                        window.close_dialog(cx);
+                        view.update(cx, |_, cx| cx.quit()).ok();
+                        false
+                    }
+                })
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_center()
+                        .child(
+                            Button::new("quit-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(Button::new("quit-discard").label("Discard").on_click(
+                            move |_, window, cx| {
+                                window.close_dialog(cx);
+                                discard_view.update(cx, |_, cx| cx.quit()).ok();
+                            },
+                        ))
+                        .child(
+                            Button::new("quit-save")
+                                .primary()
+                                .label("Save and Quit")
+                                .on_click(move |_, window, cx| {
+                                    if !save_view
+                                        .update(cx, |this, cx| this.save_all_dirty(cx))
+                                        .unwrap_or(false)
+                                    {
+                                        return;
+                                    }
+                                    window.close_dialog(cx);
+                                    save_view.update(cx, |_, cx| cx.quit()).ok();
+                                }),
+                        ),
+                )
+        });
+    }
+
+    /// Save every dirty external SQL file. Returns `false` (leaving the caller's
+    /// dialog open) when a save fails.
+    pub(crate) fn save_all_dirty(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut failed: Option<String> = None;
+        for tab in &mut self.tabs {
+            if !tab.dirty {
+                continue;
+            }
+            let Some(path) = tab.path.clone() else {
+                continue;
+            };
+            let text = tab.editor.read(cx).value().to_string();
+            match filetab::write(&path, &text) {
+                Ok(stamp) => {
+                    tab.file_stamp = Some(stamp);
+                    tab.dirty = false;
+                }
+                Err(err) => {
+                    failed = Some(err.to_string());
+                    break;
+                }
+            }
+        }
+        if let Some(err) = failed {
+            self.status = format!("Save failed: {err}").into();
+            cx.notify();
+            return false;
+        }
+        true
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -1500,6 +1524,32 @@ impl SqlHighlandView {
         if let Some(tab) = this.tabs.get(this.active) {
             let editor = tab.editor.clone();
             editor.update(cx, |editor, cx| editor.focus(window, cx));
+        }
+        // Guard the native window close (red traffic light) through the same
+        // flow as Cmd+Q / menu Quit, so unsaved external files and uncommitted
+        // transactions are handled before the window is allowed to close.
+        // Registered here (not in main.rs) so the guard travels with the view
+        // and headless tests exercise it. With `QuitMode::LastWindowClosed`
+        // set in main.rs, allowing the close also quits the single-window app.
+        {
+            let view = cx.entity().downgrade();
+            window.on_window_should_close(cx, move |window, cx| {
+                // A modal is already up (another dialog, or a guard that is
+                // already running): keep the window open instead of stacking.
+                if window.has_active_dialog(cx) {
+                    return false;
+                }
+                let guard = view
+                    .update(cx, |this, _| this.quit_needs_guard())
+                    .unwrap_or(false);
+                if guard {
+                    view.update(cx, |this, cx| this.begin_quit_guard(window, cx))
+                        .ok();
+                    false
+                } else {
+                    true
+                }
+            });
         }
         this
     }

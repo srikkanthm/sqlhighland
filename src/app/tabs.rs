@@ -932,30 +932,31 @@ impl SqlHighlandView {
         .detach();
     }
 
-    /// Debounced draft flush: replaces any pending save for the tab.
+    /// Debounced draft flush: replaces any pending flush for the tab.
+    ///
+    /// Only in-memory tabs auto-save (a recovery draft under `tabs/`).
+    /// External SQL files are saved explicitly (Save / Save As); an edit
+    /// leaves them dirty so close/quit can guard them. Auto-writing the file
+    /// here would both surprise the user and make the guard see it as clean.
     pub(super) fn schedule_draft_save(&mut self, tab_id: &str, cx: &mut Context<Self>) {
         let Some(ix) = self.tab_index(tab_id) else {
             return;
         };
-        let text = self.tabs[ix].editor.read(cx).value().to_string();
         self.tabs[ix].save_task = None; // drop cancels the pending flush
 
+        if self.tabs[ix].path.is_some() {
+            return;
+        }
+
+        let text = self.tabs[ix].editor.read(cx).value().to_string();
         let bg = cx.background_executor().clone();
         let save_id = self.tabs[ix].id.clone();
         let write_id = save_id.clone();
-        let path = self.tabs[ix].path.clone();
         let task = cx.spawn(async move |view, cx| {
             bg.timer(DRAFT_DEBOUNCE).await;
             let outcome = bg
                 .spawn(async move {
-                    match path {
-                        Some(path) => filetab::write(&path, &text)
-                            .map(Some)
-                            .map_err(|e| e.to_string()),
-                        None => TabsManifest::write_draft(&write_id, &text)
-                            .map(|_| None)
-                            .map_err(|e| e.to_string()),
-                    }
+                    TabsManifest::write_draft(&write_id, &text).map_err(|e| e.to_string())
                 })
                 .await;
             view.update(cx, |this, cx| {
@@ -963,11 +964,8 @@ impl SqlHighlandView {
                     return; // Tab closed while waiting; draft already removed.
                 };
                 match outcome {
-                    Ok(stamp) => {
+                    Ok(()) => {
                         tab.dirty = false;
-                        if let Some(stamp) = stamp {
-                            tab.file_stamp = Some(stamp);
-                        }
                         this.persist_tabs(cx);
                     }
                     Err(msg) => {
@@ -1081,6 +1079,61 @@ impl SqlHighlandView {
             .diagnostics()
             .map(|set| set.len())
             .unwrap_or(0)
+    }
+
+    /// Test hook: make the active tab a dirty external SQL file (guards on
+    /// quit). The path need not exist — the guard only checks that there is
+    /// one and that the tab is dirty.
+    #[cfg(feature = "gui-test")]
+    pub fn debug_mark_file_dirty(&mut self, path: std::path::PathBuf) {
+        let tab = &mut self.tabs[self.active];
+        tab.path = Some(path);
+        tab.dirty = true;
+    }
+
+    /// Test hook: make the active tab a dirty in-memory tab (auto-saved draft,
+    /// must NOT guard on quit).
+    #[cfg(feature = "gui-test")]
+    pub fn debug_mark_memory_dirty(&mut self) {
+        let tab = &mut self.tabs[self.active];
+        tab.path = None;
+        tab.dirty = true;
+    }
+
+    /// Test hook: bind the active tab to a live connection with uncommitted
+    /// work (guards on quit).
+    #[cfg(feature = "gui-test")]
+    pub fn debug_mark_pending_txn(&mut self, conn_id: &str) {
+        let tab = &mut self.tabs[self.active];
+        tab.connection_id = Some(conn_id.to_string());
+        tab.pending_txn = true;
+        self.live.insert(conn_id.to_string());
+    }
+
+    /// Test hook: true when a quit/window-close would run a guard.
+    #[cfg(feature = "gui-test")]
+    pub fn debug_quit_needs_guard(&self) -> bool {
+        self.quit_needs_guard()
+    }
+
+    /// Test hook: install a session directly (fake `DbClient`), so the
+    /// commit/rollback paths can run without a database.
+    #[cfg(feature = "gui-test")]
+    pub fn debug_insert_session(&mut self, conn_id: &str, session: crate::db::SharedSession) {
+        self.pool.debug_insert_session(conn_id, session);
+    }
+
+    /// Test hook: drive the debounced draft flush for the active tab.
+    #[cfg(feature = "gui-test")]
+    pub fn debug_schedule_draft_save(&mut self, cx: &mut Context<Self>) {
+        let tab_id = self.active_tab().id.clone();
+        self.schedule_draft_save(&tab_id, cx);
+    }
+
+    /// Test hook: whether the active tab is dirty.
+    #[cfg(feature = "gui-test")]
+    pub fn debug_active_dirty(&self) -> bool {
+        self.active_tab().dirty
     }
 }
 
