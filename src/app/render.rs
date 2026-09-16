@@ -569,36 +569,9 @@ impl SqlHighlandView {
                         )
                     })
                     .when(minimal, |this| this.child(self.render_toolbar_more(cx)))
-                    // Toolbar Cancel is for user-initiated runs/scripts and
-                    // exports. A native-sort re-run clears `run_kind` (and
-                    // cancelling is offered in the status bar), so it stays
-                    // hidden here instead of flashing on every header sort.
-                    .when(
-                        (tab.busy && tab.run_kind.is_some()) || tab.exporting,
-                        |this| {
-                        let tab_id = tab.id.clone();
-                        let exporting = tab.exporting;
-                        let tip = if exporting {
-                            "Stop the export — the partial file is discarded"
-                        } else {
-                            "Stop waiting — the server finishes in the background and its results are discarded"
-                        };
-                        this.child(
-                            Button::new("cancel-run")
-                                .danger()
-                                .with_size(d.button_size)
-                                .icon(KitIcon::X)
-                                .tooltip(tip)
-                                .when(!compact, |b| b.w(px(d.action_button_w)).label("Cancel"))
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                    if exporting {
-                                        this.cancel_export(&tab_id, cx);
-                                    } else {
-                                        this.cancel_run(&tab_id, cx);
-                                    }
-                                })),
-                        )
-                    })
+                    // Cancel lives in the status bar while a run/export is in
+                    // flight (see `render_status_bar`), so the toolbar no
+                    // longer carries one.
                     .child(div().flex_1())
                     .child(self.render_connection_picker(size, cx)),
             )
@@ -611,9 +584,7 @@ impl SqlHighlandView {
                     .when_some(ring, |this, ring| {
                         this.border_1().border_color(ring).rounded_md()
                     })
-                    .child(
-                        Editor::new(&editor).size_full(),
-                    ),
+                    .child(Editor::new(&editor).size_full()),
             )
     }
 
