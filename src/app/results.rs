@@ -381,6 +381,7 @@ impl TableDelegate for ResultsDelegate {
                 .flex()
                 .items_center()
                 .justify_end()
+                .font_bold()
                 .child(div().truncate().child(name))
                 .into_any_element();
         }
@@ -416,6 +417,7 @@ impl TableDelegate for ResultsDelegate {
             .min_w_0()
             .gap_1()
             .items_center()
+            .font_bold()
             .child(div().min_w_0().truncate().child(name));
         if let Some(dir) = indicator {
             label = label.child(
