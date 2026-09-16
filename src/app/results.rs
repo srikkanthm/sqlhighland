@@ -467,7 +467,7 @@ impl TableDelegate for ResultsDelegate {
         // Column selection tints its cells here; row selection is a full-width
         // band drawn by `render_tr`. A cell's own "current cell" highlight is
         // the library's (it owns click/arrow navigation).
-        let selected = col_ix >= 1 && self.is_column_selected(col_ix);
+        let col_selected = col_ix >= 1 && self.is_column_selected(col_ix);
         let (view, tab_id) = match &self.fetch {
             Some(f) => (Some(f.view.clone()), f.tab_id.clone()),
             None => (None, String::new()),
@@ -519,9 +519,25 @@ impl TableDelegate for ResultsDelegate {
         div()
             .id(format!("grid-cell:{row_ix}:{col_ix}"))
             .test_support()
+            .relative()
             .w_full()
             .h_full()
-            .when(selected, |this| this.bg(cx.theme().tokens.table_active))
+            // A selected column highlights the full column width, matching the
+            // library's full-cell current-cell highlight. The cell carries 5px
+            // horizontal padding, so the tint is a negative-inset overlay that
+            // reaches the cell edges (the cell's own overflow clips it). Drawn
+            // before the content, so it sits behind the text.
+            .when(col_selected, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(px(-5.))
+                        .right(px(-5.))
+                        .bg(cx.theme().tokens.table_active),
+                )
+            })
             .child(inner)
             .when_some(view, |this, view| {
                 this.when(col_ix != 0, |this| this.cursor_pointer())
