@@ -212,22 +212,15 @@ impl SqlHighlandView {
         }
     }
 
-    /// Select a single cell (data-column click).
-    pub(crate) fn grid_cell_click(
-        &mut self,
-        tab_id: &str,
-        row_ix: usize,
-        col_ix: usize,
-        cx: &mut Context<Self>,
-    ) {
+    /// A data cell was clicked. The library's own handler makes it the current
+    /// cell (so arrow keys navigate from it); here we drop any row/column
+    /// selection and record the cell's row as the row anchor.
+    pub(crate) fn grid_cell_click(&mut self, tab_id: &str, row_ix: usize, cx: &mut Context<Self>) {
         let Some(ix) = self.tab_index(tab_id) else {
             return;
         };
         self.tabs[ix].table.update(cx, |table, cx| {
-            // Drop the kit's stale single-cell/row outline first so only the
-            // app-owned highlight shows.
-            table.clear_selection(cx);
-            table.delegate_mut().click_cell(row_ix, col_ix);
+            table.delegate_mut().set_current_row(row_ix);
             cx.notify();
         });
     }

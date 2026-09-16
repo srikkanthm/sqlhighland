@@ -36,9 +36,9 @@ pub(crate) fn to_shared(rows: Vec<Vec<Option<String>>>) -> Vec<Vec<Option<Shared
 
 /// Format a grid selection as clipboard text from `rows` (data cells only,
 /// no row-number column, no header). `None` when nothing is selected or the
-/// result is empty. A single cell is its raw display value (NULL → empty);
-/// rows are CSV lines (delimiter honored); a column is one field per line.
-/// Grid data column indices are `col_ix - 1` (col 0 is the row number).
+/// result is empty. Rows are CSV lines (delimiter honored); a column is one
+/// field per line. Grid data column indices are `col_ix - 1` (col 0 is the
+/// row number).
 fn selection_text(
     selection: &GridSelection,
     rows: &[Vec<Option<SharedString>>],
@@ -46,12 +46,6 @@ fn selection_text(
 ) -> Option<String> {
     match selection {
         GridSelection::None => None,
-        GridSelection::Cell(row, col) => {
-            let ci = col.checked_sub(1)?;
-            rows.get(*row)
-                .and_then(|r| r.get(ci))
-                .map(|c| c.clone().unwrap_or_default().to_string())
-        }
         GridSelection::Rows(sel) => {
             let lines: Vec<String> = sel
                 .iter()
@@ -93,17 +87,15 @@ pub(crate) struct FetchState {
     pub(crate) sortable: bool,
 }
 
-/// What's selected in the grid. One mode at a time: a single cell, a set of
-/// whole rows (left `#` column clicks, Shift ranges, or select-all), or a
-/// single whole column. The kit's own single-row/cell/column selection is
-/// bypassed for mouse input; this is the source of truth for highlighting and
-/// clipboard copy.
+/// What's selected in the grid. One mode at a time: a set of whole rows (left
+/// `#` strip clicks, Shift ranges, or select-all) or a single whole column. The
+/// single "current cell" is owned by the library (clicking a cell sets its
+/// cursor, so arrow keys navigate from there); its value is copied through
+/// [`ResultsDelegate::cell_text`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum GridSelection {
     #[default]
     None,
-    /// A single grid cell `(row, col)` in a data column (col >= 1).
-    Cell(usize, usize),
     Rows(BTreeSet<usize>),
     Column(usize),
 }
@@ -142,14 +134,12 @@ impl ResultsDelegate {
         self.anchor = None;
     }
 
-    /// Select a single cell (data-column click). Replaces any other selection.
-    pub(crate) fn click_cell(&mut self, row_ix: usize, col_ix: usize) {
-        // Data columns only (grid col >= 1; col 0 is the row number).
-        if col_ix < 1 {
-            return;
-        }
-        self.selection = GridSelection::Cell(row_ix, col_ix);
-        self.anchor = None;
+    /// A data cell was clicked: drop any row/column selection (the library
+    /// owns the single current cell), and make the cell's row the current row —
+    /// the anchor a later Shift-click on the row strip extends from.
+    pub(crate) fn set_current_row(&mut self, row_ix: usize) {
+        self.selection = GridSelection::None;
+        self.anchor = Some(row_ix);
     }
 
     /// Apply a left-`#`-column click. `secondary` (Cmd/Ctrl) toggles the row;
@@ -212,11 +202,6 @@ impl ResultsDelegate {
 
     pub(crate) fn is_row_selected(&self, row_ix: usize) -> bool {
         matches!(&self.selection, GridSelection::Rows(rows) if rows.contains(&row_ix))
-    }
-
-    /// A single cell is selected (data columns only).
-    pub(crate) fn is_cell_selected(&self, row_ix: usize, col_ix: usize) -> bool {
-        matches!(self.selection, GridSelection::Cell(r, c) if r == row_ix && c == col_ix)
     }
 
     /// Column selection covers data columns only (col 0 is the row number).
@@ -330,10 +315,10 @@ impl TableDelegate for ResultsDelegate {
     /// single-row strip behavior extended to many. Clicks on data cells stop
     /// propagation before they reach the row.
     ///
-    /// The row-selection highlight is a single full-width band (an absolute
-    /// child behind the cells) rather than a per-cell tint: cells carry
-    /// horizontal padding, so per-cell backgrounds leave gaps and read as
-    /// separate column selections.
+    /// The row paints its own full-width background band (base/stripe, then
+    /// the selection tint). Besides keeping the selection band continuous
+    /// across the cells' horizontal padding, this covers the library's row
+    /// hover wash, so hovering never changes the row.
     fn render_tr(
         &mut self,
         row_ix: usize,
@@ -343,9 +328,19 @@ impl TableDelegate for ResultsDelegate {
         let mut row = div().id(("row", row_ix));
         let row_count = self.with_data(|d| d.rows.len(), 0);
         if row_ix < row_count {
+            // The whole row is a click target (the strip selects it), and the
+            // pointer cursor lives on the row so moving across cells and the
+            // inter-cell padding doesn't flicker between cursors.
+            row = row.cursor_pointer();
+            let base = if row_ix % 2 != 0 {
+                cx.theme().tokens.table_even
+            } else {
+                cx.theme().tokens.table
+            };
+            row = row.child(div().absolute().inset_0().bg(base));
             if self.is_row_selected(row_ix) {
-                let bg = cx.theme().tokens.table_active;
-                row = row.child(div().absolute().inset_0().bg(bg));
+                let sel = cx.theme().tokens.table_active;
+                row = row.child(div().absolute().inset_0().bg(sel));
             }
             if let Some(f) = &self.fetch {
                 let view = f.view.clone();
@@ -410,7 +405,6 @@ impl TableDelegate for ResultsDelegate {
                 dir: SortDir::Asc,
             }),
         };
-        let col_selected = self.is_column_selected(col_ix);
         // `h_full + items_center`: the kit's header wrapper centers a
         // content-sized child, but a full-height one defeats it and the
         // label sticks to the top (visible once the grid density grows the
@@ -432,6 +426,7 @@ impl TableDelegate for ResultsDelegate {
                 .size_3(),
             );
         }
+        // A selected column tints only its body cells, never the header.
         div()
             .id(("col-th", col_ix))
             .test_support()
@@ -439,7 +434,6 @@ impl TableDelegate for ResultsDelegate {
             .h_full()
             .flex()
             .items_center()
-            .when(col_selected, |this| this.bg(cx.theme().tokens.table_active))
             .child(label)
             .when_some(view, |this, view| {
                 this.cursor_pointer()
@@ -470,12 +464,10 @@ impl TableDelegate for ResultsDelegate {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        // Column and single-cell selection tint their cells here; row
-        // selection is a full-width band drawn by `render_tr`. The handler
-        // stops propagation so the kit's single-cell selection — and the
-        // container's empty-area clear — never fire for a cell click.
-        let selected = col_ix >= 1
-            && (self.is_column_selected(col_ix) || self.is_cell_selected(row_ix, col_ix));
+        // Column selection tints its cells here; row selection is a full-width
+        // band drawn by `render_tr`. A cell's own "current cell" highlight is
+        // the library's (it owns click/arrow navigation).
+        let selected = col_ix >= 1 && self.is_column_selected(col_ix);
         let (view, tab_id) = match &self.fetch {
             Some(f) => (Some(f.view.clone()), f.tab_id.clone()),
             None => (None, String::new()),
@@ -519,9 +511,11 @@ impl TableDelegate for ResultsDelegate {
                     .into_any_element(),
             }
         };
-        // Data cells (col >= 1) select a single cell; the `#` (col 0) is inert
-        // (it just stops propagation). Rows are selected from the library's
-        // left strip (see `render_tr`).
+        // The `#` (col 0) is inert: stop propagation so a click there doesn't
+        // become the current cell. Data cells don't stop propagation — the
+        // library's own handler sets the current cell, so arrow keys then
+        // navigate from the clicked cell — but the app's row/column selection
+        // is dropped first (the current cell's row becomes the row anchor).
         div()
             .id(format!("grid-cell:{row_ix}:{col_ix}"))
             .test_support()
@@ -531,13 +525,14 @@ impl TableDelegate for ResultsDelegate {
             .child(inner)
             .when_some(view, |this, view| {
                 this.when(col_ix != 0, |this| this.cursor_pointer())
+                    .when(col_ix == 0, |this| this.cursor_default())
                     .on_click(move |_event, _window, cx: &mut App| {
-                        cx.stop_propagation();
                         if col_ix == 0 {
+                            cx.stop_propagation();
                             return;
                         }
                         view.update(cx, |this, cx| {
-                            this.grid_cell_click(&tab_id, row_ix, col_ix, cx);
+                            this.grid_cell_click(&tab_id, row_ix, cx);
                         })
                         .ok();
                     })
@@ -766,24 +761,20 @@ mod selection_tests {
     }
 
     #[test]
-    fn cell_click_selects_only_that_cell() {
+    fn cell_click_drops_selection_and_sets_row_anchor() {
         let mut d = ResultsDelegate::empty();
-        d.click_cell(1, 1);
-        assert!(d.is_cell_selected(1, 1));
-        assert!(!d.is_cell_selected(1, 2));
-        assert!(
-            !d.is_row_selected(1),
-            "a cell click must not select the row"
-        );
+        d.select_column(1);
+        d.select_all_rows(2);
+        // A cell click clears the row/column selection (the library owns the
+        // current cell) and makes the clicked row the anchor.
+        d.set_current_row(1);
+        assert!(!d.is_row_selected(0) && !d.is_row_selected(1));
         assert!(!d.is_column_selected(1));
-        // A cell click replaces a row selection.
-        d.click_row(0, false, false, 3);
-        d.click_cell(2, 2);
-        assert!(d.is_cell_selected(2, 2));
+        assert!(d.copy_text(',').is_none());
+        // A later Shift-click on the row strip ranges from that row.
+        d.click_row(3, false, true, 5);
+        assert!(d.is_row_selected(1) && d.is_row_selected(2) && d.is_row_selected(3));
         assert!(!d.is_row_selected(0));
-        // The row-number column (col 0) is not a cell target.
-        d.click_cell(1, 0);
-        assert!(d.is_cell_selected(2, 2));
     }
 
     #[test]
@@ -803,15 +794,6 @@ mod selection_tests {
         // the second data column.
         let sel = GridSelection::Column(2);
         assert_eq!(selection_text(&sel, &rows, ',').as_deref(), Some("1\n\n3"));
-        // A single cell copies its raw value (NULL -> empty, no quoting).
-        assert_eq!(
-            selection_text(&GridSelection::Cell(1, 1), &rows, ',').as_deref(),
-            Some("b")
-        );
-        assert_eq!(
-            selection_text(&GridSelection::Cell(1, 2), &rows, ',').as_deref(),
-            Some("")
-        );
         // Nothing selected / empty result copies nothing.
         assert_eq!(selection_text(&GridSelection::None, &rows, ','), None);
         assert_eq!(
