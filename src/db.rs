@@ -513,13 +513,14 @@ impl DbClient for OracledbSession {
 /// Strip editor-style statement terminators (`;`) and reject empty input.
 ///
 /// Only trailing semicolons are removed, so `SELECT ';' FROM dual;`
-/// correctly keeps the one inside the string literal. Anonymous PL/SQL
-/// blocks are the exception: the server *requires* their trailing `;`,
-/// so it is preserved (duplicates collapsed to one).
+/// correctly keeps the one inside the string literal. PL/SQL is the
+/// exception: anonymous blocks and `CREATE PROCEDURE`/… bodies end in `END;`,
+/// which the server *requires*, so it is preserved (duplicates collapsed to
+/// one).
 fn sanitize_statement(sql: &str) -> Result<&str, DbError> {
-    use crate::sql::is_plsql_block;
+    use crate::sql::is_plsql;
     let mut s = sql.trim();
-    if is_plsql_block(s) {
+    if is_plsql(s) {
         while s.ends_with(";;") {
             s = s[..s.len() - 1].trim_end();
         }

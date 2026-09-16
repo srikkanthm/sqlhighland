@@ -213,6 +213,48 @@ fn is_plsql_block_detects_anonymous_blocks() {
 }
 
 #[test]
+fn is_plsql_covers_blocks_and_object_bodies() {
+    // Anonymous blocks.
+    assert!(is_plsql("BEGIN NULL; END;"));
+    assert!(is_plsql("  -- note\nDECLARE x NUMBER; BEGIN NULL; END;"));
+    // CREATE ... PL/SQL object bodies, with modifiers.
+    assert!(is_plsql(
+        "CREATE OR REPLACE PROCEDURE p IS BEGIN NULL; END;"
+    ));
+    assert!(is_plsql("create procedure p as begin null; end;"));
+    assert!(is_plsql(
+        "CREATE OR REPLACE FUNCTION f RETURN NUMBER IS BEGIN RETURN 1; END;"
+    ));
+    assert!(is_plsql("CREATE PACKAGE pkg AS END;"));
+    assert!(is_plsql("CREATE OR REPLACE PACKAGE BODY pkg AS END;"));
+    assert!(is_plsql(
+        "CREATE EDITIONABLE OR REPLACE TRIGGER trg BEFORE INSERT ON t BEGIN NULL; END;"
+    ));
+    assert!(is_plsql("CREATE TYPE t AS OBJECT (x NUMBER);"));
+    // Plain SQL and non-PL/SQL DDL.
+    assert!(!is_plsql("SELECT 1 FROM dual"));
+    assert!(!is_plsql("CREATE TABLE t (a NUMBER)"));
+    assert!(!is_plsql("CREATE OR REPLACE VIEW v AS SELECT 1 FROM dual"));
+    assert!(!is_plsql("CREATE INDEX i ON t (a)"));
+    assert!(!is_plsql("ALTER TABLE t ADD (b NUMBER)"));
+    assert!(!is_plsql("DROP PROCEDURE p"));
+    assert!(!is_plsql(""));
+}
+
+#[test]
+fn is_plsql_fragment_detects_body_pieces() {
+    assert!(is_plsql_fragment("PROCEDURE p IS BEGIN NULL; END;"));
+    assert!(is_plsql_fragment("FUNCTION f RETURN NUMBER;"));
+    assert!(is_plsql_fragment("PACKAGE pkg AS END;"));
+    assert!(is_plsql_fragment("TRIGGER trg BEFORE INSERT ON t"));
+    assert!(is_plsql_fragment("END;"));
+    assert!(is_plsql_fragment("  end pkg;"));
+    assert!(!is_plsql_fragment("SELECT 1 FROM dual"));
+    assert!(!is_plsql_fragment("INSERT INTO t VALUES (1)"));
+    assert!(!is_plsql_fragment(""));
+}
+
+#[test]
 fn exec_summary_uses_action_verbs() {
     assert_eq!(
         exec_summary("INSERT INTO t VALUES (1)", 1),

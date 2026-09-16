@@ -237,3 +237,60 @@ pub fn is_plsql_block(sql: &str) -> bool {
     let (keyword, _) = read_keyword(bytes, i);
     keyword.eq_ignore_ascii_case("begin") || keyword.eq_ignore_ascii_case("declare")
 }
+
+/// True for any statement whose body is PL/SQL that a generic SQL grammar
+/// cannot parse: anonymous blocks (`BEGIN`/`DECLARE`) and
+/// `CREATE [OR REPLACE] [EDITIONABLE|NONEDITIONABLE] {PROCEDURE|FUNCTION|
+/// PACKAGE|TRIGGER|TYPE|LIBRARY|JAVA} …` declarations.
+///
+/// Used by the structural diagnostics pass to skip such statements (the
+/// lexical checks still apply); broader than [`is_plsql_block`], which only
+/// gates the trailing-semicolon rule for anonymous blocks.
+pub fn is_plsql(sql: &str) -> bool {
+    if is_plsql_block(sql) {
+        return true;
+    }
+    let bytes = sql.as_bytes();
+    let mut i = skip_ws_comments(bytes, 0);
+    let (keyword, next) = read_keyword(bytes, i);
+    if !keyword.eq_ignore_ascii_case("create") {
+        return false;
+    }
+    i = next;
+    // Skip CREATE modifiers (`OR REPLACE`, `EDITIONABLE`, …), then classify by
+    // the object type. A leading `<<label>>` isn't handled — vanishingly rare
+    // on a CREATE.
+    loop {
+        i = skip_ws_comments(bytes, i);
+        let (kw, next) = read_keyword(bytes, i);
+        if kw.is_empty() {
+            return false;
+        }
+        i = next;
+        match kw.to_ascii_uppercase().as_str() {
+            "OR" | "REPLACE" | "EDITIONABLE" | "NONEDITIONABLE" | "FORCE" | "PUBLIC"
+            | "PRIVATE" => {
+                continue;
+            }
+            "PROCEDURE" | "FUNCTION" | "PACKAGE" | "TRIGGER" | "TYPE" | "LIBRARY" | "JAVA" => {
+                return true;
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// True for a PL/SQL *fragment* that the statement splitter can peel off a
+/// `CREATE … PACKAGE`/`TYPE BODY` (nested subprogram declarations, the closing
+/// `END`): a leading `PROCEDURE`/`FUNCTION`/`PACKAGE`/`TRIGGER`/`END`. None of
+/// these begin a valid standalone SQL statement, so the structural
+/// diagnostics skip them alongside [`is_plsql`].
+pub fn is_plsql_fragment(sql: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let i = skip_ws_comments(bytes, 0);
+    let (keyword, _) = read_keyword(bytes, i);
+    matches!(
+        keyword.to_ascii_uppercase().as_str(),
+        "PROCEDURE" | "FUNCTION" | "PACKAGE" | "TRIGGER" | "END"
+    )
+}
