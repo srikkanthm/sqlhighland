@@ -197,6 +197,17 @@ pub(crate) enum RunKind {
     Script,
 }
 
+/// Follow-up once a commit/rollback settles successfully.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TxnAfter {
+    /// Report the outcome on the active tab (the Commit/Rollback buttons).
+    None,
+    /// Close this tab (the close-with-uncommitted guard).
+    CloseTab(String),
+    /// Quit the app (the quit-with-uncommitted guard).
+    Quit,
+}
+
 /// One query tab: editor + grid + run state + connection binding.
 pub(crate) struct QueryTab {
     pub(crate) id: String,
@@ -713,23 +724,31 @@ impl SqlHighlandView {
     pub fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dirty = self.tabs.iter().any(|tab| tab.dirty && tab.path.is_some());
         if !dirty {
-            cx.quit();
+            self.quit_guard(window, cx);
             return;
         }
         let view = cx.entity().downgrade();
         self.note_dialog_open();
         window.open_alert_dialog(cx, move |alert, _, _| {
             let save_view = view.clone();
+            let discard_view = view.clone();
             alert
                 .title("Unsaved changes")
                 .description("Save changes to external SQL files before quitting?")
-                // Return (the dialog's `Confirm` action) is "Save and Quit", the
-                // primary action.
+                // Return (the dialog's `Confirm` action) saves then continues;
+                // the dialog stays open if a save fails.
                 .on_ok({
                     let view = view.clone();
                     move |_, window, cx| {
-                        view.update(cx, |this, cx| this.save_all_and_quit(window, cx))
+                        if !view
+                            .update(cx, |this, cx| this.save_all_dirty(cx))
                             .unwrap_or(false)
+                        {
+                            return false;
+                        }
+                        window.close_dialog(cx);
+                        view.update(cx, |this, cx| this.quit_guard(window, cx)).ok();
+                        false
                     }
                 })
                 .footer(
@@ -741,20 +760,28 @@ impl SqlHighlandView {
                                 .label("Cancel")
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
-                        .child(
-                            Button::new("quit-discard")
-                                .label("Discard")
-                                .on_click(|_, _, cx| cx.quit()),
-                        )
+                        .child(Button::new("quit-discard").label("Discard").on_click(
+                            move |_, window, cx| {
+                                window.close_dialog(cx);
+                                discard_view
+                                    .update(cx, |this, cx| this.quit_guard(window, cx))
+                                    .ok();
+                            },
+                        ))
                         .child(
                             Button::new("quit-save")
                                 .primary()
                                 .label("Save and Quit")
                                 .on_click(move |_, window, cx| {
+                                    if !save_view
+                                        .update(cx, |this, cx| this.save_all_dirty(cx))
+                                        .unwrap_or(false)
+                                    {
+                                        return;
+                                    }
+                                    window.close_dialog(cx);
                                     save_view
-                                        .update(cx, |this, cx| {
-                                            this.save_all_and_quit(window, cx);
-                                        })
+                                        .update(cx, |this, cx| this.quit_guard(window, cx))
                                         .ok();
                                 }),
                         ),
@@ -762,13 +789,9 @@ impl SqlHighlandView {
         });
     }
 
-    /// Save every dirty external SQL file and quit. Returns `false` (leaving
-    /// the caller's confirm dialog open) when a save fails.
-    pub(crate) fn save_all_and_quit(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    /// Save every dirty external SQL file. Returns `false` (leaving the caller's
+    /// dialog open) when a save fails.
+    pub(crate) fn save_all_dirty(&mut self, cx: &mut Context<Self>) -> bool {
         let mut failed: Option<String> = None;
         for tab in &mut self.tabs {
             if !tab.dirty {
@@ -794,9 +817,98 @@ impl SqlHighlandView {
             cx.notify();
             return false;
         }
-        window.close_dialog(cx);
-        cx.quit();
         true
+    }
+
+    /// Guard the quit: if any live connection has uncommitted work, ask to commit
+    /// all or roll all back first (Return is a no-op; Escape cancels). Quits only
+    /// after the transactions settle.
+    fn quit_guard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut conn_ids: Vec<String> = Vec::new();
+        for tab in &self.tabs {
+            if let Some(id) = &tab.connection_id {
+                if tab.pending_txn && self.live.contains(id) && !conn_ids.contains(id) {
+                    conn_ids.push(id.clone());
+                }
+            }
+        }
+        if conn_ids.is_empty() {
+            cx.quit();
+            return;
+        }
+        let names: Vec<String> = conn_ids
+            .iter()
+            .map(|id| self.connection_name(&Some(id.clone())))
+            .collect();
+        let description: SharedString = if conn_ids.len() == 1 {
+            format!("{} has uncommitted changes.", names[0]).into()
+        } else {
+            format!(
+                "{} connections have uncommitted changes: {}.",
+                conn_ids.len(),
+                names.join(", ")
+            )
+            .into()
+        };
+        let view = cx.entity().downgrade();
+        self.note_dialog_open();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let commit_view = view.clone();
+            let rollback_view = view.clone();
+            let commit_ids = conn_ids.clone();
+            let rollback_ids = conn_ids.clone();
+            alert
+                .title("Uncommitted changes")
+                .description(description.clone())
+                // No default action: Return does nothing.
+                .on_ok(|_, _, _| false)
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_center()
+                        .child(
+                            Button::new("quit-txn-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("quit-txn-rollback")
+                                .label("Roll Back All and Quit")
+                                .danger()
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    rollback_view
+                                        .update(cx, |this, cx| {
+                                            this.finish_txns(
+                                                rollback_ids.clone(),
+                                                false,
+                                                TxnAfter::Quit,
+                                                cx,
+                                            );
+                                        })
+                                        .ok();
+                                }),
+                        )
+                        .child(
+                            Button::new("quit-txn-commit")
+                                .primary()
+                                .label("Commit All and Quit")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    commit_view
+                                        .update(cx, |this, cx| {
+                                            this.finish_txns(
+                                                commit_ids.clone(),
+                                                true,
+                                                TxnAfter::Quit,
+                                                cx,
+                                            );
+                                        })
+                                        .ok();
+                                }),
+                        ),
+                )
+        });
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {

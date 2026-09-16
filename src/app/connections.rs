@@ -105,6 +105,9 @@ impl SqlHighlandView {
         }
         self.pool.remove(&removed.id);
         self.live.remove(&removed.id);
+        // The session is gone (its transaction rolled back): clear the flags
+        // before the tabs are unbound below.
+        self.clear_pending(&removed.id);
         // Tabs bound to it fall back to "no connection".
         for tab in &mut self.tabs {
             if tab.connection_id.as_deref() == Some(removed.id.as_str()) {
@@ -225,6 +228,9 @@ impl SqlHighlandView {
     pub(super) fn disconnect_connection(&mut self, conn_id: &str, cx: &mut Context<Self>) {
         self.pool.remove(conn_id);
         self.live.remove(conn_id);
+        // Dropping the session rolls back any open transaction: clear the
+        // "Uncommitted" flags so a later tab close doesn't prompt for it.
+        self.clear_pending(conn_id);
         // Mark the dictionary cache stale so a reconnect refetches it. (With
         // the TTL set to "never", this is what keeps suggestions honest across
         // a disconnect/reconnect.)

@@ -7,6 +7,61 @@
 
 use super::*;
 
+/// Outcome of running a commit/rollback step across a batch of connections.
+pub(crate) struct TxnBatch {
+    /// Connection ids whose step succeeded, in visit order. A partial batch
+    /// still reports these so their pending flags can be cleared.
+    pub(crate) settled: Vec<String>,
+    /// Message from the first failed step. Steps after it are not attempted.
+    pub(crate) error: Option<String>,
+}
+
+impl TxnBatch {
+    /// True when every connection settled, so a follow-up (close/quit) is safe.
+    pub(crate) fn complete(&self) -> bool {
+        self.error.is_none()
+    }
+
+    /// The follow-up to run once the batch finishes, or `None` when it failed.
+    ///
+    /// A failed commit/rollback must withhold the requested follow-up (closing
+    /// the tab, quitting the app) so the outstanding work is not discarded;
+    /// only a fully settled batch proceeds.
+    pub(crate) fn follow_up(&self, after: TxnAfter) -> Option<TxnAfter> {
+        if self.complete() {
+            Some(after)
+        } else {
+            None
+        }
+    }
+}
+
+/// Run `step` over `conn_ids` in order, stopping at the first failure.
+///
+/// Returns the ids that settled and the first error. `step` is called once per
+/// connection id, up to and including the failing one.
+fn run_txn_batch<F>(conn_ids: &[String], mut step: F) -> TxnBatch
+where
+    F: FnMut(&str) -> Result<(), String>,
+{
+    let mut settled = Vec::new();
+    for id in conn_ids {
+        match step(id) {
+            Ok(()) => settled.push(id.clone()),
+            Err(error) => {
+                return TxnBatch {
+                    settled,
+                    error: Some(error),
+                }
+            }
+        }
+    }
+    TxnBatch {
+        settled,
+        error: None,
+    }
+}
+
 impl SqlHighlandView {
     // -- Query ------------------------------------------------------------------
 
@@ -73,55 +128,115 @@ impl SqlHighlandView {
     /// Commit the active tab's connection. Clears the pending flag on every
     /// tab sharing that connection (transactions are session-scoped).
     pub(super) fn commit_now(&mut self, cx: &mut Context<Self>) {
-        self.finish_txn(true, cx);
+        self.finish_active_txn(true, cx);
     }
 
     /// Roll back the active tab's connection (same scope rules as commit).
     pub(super) fn rollback_now(&mut self, cx: &mut Context<Self>) {
-        self.finish_txn(false, cx);
+        self.finish_active_txn(false, cx);
     }
 
-    pub(super) fn finish_txn(&mut self, commit: bool, cx: &mut Context<Self>) {
+    fn finish_active_txn(&mut self, commit: bool, cx: &mut Context<Self>) {
         let Some(conn_id) = self.active_tab().connection_id.clone() else {
             self.tabs[self.active].output = Some(Output::error("Select a connection for this tab"));
             cx.notify();
             return;
         };
-        let engine = self
-            .connections
+        self.finish_txns(vec![conn_id], commit, TxnAfter::None, cx);
+    }
+
+    /// Commit or roll back every connection in `conn_ids` (sequentially, on the
+    /// background executor), then run `after`. On failure the first error is
+    /// surfaced and `after` does not run.
+    pub(crate) fn finish_txns(
+        &mut self,
+        conn_ids: Vec<String>,
+        commit: bool,
+        after: TxnAfter,
+        cx: &mut Context<Self>,
+    ) {
+        let sessions: Vec<SharedSession> = conn_ids
             .iter()
-            .find(|c| c.id == conn_id)
-            .map(|c| c.engine)
-            .unwrap_or_default();
-        let session = self.pool.get_or_create(&conn_id, engine);
-        let session_bg = session.clone();
+            .map(|id| {
+                let engine = self
+                    .connections
+                    .iter()
+                    .find(|c| c.id == *id)
+                    .map(|c| c.engine)
+                    .unwrap_or_default();
+                self.pool.get_or_create(id, engine)
+            })
+            .collect();
         let bg = cx.background_executor().clone();
         let view = cx.entity().downgrade();
+        let batch_ids = conn_ids.clone();
         cx.spawn(async move |_, cx| {
-            let outcome = bg
+            let batch = bg
                 .spawn(async move {
-                    let mut session = lock(&session_bg);
-                    if commit {
-                        session.commit().map_err(|e| e.to_string())
-                    } else {
-                        session.rollback().map_err(|e| e.to_string())
-                    }
+                    let mut sessions = sessions.into_iter();
+                    run_txn_batch(&batch_ids, move |_| {
+                        let session = sessions.next().expect("one session per connection id");
+                        let mut session = lock(&session);
+                        if commit {
+                            session.commit().map_err(|e| e.to_string())
+                        } else {
+                            session.rollback().map_err(|e| e.to_string())
+                        }
+                    })
                 })
                 .await;
+            // Connections that settled before a later failure must not stay
+            // marked pending (transactions are session-scoped), so clear every
+            // settled connection whether or not the whole batch succeeded.
+            // `follow_up` is `None` on any failure, which withholds the close.
+            let follow_up = batch.follow_up(after.clone());
+            let complete = follow_up.is_some();
             view.update(cx, |this, cx| {
-                match outcome {
-                    Ok(()) => {
-                        this.clear_pending(&conn_id);
-                        this.tabs[this.active].result_meta =
-                            (if commit { "Committed" } else { "Rolled back" }).into();
+                for id in &batch.settled {
+                    this.clear_pending(id);
+                }
+                if complete {
+                    match &after {
+                        TxnAfter::None => {
+                            this.tabs[this.active].result_meta =
+                                (if commit { "Committed" } else { "Rolled back" }).into();
+                        }
+                        // The tab close happens outside this lease (it
+                        // needs a window); see below.
+                        TxnAfter::CloseTab(_) => {}
+                        TxnAfter::Quit => cx.quit(),
                     }
-                    Err(msg) => {
-                        this.tabs[this.active].output = Some(Output::error(msg));
+                } else {
+                    let msg = batch
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "transaction failed".to_string());
+                    match &after {
+                        TxnAfter::None => {
+                            this.tabs[this.active].output = Some(Output::error(msg));
+                        }
+                        _ => this.status = format!("Transaction failed: {msg}").into(),
                     }
                 }
                 cx.notify();
             })
             .ok();
+
+            // Closing needs a window, so it runs as its own app update (the
+            // view lease above is released by now). A failed commit/rollback
+            // yields no follow-up, keeping the tab open so the user can retry
+            // instead of losing the unsaved transaction.
+            if let Some(TxnAfter::CloseTab(tab_id)) = follow_up {
+                cx.update(|app| {
+                    let handles = app.windows();
+                    if let Some(handle) = handles.into_iter().next() {
+                        let _ = handle.update(app, |_, window, cx| {
+                            let _ =
+                                view.update(cx, |this, cx| this.close_tab_now(&tab_id, window, cx));
+                        });
+                    }
+                });
+            }
         })
         .detach();
     }
@@ -362,5 +477,65 @@ impl SqlHighlandView {
         let next = (cur + dir as f32 * 48.0).clamp(160.0, 900.0);
         self.editor_split
             .update(cx, |s, cx| s.resize_panel(0, px(next), window, cx));
+    }
+}
+
+#[cfg(test)]
+mod txn_batch_tests {
+    use super::{run_txn_batch, TxnAfter, TxnBatch};
+
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn complete_batch_reports_every_connection_settled() {
+        let batch: TxnBatch = run_txn_batch(&ids(&["a", "b"]), |_| Ok(()));
+        assert_eq!(batch.settled, ids(&["a", "b"]));
+        assert!(batch.complete());
+        assert_eq!(batch.error, None);
+    }
+
+    /// Regression: a failure part-way through a batch must not discard the
+    /// connections that already settled — `finish_txns` reads `settled` on the
+    /// failure path too, so their pending flags still get cleared.
+    #[test]
+    fn partial_failure_keeps_settled_connections() {
+        let mut visited = Vec::new();
+        let batch = run_txn_batch(&ids(&["a", "b", "c"]), |id| {
+            visited.push(id.to_string());
+            if id == "b" {
+                Err("ORA-00001".to_string())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(batch.settled, ids(&["a"]));
+        assert_eq!(batch.error.as_deref(), Some("ORA-00001"));
+        assert!(!batch.complete());
+        // The batch stops at the failure: "c" is never attempted.
+        assert_eq!(visited, ids(&["a", "b"]));
+    }
+
+    /// Regression: a fully settled batch may run its follow-up (here: close a
+    /// tab), so the caller's close/quit request is honored.
+    #[test]
+    fn complete_batch_proceeds_with_follow_up() {
+        let batch = run_txn_batch(&ids(&["a"]), |_| Ok(()));
+        assert_eq!(
+            batch.follow_up(TxnAfter::CloseTab("t1".to_string())),
+            Some(TxnAfter::CloseTab("t1".to_string()))
+        );
+    }
+
+    /// Regression: a failed commit/rollback must withhold the requested
+    /// follow-up so the tab stays open (and the app does not quit).
+    #[test]
+    fn failed_batch_withholds_follow_up() {
+        let batch = run_txn_batch(&ids(&["a"]), |_| Err("not connected".to_string()));
+        assert!(!batch.complete());
+        assert_eq!(batch.follow_up(TxnAfter::CloseTab("t1".to_string())), None);
+        assert_eq!(batch.follow_up(TxnAfter::Quit), None);
+        assert!(batch.settled.is_empty());
     }
 }

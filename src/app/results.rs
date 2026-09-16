@@ -332,7 +332,7 @@ impl TableDelegate for ResultsDelegate {
             // pointer cursor lives on the row so moving across cells and the
             // inter-cell padding doesn't flicker between cursors.
             row = row.cursor_pointer();
-            let base = if row_ix % 2 != 0 {
+            let base = if !row_ix.is_multiple_of(2) {
                 cx.theme().tokens.table_even
             } else {
                 cx.theme().tokens.table

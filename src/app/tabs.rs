@@ -396,30 +396,37 @@ impl SqlHighlandView {
             return;
         };
         if !tab.dirty || tab.path.is_none() {
-            self.close_tab_now(tab_id, window, cx);
+            self.close_guard(tab_id, window, cx);
             return;
         }
 
         let view = cx.entity().downgrade();
-        let tab_id_save = tab_id.to_string();
-        let tab_id_discard = tab_id.to_string();
+        let tab_id = tab_id.to_string();
         self.note_dialog_open();
         window.open_alert_dialog(cx, move |alert, _, _| {
             let discard_view = view.clone();
             let save_view = view.clone();
-            let discard_id = tab_id_discard.clone();
-            let save_id = tab_id_save.clone();
+            let discard_id = tab_id.clone();
+            let save_id = tab_id.clone();
             alert
                 .title("Unsaved changes")
                 .description("Save changes before closing this SQL file?")
-                // Return (the dialog's `Confirm` action) saves then closes, the
-                // primary action.
+                // Return (the dialog's `Confirm` action) saves then continues;
+                // the dialog stays open if the save fails.
                 .on_ok({
-                    let save_id = tab_id_save.clone();
+                    let save_id = tab_id.clone();
                     let view = view.clone();
                     move |_, window, cx| {
-                        view.update(cx, |this, cx| this.save_tab_and_close(&save_id, window, cx))
+                        if !view
+                            .update(cx, |this, cx| this.save_tab(&save_id, cx))
                             .unwrap_or(false)
+                        {
+                            return false;
+                        }
+                        window.close_dialog(cx);
+                        view.update(cx, |this, cx| this.close_guard(&save_id, window, cx))
+                            .ok();
+                        false
                     }
                 })
                 .footer(
@@ -436,16 +443,23 @@ impl SqlHighlandView {
                                 window.close_dialog(cx);
                                 discard_view
                                     .update(cx, |this, cx| {
-                                        this.close_tab_now(&discard_id, window, cx);
+                                        this.close_guard(&discard_id, window, cx);
                                     })
                                     .ok();
                             }
                         }))
                         .child(Button::new("close-save").primary().label("Save").on_click({
                             move |_, window, cx| {
+                                if !save_view
+                                    .update(cx, |this, cx| this.save_tab(&save_id, cx))
+                                    .unwrap_or(false)
+                                {
+                                    return;
+                                }
+                                window.close_dialog(cx);
                                 save_view
                                     .update(cx, |this, cx| {
-                                        this.save_tab_and_close(&save_id, window, cx);
+                                        this.close_guard(&save_id, window, cx);
                                     })
                                     .ok();
                             }
@@ -454,15 +468,9 @@ impl SqlHighlandView {
         });
     }
 
-    /// Save a tab's external file, then close the tab. Returns `false` (leaving
-    /// the caller's confirm dialog open) when the save fails or the tab/path is
-    /// gone.
-    fn save_tab_and_close(
-        &mut self,
-        tab_id: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    /// Save a tab's external file. Returns `false` (leaving a caller's dialog
+    /// open) when the save fails or the tab/path is gone.
+    fn save_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) -> bool {
         let Some(ix) = self.tab_index(tab_id) else {
             return false;
         };
@@ -474,8 +482,6 @@ impl SqlHighlandView {
             Ok(stamp) => {
                 self.tabs[ix].file_stamp = Some(stamp);
                 self.tabs[ix].dirty = false;
-                window.close_dialog(cx);
-                self.close_tab_now(tab_id, window, cx);
                 true
             }
             Err(err) => {
@@ -484,6 +490,104 @@ impl SqlHighlandView {
                 false
             }
         }
+    }
+
+    /// Guard the actual close: if the tab has uncommitted database changes, ask
+    /// to commit or roll back first (Return is a no-op; Escape cancels). The tab
+    /// closes only after the transaction settles.
+    fn close_guard(&mut self, tab_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.tab_index(tab_id) else {
+            return;
+        };
+        // A disconnected session has already rolled back, so nothing to settle.
+        let settled = match self.tabs[ix].connection_id.clone() {
+            Some(conn_id) => !self.tabs[ix].pending_txn || !self.live.contains(&conn_id),
+            None => true,
+        };
+        if settled {
+            self.tabs[ix].pending_txn = false;
+            self.close_tab_now(tab_id, window, cx);
+            return;
+        }
+        let conn_id = self.tabs[ix].connection_id.clone().unwrap_or_default();
+        let name = self.connection_name(&Some(conn_id.clone()));
+        let shared = self
+            .tabs
+            .iter()
+            .filter(|t| t.connection_id.as_deref() == Some(conn_id.as_str()))
+            .count()
+            > 1;
+        let description: SharedString = if shared {
+            format!(
+                "This tab has uncommitted database changes. Committing or rolling back \
+                 affects all tabs using {name}."
+            )
+            .into()
+        } else {
+            "This tab has uncommitted database changes.".into()
+        };
+        let view = cx.entity().downgrade();
+        let tab_id = tab_id.to_string();
+        self.note_dialog_open();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let commit_view = view.clone();
+            let rollback_view = view.clone();
+            let commit_tab = tab_id.clone();
+            let rollback_tab = tab_id.clone();
+            let commit_conn = conn_id.clone();
+            let rollback_conn = conn_id.clone();
+            alert
+                .title("Uncommitted changes")
+                .description(description.clone())
+                // No default action: Return does nothing.
+                .on_ok(|_, _, _| false)
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_center()
+                        .child(
+                            Button::new("txn-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("txn-rollback")
+                                .label("Rollback")
+                                .danger()
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    rollback_view
+                                        .update(cx, |this, cx| {
+                                            this.finish_txns(
+                                                vec![rollback_conn.clone()],
+                                                false,
+                                                TxnAfter::CloseTab(rollback_tab.clone()),
+                                                cx,
+                                            );
+                                        })
+                                        .ok();
+                                }),
+                        )
+                        .child(
+                            Button::new("txn-commit")
+                                .primary()
+                                .label("Commit")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    commit_view
+                                        .update(cx, |this, cx| {
+                                            this.finish_txns(
+                                                vec![commit_conn.clone()],
+                                                true,
+                                                TxnAfter::CloseTab(commit_tab.clone()),
+                                                cx,
+                                            );
+                                        })
+                                        .ok();
+                                }),
+                        ),
+                )
+        });
     }
 
     pub(crate) fn select_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
