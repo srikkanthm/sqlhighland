@@ -513,7 +513,7 @@ impl SqlHighlandView {
                             .primary()
                             .with_size(d.button_size)
                             .icon(KitIcon::Play)
-                            .tooltip("Run statement at cursor (⌘↵)")
+                            .tooltip("Run selection or statement at cursor (⌘↵)")
                             .when(!compact, |b| b.w(px(d.action_button_w)).label("Run"))
                             .loading(tab.busy && tab.run_kind == Some(RunKind::Statement))
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {

@@ -10,8 +10,6 @@ use super::*;
 impl SqlHighlandView {
     // -- Query ------------------------------------------------------------------
 
-    /// Run the statement under the cursor (Cmd+Enter) or via the Run button.
-    /// With a single statement in the buffer, caret position is ignored.
     /// True when the query editor (not a dialog field) holds focus.
     /// All keyboard shortcuts double-check this so Cmd+Enter etc. in a
     /// connection dialog field never fire actions behind the modal.
@@ -22,8 +20,28 @@ impl SqlHighlandView {
             .unwrap_or(false)
     }
 
+    /// Run the selected text (Cmd+Enter / Run button) when there is a
+    /// selection; otherwise the statement under the cursor. With a single
+    /// statement in the buffer, caret position is ignored.
     pub(super) fn run_at_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.editor_focused(window, cx) {
+            return;
+        }
+        // A selection wins: run exactly what the user selected (trimmed), so a
+        // fragment like `select * from usr` picked out of a longer statement
+        // runs on its own. `start_run` still routes `@`-directives and handles
+        // `&`/`&&` substitution and `:binds`.
+        let selected = self
+            .active_tab()
+            .editor
+            .read(cx)
+            .selected_text()
+            .to_string();
+        let selected = selected.trim();
+        if !selected.is_empty() {
+            let tab_id = self.active_tab().id.clone();
+            let sql = selected.to_string();
+            self.start_run(&tab_id, sql, window, cx);
             return;
         }
         let text = self.active_tab().editor.read(cx).value().to_string();
