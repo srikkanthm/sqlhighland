@@ -326,3 +326,27 @@ fn live_call_timeout_trips_and_survives() {
     unsafe { std::env::remove_var("SQLHIGHLAND_CONFIG_DIR") };
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn live_native_sort_orders_server_side() {
+    use sqlhighland::sql::{is_sortable_sql, order_by, SortDir, SortSpec};
+    let mut s = OracledbSession::new();
+    s.connect(&cfg()).expect("connect");
+    let base = "SELECT level AS n FROM dual CONNECT BY level <= 5";
+    assert!(is_sortable_sql(base));
+    let sql = order_by(
+        base,
+        SortSpec {
+            col: 1,
+            dir: SortDir::Desc,
+        },
+    );
+    let r = s.run_query(&sql, 1000, &[]).expect("sorted query");
+    let vals: Vec<&str> = r
+        .rows
+        .iter()
+        .map(|row| row[0].as_deref().unwrap_or(""))
+        .collect();
+    assert_eq!(vals, ["5", "4", "3", "2", "1"], "descending order");
+    assert!(!is_sortable_sql("SELECT * FROM dual FOR UPDATE"));
+}

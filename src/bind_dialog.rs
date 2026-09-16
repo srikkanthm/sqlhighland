@@ -304,7 +304,10 @@ impl SqlHighlandView {
                         .collect();
                     self.run_script(&pending.tab_id, name, statements, bind_values, cx);
                 }
-                None => self.run_sql(&pending.tab_id, final_sql, bind_values, cx),
+                None => {
+                    self.record_user_run(&pending.tab_id, &final_sql);
+                    self.run_sql(&pending.tab_id, final_sql, bind_values, cx);
+                }
             }
         }
     }

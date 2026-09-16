@@ -254,6 +254,11 @@ pub(crate) struct QueryTab {
     /// Native bind values for `last_sql`, retained so an export can re-execute
     /// the query on its own session. In-memory only, never persisted.
     pub(crate) last_binds: Vec<crate::db::BindParam>,
+    /// The user's executed SQL (before any header-sort wrapping), so a sort
+    /// re-run re-wraps the original rather than double-wrapping.
+    pub(crate) unsorted_sql: String,
+    /// Active native sort (server-side ORDER BY), or `None` for original order.
+    pub(crate) sort: Option<crate::sql::SortSpec>,
     /// An export drain is paging this tab's cursor past the grid cap.
     /// While true the grid shows fetched-so-far rows and scroll-fetching
     /// pauses (`loading` is held) so pages never interleave or duplicate.

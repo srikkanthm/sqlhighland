@@ -569,7 +569,13 @@ impl SqlHighlandView {
                         )
                     })
                     .when(minimal, |this| this.child(self.render_toolbar_more(cx)))
-                    .when(tab.busy || tab.exporting, |this| {
+                    // Toolbar Cancel is for user-initiated runs/scripts and
+                    // exports. A native-sort re-run clears `run_kind` (and
+                    // cancelling is offered in the status bar), so it stays
+                    // hidden here instead of flashing on every header sort.
+                    .when(
+                        (tab.busy && tab.run_kind.is_some()) || tab.exporting,
+                        |this| {
                         let tab_id = tab.id.clone();
                         let exporting = tab.exporting;
                         let tip = if exporting {
@@ -812,15 +818,22 @@ impl SqlHighlandView {
             None => (cx.theme().muted_foreground, "No connection".to_string()),
         };
         let minimal = matches!(self.toolbar_size(), ToolbarSize::Minimal);
+        let compact = self.toolbar_size().compact();
         let d = self.density();
         // Bottom-pane actions moved here from the old results toolbar row so
         // the grid loses a full row of chrome. Export only applies to a grid
-        // result; Dismiss appears whenever a bottom pane is showing.
-        let show_export = tab.output.is_none() && tab.has_result;
-        let show_dismiss = !tab.hide_results && (tab.has_result || tab.output.is_some());
+        // result; Dismiss appears whenever a bottom pane is showing. While a
+        // run/export is in flight the only meaningful action is Cancel, so
+        // Export/Dismiss (which target settled data) stand down.
+        let running = tab.busy || tab.exporting;
+        let settled = !running;
+        let show_export = settled && tab.output.is_none() && tab.has_result;
+        let show_dismiss = settled && !tab.hide_results && (tab.has_result || tab.output.is_some());
         let export_view = cx.entity().downgrade();
         let export_tab = tab.id.clone();
         let dismiss_tab = tab.id.clone();
+        let cancel_tab = tab.id.clone();
+        let cancel_exporting = tab.exporting;
         h_flex()
             .w_full()
             .min_w_0()
@@ -840,6 +853,28 @@ impl SqlHighlandView {
                     .text_color(cx.theme().muted_foreground)
                     .child(left),
             )
+            .when(running, |this| {
+                let tip = if cancel_exporting {
+                    "Stop the export — the partial file is discarded"
+                } else {
+                    "Stop waiting — the server finishes in the background and its results are discarded"
+                };
+                this.child(
+                    Button::new("status-cancel")
+                        .danger()
+                        .with_size(d.button_size)
+                        .icon(KitIcon::X)
+                        .tooltip(tip)
+                        .when(!compact, |b| b.label("Cancel"))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            if cancel_exporting {
+                                this.cancel_export(&cancel_tab, cx);
+                            } else {
+                                this.cancel_run(&cancel_tab, cx);
+                            }
+                        })),
+                )
+            })
             .child(div().flex_1())
             .when(!minimal, |this| {
                 this.child(

@@ -71,6 +71,7 @@ impl SqlHighlandView {
             .collect();
         if subs_needed.is_empty() && bind_names.is_empty() {
             let final_sql = apply_substitutions(&sql, &defined);
+            self.record_user_run(tab_id, &final_sql);
             self.run_sql(tab_id, final_sql, Vec::new(), cx);
             return;
         }
@@ -85,6 +86,50 @@ impl SqlHighlandView {
     }
 
     // (open_pick_for_new_tab/open_pick_for_rebind live in conn_picker.rs)
+
+    /// Record the SQL a user-initiated run executed (before any native-sort
+    /// wrap) and clear the active sort, so a fresh query starts unsorted and a
+    /// later header sort re-wraps the original rather than a wrapped query.
+    pub(crate) fn record_user_run(&mut self, tab_id: &str, sql: &str) {
+        if let Some(ix) = self.tab_index(tab_id) {
+            self.tabs[ix].unsorted_sql = sql.to_string();
+            self.tabs[ix].sort = None;
+        }
+    }
+
+    /// Apply (or clear) a native server-side sort from a header click and
+    /// re-run. Re-runs the already-resolved SQL with its retained binds, so the
+    /// variable/bind dialogs are not shown again.
+    pub(crate) fn sort_column(
+        &mut self,
+        tab_id: &str,
+        sort: Option<crate::sql::SortSpec>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.tab_index(tab_id) else {
+            return;
+        };
+        if self.tabs[ix].busy || self.tabs[ix].exporting {
+            return;
+        }
+        if self.tabs[ix].sort == sort {
+            return;
+        }
+        self.tabs[ix].sort = sort;
+        let base = self.tabs[ix].unsorted_sql.clone();
+        let binds = self.tabs[ix].last_binds.clone();
+        let sql = match sort {
+            Some(spec) if crate::sql::is_sortable_sql(&base) => crate::sql::order_by(&base, spec),
+            _ => base,
+        };
+        self.run_sql(tab_id, sql, binds, cx);
+        // A sort re-run is not a user-initiated Run: clear the run kind so the
+        // toolbar's Run button doesn't flash its loading spinner (~1s) on every
+        // header sort. `busy` stays set, so the status bar still shows running.
+        if let Some(ix) = self.tab_index(tab_id) {
+            self.tabs[ix].run_kind = None;
+        }
+    }
 
     // (open_conn_pick_dialog lives in conn_picker.rs)
 
@@ -193,6 +238,11 @@ impl SqlHighlandView {
         // Results fetch size (Settings → Results): rows per page. Read from
         // the live view field so a change applies to the next run. At least 1.
         let fetch_size = self.fetch_size.max(1);
+        // Native sort carried into the new fetch (header indicator state) and
+        // whether this result can be sorted at all. `FOR UPDATE` queries can't
+        // be wrapped in an inline view, and `DESCRIBE` is a client command.
+        let sort_spec = self.tabs[ix].sort;
+        let sortable = crate::sql::is_sortable_sql(&sql);
         // The first page is normally one fetch; never fetch past the cap.
         let first_chunk = cap.min(fetch_size);
         // Ticker repainting the live `Running… Ns` status twice a second.
@@ -313,6 +363,8 @@ impl SqlHighlandView {
                             }),
                             view: view.clone(),
                             tab_id: tab_id.clone(),
+                            sort: sort_spec,
+                            sortable,
                         });
                         this.tabs[ix].fetch = Some(fetch.clone());
                         this.mark_siblings_exhausted(&tab_id, &session);
@@ -348,6 +400,8 @@ impl SqlHighlandView {
                             }),
                             view: view.clone(),
                             tab_id: tab_id.clone(),
+                            sort: sort_spec,
+                            sortable,
                         });
                         this.tabs[ix].fetch = Some(fetch.clone());
                         this.mark_siblings_exhausted(&tab_id, &session);

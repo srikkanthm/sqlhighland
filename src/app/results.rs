@@ -7,6 +7,8 @@
 
 use gpui_kit::component::scroll::Scrollbar;
 
+use crate::sql::{SortDir, SortSpec};
+
 use super::*;
 
 /// Buffered query data shared between the view and the table delegate.
@@ -39,6 +41,12 @@ pub(crate) struct FetchState {
     pub(crate) data: Mutex<ResultData>,
     pub(crate) view: WeakEntity<SqlHighlandView>,
     pub(crate) tab_id: String,
+    /// Active native sort for this result (server-side ORDER BY), so the header
+    /// can show the indicator after a re-run replaces the fetch.
+    pub(crate) sort: Option<SortSpec>,
+    /// Whether a native sort re-run is valid for the executed SQL (not a
+    /// `FOR UPDATE` query or `DESCRIBE`).
+    pub(crate) sortable: bool,
 }
 
 /// Table delegate over the shared [`FetchState`] of a tab's latest query.
@@ -166,6 +174,27 @@ impl TableDelegate for ResultsDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let name = self.column(col_ix, cx).name;
+        // Native sort affordance (data columns only): clicking cycles
+        // Asc -> Desc -> clear and re-runs the query server-side. The kit's
+        // own sort path is bypassed — it cycles descending-first.
+        let (sortable, active, view, tab_id) = match &self.fetch {
+            Some(f) if col_ix > 0 => (f.sortable, f.sort, Some(f.view.clone()), f.tab_id.clone()),
+            _ => (false, None, None, String::new()),
+        };
+        let indicator = active.filter(|s| s.col == col_ix).map(|s| s.dir);
+        let next = match active {
+            Some(s) if s.col == col_ix => match s.dir {
+                SortDir::Asc => Some(SortSpec {
+                    col: col_ix,
+                    dir: SortDir::Desc,
+                }),
+                SortDir::Desc => None,
+            },
+            _ => Some(SortSpec {
+                col: col_ix,
+                dir: SortDir::Asc,
+            }),
+        };
         // `h_full + items_center`: the kit's header wrapper centers a
         // content-sized child, but a full-height one defeats it and the
         // label sticks to the top (visible once the grid density grows the
@@ -175,23 +204,47 @@ impl TableDelegate for ResultsDelegate {
         // The name gets a truncating text style so a long header ellipsizes
         // (matching the body cells' `.truncate()`) instead of hard-clipping
         // at the cell edge — `SelectableText` lays out at its natural width
-        // otherwise. No `min_w_0`/wrapper: that collapsed the label's width
-        // and ellipsized names that actually fit.
+        // otherwise.
+        let mut label = h_flex().gap_1().items_center().child(
+            SelectableText::new(format!("col-th-{col_ix}"), name).text_style(
+                gpui_kit::TextStyleRefinement {
+                    white_space: Some(gpui_kit::WhiteSpace::Nowrap),
+                    text_overflow: Some(gpui_kit::TextOverflow::Truncate("…".into())),
+                    ..Default::default()
+                },
+            ),
+        );
+        if let Some(dir) = indicator {
+            label = label.child(
+                Icon::new(match dir {
+                    SortDir::Asc => KitIcon::ChevronUp,
+                    SortDir::Desc => KitIcon::ChevronDown,
+                })
+                .size_3(),
+            );
+        }
         div()
+            .id(("col-sort", col_ix))
             .w_full()
             .h_full()
             .flex()
             .items_center()
             .when(col_ix == 0, |this| this.justify_end())
-            .child(
-                SelectableText::new(format!("col-th-{col_ix}"), name).text_style(
-                    gpui_kit::TextStyleRefinement {
-                        white_space: Some(gpui_kit::WhiteSpace::Nowrap),
-                        text_overflow: Some(gpui_kit::TextOverflow::Truncate("…".into())),
-                        ..Default::default()
-                    },
-                ),
-            )
+            .child(label)
+            .when(sortable, |this| {
+                this.cursor_pointer()
+                    .on_click(move |event, _window, cx: &mut App| {
+                        // Double-click only (SQL Developer style): a single
+                        // click on the header stays inert.
+                        if event.click_count() != 2 {
+                            return;
+                        }
+                        if let Some(view) = view.clone() {
+                            view.update(cx, |this, cx| this.sort_column(&tab_id, next, cx))
+                                .ok();
+                        }
+                    })
+            })
     }
 
     fn render_td(

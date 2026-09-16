@@ -16,6 +16,7 @@ pub fn format_sql(sql: &str) -> String {
 
 mod classify;
 mod diagnostics;
+mod order;
 mod script;
 mod split;
 mod substitute;
@@ -23,6 +24,7 @@ mod substitute;
 // Re-exports preserve the public `crate::sql::…` API across the split.
 pub use classify::*;
 pub use diagnostics::*;
+pub use order::*;
 pub use script::*;
 pub use split::*;
 pub use substitute::*;

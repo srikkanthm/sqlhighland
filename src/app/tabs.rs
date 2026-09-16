@@ -160,6 +160,8 @@ impl SqlHighlandView {
             output_text: cx.new(|cx| TextareaState::new(window, cx)),
             last_sql: String::new(),
             last_binds: Vec::new(),
+            unsorted_sql: String::new(),
+            sort: None,
             exporting: false,
             export_rows: 0,
             export_cancel: None,
