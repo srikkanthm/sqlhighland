@@ -40,11 +40,22 @@ gpui-kit-assets = { version = "=0.6.1", optional = true }
 # Native .xlsx export (pure Rust, no native deps). Pinned like the rest.
 # `constant_memory` streams worksheet writes (uncapped exports stay lean).
 rust_xlsxwriter = { version = "=0.99.0", features = ["constant_memory"] }
+# Tree-sitter + the SQL grammar for live syntax/structure diagnostics
+# (gui-only; gpui-kit already pulls these transitively for highlighting).
+tree-sitter = { version = "0.26", optional = true }
+tree-sitter-sequel = { version = "0.3", optional = true }
 
 [features]
 default = []
 # Build/run the desktop app with: cargo run --features gui
-gui = ["dep:gpui", "dep:gpui-kit", "dep:gpui-kit-assets", "dep:lsp-types"]
+gui = [
+    "dep:gpui",
+    "dep:gpui-kit",
+    "dep:gpui-kit-assets",
+    "dep:lsp-types",
+    "dep:tree-sitter",
+    "dep:tree-sitter-sequel",
+]
 # gui + the kit's test-support for the headless UI tests. Kept separate from
 # `gui` so the GUI-free `core`/`msrv` targets never pull gpui-pre-linux (and
 # its fontconfig/wgpu/oo7 tree) on Linux.
@@ -108,4 +119,9 @@ required-features = ["gui-test"]
 [[test]]
 name = "tab_nav"
 path = "tests/tab_nav.rs"
+required-features = ["gui-test"]
+
+[[test]]
+name = "sql_diagnostics"
+path = "tests/sql_diagnostics.rs"
 required-features = ["gui-test"]

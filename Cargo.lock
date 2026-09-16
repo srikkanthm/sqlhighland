@@ -6788,6 +6788,8 @@ dependencies = [
  "serde",
  "sqlformat",
  "toml 0.8.23",
+ "tree-sitter",
+ "tree-sitter-sequel",
  "uuid",
  "zeroize",
 ]

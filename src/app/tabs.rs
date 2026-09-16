@@ -116,6 +116,7 @@ impl SqlHighlandView {
                         tab.dirty = true;
                     }
                     this.schedule_draft_save(&tab_id, cx);
+                    this.schedule_diagnostics(&tab_id, cx);
                 }
             }),
             cx.subscribe_in(&table, window, move |this, _, ev: &TableEvent, _, _| {
@@ -163,6 +164,8 @@ impl SqlHighlandView {
             export_rows: 0,
             export_cancel: None,
             save_task: None,
+            diagnostics_task: None,
+            last_structural: Vec::new(),
             _subs: subs,
         });
     }
@@ -840,6 +843,75 @@ impl SqlHighlandView {
         }
     }
 
+    // -- Live SQL syntax/structure diagnostics ------------------------------
+
+    /// Debounce for the tree-sitter structural pass. The lexical pass runs
+    /// synchronously so feedback for unterminated literals / unbalanced
+    /// parens is instant.
+    const DIAGNOSTICS_DEBOUNCE: Duration = Duration::from_millis(300);
+
+    /// Check a tab's buffer after an edit: push lexical issues (plus the last
+    /// structural set, so squiggles don't blink off) immediately, then run the
+    /// debounced tree-sitter pass and push the merged result.
+    pub(super) fn schedule_diagnostics(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        let Some(ix) = self.tab_index(tab_id) else {
+            return;
+        };
+        let editor = self.tabs[ix].editor.clone();
+        if !self.sql_diagnostics {
+            self.tabs[ix].diagnostics_task = None;
+            self.tabs[ix].last_structural.clear();
+            push_editor_diagnostics(&editor, "", &[], cx);
+            return;
+        }
+        let text = editor.read(cx).value().to_string();
+        // Immediate, flicker-free: current lexical issues + last structural.
+        let mut immediate = crate::sql::lexical_issues(&text);
+        immediate.extend(self.tabs[ix].last_structural.iter().cloned());
+        immediate.sort_by_key(|i| i.start);
+        immediate.truncate(crate::sqlparse::ISSUE_CAP);
+        push_editor_diagnostics(&editor, &text, &immediate, cx);
+
+        // Debounced structural recompute on the background executor.
+        let view = cx.entity().downgrade();
+        let tab_key = self.tabs[ix].id.clone();
+        let tab_key_bg = tab_key.clone();
+        let bg = cx.background_executor().clone();
+        let scope = self.sql_check_scope;
+        let task = cx.spawn(async move |_, cx| {
+            bg.timer(Self::DIAGNOSTICS_DEBOUNCE).await;
+            let structural = bg
+                .spawn(async move { crate::sqlparse::syntax_issues(&text, scope) })
+                .await;
+            view.update(cx, |this, cx| {
+                let Some(tab) = this.tab_by_id(&tab_key_bg) else {
+                    return;
+                };
+                tab.last_structural = structural.clone();
+                let editor = tab.editor.clone();
+                let text = editor.read(cx).value().to_string();
+                let mut issues = crate::sql::lexical_issues(&text);
+                issues.extend(structural);
+                issues.sort_by_key(|i| i.start);
+                issues.truncate(crate::sqlparse::ISSUE_CAP);
+                push_editor_diagnostics(&editor, &text, &issues, cx);
+            })
+            .ok();
+        });
+        if let Some(tab) = self.tab_by_id(&tab_key) {
+            tab.diagnostics_task = Some(task);
+        }
+    }
+
+    /// Re-check every tab (used when the enable toggle or scope setting
+    /// changes).
+    pub(crate) fn refresh_all_diagnostics(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self.tabs.iter().map(|t| t.id.clone()).collect();
+        for id in ids {
+            self.schedule_diagnostics(&id, cx);
+        }
+    }
+
     // -- App-global entry points (main.rs) -----------------------------------
 
     /// App-global entry points (main.rs): the deferred bodies behind
@@ -858,4 +930,56 @@ impl SqlHighlandView {
         let tab_id = self.active_tab().id.clone();
         self.request_close_tab(&tab_id, window, cx);
     }
+
+    /// Test hook: number of diagnostics currently on the active tab's editor.
+    #[cfg(feature = "gui-test")]
+    pub fn debug_active_diagnostic_count(&self, cx: &App) -> usize {
+        self.active_tab()
+            .editor
+            .read(cx)
+            .diagnostics()
+            .map(|set| set.len())
+            .unwrap_or(0)
+    }
+}
+
+/// Replace an editor's diagnostic set with `issues` (byte ranges into `text`).
+/// The kit paints severity-colored underlines and a hover popover, so this is
+/// all the UI work; no rendering is done here.
+fn push_editor_diagnostics(
+    editor: &Entity<EditorState>,
+    text: &str,
+    issues: &[crate::sql::SqlIssue],
+    cx: &mut Context<SqlHighlandView>,
+) {
+    use crate::complete::byte_to_lsp_pos;
+    use gpui_kit::base::input::{Diagnostic, DiagnosticSeverity, Position};
+    editor.update(cx, |state, cx| {
+        if let Some(set) = state.diagnostics_mut() {
+            set.clear();
+            for issue in issues {
+                let (sl, sc) = byte_to_lsp_pos(text, issue.start);
+                let (el, ec) = byte_to_lsp_pos(text, issue.end);
+                let severity = match issue.severity {
+                    crate::sql::IssueSeverity::Error => DiagnosticSeverity::Error,
+                    crate::sql::IssueSeverity::Warning => DiagnosticSeverity::Warning,
+                };
+                set.push(
+                    Diagnostic::new(
+                        Position {
+                            line: sl,
+                            character: sc,
+                        }..Position {
+                            line: el,
+                            character: ec,
+                        },
+                        issue.message.clone(),
+                    )
+                    .with_severity(severity)
+                    .with_source("SQLHighland"),
+                );
+            }
+        }
+        cx.notify();
+    });
 }

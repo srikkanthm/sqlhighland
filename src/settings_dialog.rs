@@ -127,6 +127,7 @@ impl SqlHighlandView {
             theme_select: self.theme_select.clone(),
             font_select: self.font_select.clone(),
             density_select: self.density_select.clone(),
+            sql_scope_select: self.sql_scope_select.clone(),
             grid_row_height: self.grid_row_height,
         }
     }
@@ -227,6 +228,12 @@ impl SqlHighlandView {
         density_select.update(cx, |state, cx| {
             state.set_selected_value(&SharedString::from(density_label), window, cx);
         });
+        // Seed the SQL check-scope dropdown.
+        let sql_scope_select = controls.sql_scope_select;
+        let scope_label = Preferences::load().sql_check_scope.label();
+        sql_scope_select.update(cx, |state, cx| {
+            state.set_selected_value(&SharedString::from(scope_label), window, cx);
+        });
         // A targeted open (About) uses a unique id so the kit builds fresh
         // state on the requested page; a normal open keeps the persistent id
         // (and its remembered page/search).
@@ -249,15 +256,18 @@ impl SqlHighlandView {
             let theme_select = theme_select.clone();
             let font_select = font_select.clone();
             let density_select = density_select.clone();
+            let sql_scope_select = sql_scope_select.clone();
             // Reloaded on every rebuild so switches follow live prefs.
             let current_mode = Preferences::load().completion;
             let show_system = Preferences::load().show_system_schemas;
+            let syntax_enabled = Preferences::load().sql_diagnostics;
             let dialog_density = Density::for_level(Preferences::load().ui_density);
             let pad = px(dialog_density.dialog_pad);
             let gap = px(dialog_density.gap);
             let control = dialog_density.control_size;
             let complete_view = view.clone();
             let system_view = view.clone();
+            let syntax_view = view.clone();
             let system_selected = show_system;
             let system_view_outer = system_view.clone();
             let hover_view_outer = view.clone();
@@ -547,6 +557,94 @@ impl SqlHighlandView {
                                             "ttl",
                                             "expire",
                                             "dictionary",
+                                        ]),
+                                    ]),
+                                    SettingGroup::new().title("Syntax").items(vec![
+                                        SettingItem::render(move |_, _, _| {
+                                            let toggle_view = syntax_view.clone();
+                                            div()
+                                                .id("settings-syntax-toggle")
+                                                .w_full()
+                                                .p(pad)
+                                                .rounded_md()
+                                                .child(
+                                                    h_flex()
+                                                        .gap(gap)
+                                                        .items_center()
+                                                        .child(
+                                                            v_flex()
+                                                                .flex_1()
+                                                                .child(
+                                                                    div()
+                                                                        .text_sm()
+                                                                        .child("Check SQL as you type"),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .text_xs()
+                                                                        .text_color(muted)
+                                                                        .child(
+                                                                            "Underline syntax/structure problems",
+                                                                        ),
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            Switch::new("settings-syntax-enabled")
+                                                                .small()
+                                                                .checked(syntax_enabled)
+                                                                .on_change(move |checked, window, cx| {
+                                                                    let enabled = *checked;
+                                                                    let mut prefs = Preferences::load();
+                                                                    prefs.sql_diagnostics = enabled;
+                                                                    let save_err = prefs.save().err();
+                                                                    toggle_view.update(cx, |this, cx| {
+                                                                        if let Some(e) = &save_err {
+                                                                            this.status = format!(
+                                                                                "Preferences save failed: {e:#}"
+                                                                            )
+                                                                            .into();
+                                                                        }
+                                                                        this.sql_diagnostics = enabled;
+                                                                        this.refresh_all_diagnostics(window, cx);
+                                                                        cx.notify();
+                                                                    });
+                                                                }),
+                                                        ),
+                                                )
+                                        })
+                                        .keywords(["syntax", "error", "check", "lint", "diagnostics"]),
+                                        SettingItem::render(move |_, _, _| {
+                                            let select = sql_scope_select.clone();
+                                            v_flex().gap_1().child(
+                                                div()
+                                                    .id("settings-sql-scope")
+                                                    .w_full()
+                                                    .p(pad)
+                                                    .rounded_md()
+                                                    .child(
+                                                        v_flex()
+                                                            .gap_1()
+                                                            .child(
+                                                                div().text_sm().child("Check scope"),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(muted)
+                                                                    .child(
+                                                                        "How much of the editor to parse",
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                Select::new(&select)
+                                                                    .w_full()
+                                                                    .with_size(control),
+                                                            ),
+                                                    ),
+                                            )
+                                        })
+                                        .keywords([
+                                            "syntax", "scope", "statement", "buffer", "check",
                                         ]),
                                     ]),
                                     SettingGroup::new().title("Font").items(vec![

@@ -33,3 +33,5 @@ pub mod run;
 pub mod settings_dialog;
 #[cfg(feature = "gui")]
 pub mod sidebar;
+#[cfg(feature = "gui")]
+pub mod sqlparse;

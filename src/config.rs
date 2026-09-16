@@ -284,6 +284,12 @@ pub struct Preferences {
     /// default (the cards are informative but can be noisy).
     #[serde(default)]
     pub hover_details: bool,
+    /// Live SQL syntax/structure checking in the editor. Default on.
+    #[serde(default = "default_true")]
+    pub sql_diagnostics: bool,
+    /// How much of the buffer the syntax check parses. Default whole buffer.
+    #[serde(default)]
+    pub sql_check_scope: SqlCheckScope,
     /// Results-grid row cap (exports stay uncapped). Default 100k; `0`
     /// means unlimited (page until the cursor is exhausted).
     #[serde(default = "default_result_cap")]
@@ -341,6 +347,8 @@ impl Default for Preferences {
             show_system_schemas: false,
             ui_density: UiDensity::default(),
             hover_details: false,
+            sql_diagnostics: true,
+            sql_check_scope: SqlCheckScope::default(),
             result_cap: default_result_cap(),
             fetch_size: default_fetch_size(),
             export_fetch_size: default_export_fetch_size(),
@@ -448,6 +456,25 @@ impl UiDensity {
         match self {
             UiDensity::Compact => "Compact",
             UiDensity::Comfortable => "Comfortable",
+        }
+    }
+}
+
+/// How much of the buffer the live SQL syntax check parses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SqlCheckScope {
+    /// Parse the whole buffer (default).
+    #[default]
+    WholeBuffer,
+    /// Parse only the statement under the cursor.
+    Statement,
+}
+
+impl SqlCheckScope {
+    pub fn label(self) -> &'static str {
+        match self {
+            SqlCheckScope::WholeBuffer => "Whole buffer",
+            SqlCheckScope::Statement => "Current statement",
         }
     }
 }
@@ -664,6 +691,8 @@ mod tests {
         assert_eq!(p.font_size, 13);
         assert_eq!(p.query_timeout_secs, 60);
         assert!(!p.hover_details);
+        assert!(p.sql_diagnostics);
+        assert_eq!(p.sql_check_scope, SqlCheckScope::WholeBuffer);
         assert_eq!(p.grid_row_height, 22);
         // Suggestions cache never expires by default.
         assert_eq!(p.metadata_ttl_secs, 0);

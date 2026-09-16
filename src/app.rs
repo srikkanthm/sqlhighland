@@ -20,8 +20,8 @@ use crate::complete::{
     qualifier_before, word_at,
 };
 use crate::config::{
-    CompleteMode, Preferences, SavedConfig, SavedTab, TabsManifest, UiDensity, FONT_FAMILIES,
-    GRID_ROW_HEIGHT_MAX, GRID_ROW_HEIGHT_MIN, THEME_LIST,
+    CompleteMode, Preferences, SavedConfig, SavedTab, SqlCheckScope, TabsManifest, UiDensity,
+    FONT_FAMILIES, GRID_ROW_HEIGHT_MAX, GRID_ROW_HEIGHT_MIN, THEME_LIST,
 };
 use crate::conn_picker::{PendingPick, PickAfter};
 use crate::db::SharedSession;
@@ -263,6 +263,12 @@ pub(crate) struct QueryTab {
     /// Cancellation flag polled by the drain loop each chunk.
     pub(crate) export_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) save_task: Option<Task<()>>,
+    /// Debounced SQL syntax-check task. Replacing it cancels the pending pass.
+    pub(crate) diagnostics_task: Option<Task<()>>,
+    /// Structural (tree-sitter) issues from the last pass, re-pushed
+    /// immediately after an edit so squiggles don't flicker off while the
+    /// next debounced pass runs.
+    pub(crate) last_structural: Vec<crate::sql::SqlIssue>,
     pub(crate) _subs: Vec<Subscription>,
 }
 
@@ -375,6 +381,7 @@ pub struct SettingsControls {
     pub(crate) theme_select: Entity<SelectState<SearchableVec<SharedString>>>,
     pub(crate) font_select: Entity<SelectState<SearchableVec<ChoiceItem>>>,
     pub(crate) density_select: Entity<SelectState<SearchableVec<SharedString>>>,
+    pub(crate) sql_scope_select: Entity<SelectState<SearchableVec<SharedString>>>,
     pub(crate) grid_row_height: u32,
 }
 
@@ -679,6 +686,12 @@ pub struct SqlHighlandView {
     pub(crate) font_select: Entity<SelectState<SearchableVec<ChoiceItem>>>,
     /// Settings → Themes → interface density dropdown.
     pub(crate) density_select: Entity<SelectState<SearchableVec<SharedString>>>,
+    /// Settings → Editor → SQL check scope dropdown.
+    pub(crate) sql_scope_select: Entity<SelectState<SearchableVec<SharedString>>>,
+    /// Live SQL syntax/structure checking. Mirrors the preference.
+    pub(crate) sql_diagnostics: bool,
+    /// Scope for the SQL syntax check. Mirrors the preference.
+    pub(crate) sql_check_scope: SqlCheckScope,
     /// Free-form results-grid row cap field (Settings → Results). `0` or
     /// empty means unlimited.
     pub(crate) result_cap_input: Entity<InputState>,
@@ -888,6 +901,13 @@ impl SqlHighlandView {
             .collect();
         let density_select =
             cx.new(|cx| SelectState::new(SearchableVec::new(density_items), None, window, cx));
+        // Settings → Editor → SQL check scope (two options).
+        let scope_items: Vec<SharedString> = [SqlCheckScope::WholeBuffer, SqlCheckScope::Statement]
+            .iter()
+            .map(|s| SharedString::from(s.label()))
+            .collect();
+        let sql_scope_select =
+            cx.new(|cx| SelectState::new(SearchableVec::new(scope_items), None, window, cx));
 
         // Cmd+Enter runs the statement under the cursor. Scoped to the
         // editor's own `Input` key context; the handler double-checks focus.
@@ -1017,6 +1037,9 @@ impl SqlHighlandView {
             theme_select,
             font_select,
             density_select,
+            sql_scope_select,
+            sql_diagnostics: prefs.sql_diagnostics,
+            sql_check_scope: prefs.sql_check_scope,
             result_cap_input,
             fetch_size_input,
             export_fetch_size_input,
@@ -1306,6 +1329,31 @@ impl SqlHighlandView {
                         }
                         this.ui_density = density;
                         cx.notify();
+                    }
+                },
+            );
+            this._subs.push(sub);
+        }
+        // SQL-check-scope dropdown: apply + persist, then re-check every tab.
+        {
+            let select = this.sql_scope_select.clone();
+            let sub = cx.subscribe_in(
+                &select,
+                window,
+                move |this, _, ev: &SelectEvent<SearchableVec<SharedString>>, window, cx| {
+                    if let SelectEvent::Confirm(Some(label)) = ev {
+                        let scope = if label.as_ref() == SqlCheckScope::Statement.label() {
+                            SqlCheckScope::Statement
+                        } else {
+                            SqlCheckScope::WholeBuffer
+                        };
+                        let mut prefs = Preferences::load();
+                        prefs.sql_check_scope = scope;
+                        if let Err(e) = prefs.save() {
+                            this.status = format!("Preferences save failed: {e:#}").into();
+                        }
+                        this.sql_check_scope = scope;
+                        this.refresh_all_diagnostics(window, cx);
                     }
                 },
             );
