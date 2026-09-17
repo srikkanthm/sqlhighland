@@ -7,7 +7,9 @@
 
 use std::rc::Rc;
 
+use super::tab_drag::{TabDrag, TabDragGhost};
 use super::*;
+use gpui_kit::base::Tab as BaseTab;
 
 impl SqlHighlandView {
     // -- Schema browser (see browser.rs) --------------------------------------
@@ -195,56 +197,167 @@ impl SqlHighlandView {
 
     // (render_connection_row + render_sidebar live in sidebar.rs)
 
+    /// The tab strip. Tabs are `gpui_base::Tab`s inside a scrollable row, so
+    /// each keeps its role/selection accessibility and can also be dragged.
+    ///
+    /// A drag does not reorder the model: it only moves a drop indicator to the
+    /// insertion slot (computed from the *stable* tab bounds) and the reorder
+    /// happens once, on drop. Reordering live mutates the very layout the hit
+    /// test reads back, which cascades into visible flicker.
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let d = self.density();
-        TabBar::new("query-tabs")
-            .w_full()
-            // Underline tabs have no inner padding, so without this the first
-            // tab (and its active underline) sits flush under the centered
-            // split handle/grip. Match the editor's own inset so the first
-            // tab lines up with the pane content.
-            .pl(px(d.pane_pad))
-            .with_size(d.tab_size)
-            // Underline gives the active tab a primary-color bar; the default
-            // filled variant resolves to `tab_active` (== background), which is
-            // near-indistinguishable from the bar itself in most themes. Keep
-            // the strip's usual `tab_bar` fill (Underline defaults to
-            // transparent) so only the active-tab indicator changes.
-            .with_variant(TabVariant::Underline)
-            .bg(cx.theme().tab_bar)
-            .prefix(self.render_tab_nav(cx))
-            .selected_index(self.active)
-            .track_scroll(&self.tab_scroll)
-            .on_click(cx.listener(|this, ix: &usize, window, cx| {
-                this.select_tab(*ix, window, cx);
-            }))
-            .children(self.tabs.iter().enumerate().map(|(ix, tab)| {
-                let tab_id = tab.id.clone();
-                let label = if tab.dirty {
-                    format!("{} *", tab.name)
+        let tab_h = match d.tab_size {
+            Size::XSmall => 26.0,
+            Size::Small => 30.0,
+            Size::Large => 44.0,
+            _ => 36.0,
+        };
+        let tab_gap = if d.is_compact { 12.0 } else { 16.0 };
+        let border = cx.theme().border;
+        let primary = cx.theme().primary;
+        let transparent = cx.theme().transparent;
+        let fg = cx.theme().foreground;
+        let muted = cx.theme().muted_foreground;
+        // Built before `tabs`: that map borrows `cx` for its listener
+        // registrations, so a later `&mut cx` call would conflict.
+        let nav = self.render_tab_nav(cx);
+        // Refresh the per-tab bounds backing the drop indicator.
+        self.tab_bounds
+            .borrow_mut()
+            .resize(self.tabs.len(), zero_bounds());
+        let tab_bounds = self.tab_bounds.clone();
+        let strip_bounds = self.tab_strip_bounds.clone();
+
+        let tabs = self.tabs.iter().enumerate().map(|(ix, tab)| {
+            let selected = self.active == ix;
+            let close_id = tab.id.clone();
+            let label: SharedString = if tab.dirty {
+                format!("{} *", tab.name).into()
+            } else {
+                tab.name.clone()
+            };
+            let drag = TabDrag {
+                id: tab.id.clone(),
+                label: label.clone(),
+            };
+            let bounds = tab_bounds.clone();
+            BaseTab::new(ix)
+                .selected(selected)
+                .aria_label(label.clone())
+                .h(px(tab_h))
+                .gap_1()
+                .flex_shrink_0()
+                .text_sm()
+                .border_b_2()
+                .border_color(if selected { primary } else { transparent })
+                .text_color(if selected { fg } else { muted })
+                .when(!selected, |this| this.hover(|this| this.text_color(fg)))
+                .on_prepaint(move |bounds_rect, _, _| {
+                    if let Some(slot) = bounds.borrow_mut().get_mut(ix) {
+                        *slot = bounds_rect;
+                    }
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.select_tab(ix, window, cx);
+                }))
+                // Start a drag carrying the tab's stable id.
+                .on_drag(drag, move |value, _offset, _window, cx| {
+                    cx.new(|_| TabDragGhost::new(value.label.clone()))
+                })
+                .child(if selected {
+                    div().font_weight(FontWeight::MEDIUM).child(label)
                 } else {
-                    tab.name.to_string()
-                };
-                Tab::new().label(label).selected(self.active == ix).suffix(
+                    div().child(label)
+                })
+                .child(
                     Button::new(("tab-close", ix))
                         .icon(KitIcon::X)
                         .ghost()
                         .with_size(d.button_size)
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.request_close_tab(&tab_id, window, cx);
+                            this.request_close_tab(&close_id, window, cx);
                         })),
                 )
-            }))
-            .suffix(
-                Button::new("tab-add")
-                    .icon(KitIcon::Plus)
-                    .ghost()
-                    .with_size(d.button_size)
-                    .tooltip("New tab")
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.add_tab(None, String::new(), window, cx);
-                    })),
+        });
+
+        // Drop indicator: a primary vertical bar at the insertion slot, in
+        // strip-local coordinates (tab bounds are window coords).
+        let indicator = self.drag_slot.get().and_then(|slot| {
+            let bounds = self.tab_bounds.borrow();
+            if bounds.is_empty() || bounds[0].size.width <= px(0.) {
+                return None;
+            }
+            let x = if slot == 0 {
+                bounds[0].left() - px(tab_gap / 2.)
+            } else if slot >= bounds.len() {
+                bounds[bounds.len() - 1].right() + px(tab_gap / 2.)
+            } else {
+                bounds[slot - 1].right() + (bounds[slot].left() - bounds[slot - 1].right()) / 2.
+            };
+            let left = x - self.tab_strip_bounds.borrow().left();
+            Some(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(left)
+                    .w(px(2.))
+                    .bg(primary)
+                    .into_any_element(),
             )
+        });
+
+        h_flex()
+            .id("tab-strip")
+            .w_full()
+            .relative()
+            // Underline tabs have no inner padding, so without this the first
+            // tab (and its active underline) sits flush under the centered
+            // split handle/grip. Match the editor's own inset.
+            .pl(px(d.pane_pad))
+            .bg(cx.theme().tab_bar)
+            .border_b_1()
+            .border_color(border)
+            .on_prepaint(move |bounds, _, _| {
+                *strip_bounds.borrow_mut() = bounds;
+            })
+            .child(nav)
+            .child(
+                h_flex()
+                    .id("tab-scroll")
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(tab_gap))
+                    .overflow_x_scroll()
+                    .track_scroll(&self.tab_scroll)
+                    .children(tabs),
+            )
+            .child(
+                div().flex_shrink_0().child(
+                    Button::new("tab-add")
+                        .icon(KitIcon::Plus)
+                        .ghost()
+                        .with_size(d.button_size)
+                        .tooltip("New tab")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.add_tab(None, String::new(), window, cx);
+                        })),
+                ),
+            )
+            .when_some(indicator, |this, indicator| this.child(indicator))
+            // Reorder exactly once, into the slot the indicator showed.
+            .on_drop::<TabDrag>(cx.listener(|this, value: &TabDrag, window, cx| {
+                let slot = this.drag_slot.take();
+                if let (Some(from), Some(slot)) = (this.tab_index(&value.id), slot) {
+                    let to = if slot > from { slot - 1 } else { slot };
+                    this.move_tab(from, to, cx);
+                }
+                if let Some(ix) = this.tab_index(&value.id) {
+                    this.select_tab(ix, window, cx);
+                }
+                this.persist_tabs(cx);
+                cx.notify();
+            }))
     }
 
     /// Back/forward buttons for the tab strip: move to the previous/next tab
@@ -1129,6 +1242,12 @@ impl SqlHighlandView {
             .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
                 this.cycle_tab(-1, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &MoveTabLeft, _, cx| {
+                this.move_active_tab(-1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &MoveTabRight, _, cx| {
+                this.move_active_tab(1, cx);
+            }))
             // Dismiss lives here too (same bubble-path reason as the tab
             // actions above; dialogs are outside every root, so modals
             // never see it).
@@ -1136,6 +1255,34 @@ impl SqlHighlandView {
                 let tab_id = this.active_tab().id.clone();
                 this.dismiss_results(&tab_id, cx);
             }))
+            // Track the tab-drag insertion slot. Registered on the root so it
+            // also clears the indicator once the pointer leaves the strip. The
+            // tab model is untouched during the drag, so the bounds it reads
+            // stay fixed and the slot cannot oscillate.
+            .on_drag_move::<TabDrag>(cx.listener(
+                |this, e: &DragMoveEvent<TabDrag>, _window, cx| {
+                    let inside = this.tab_strip_bounds.borrow().contains(&e.event.position);
+                    let slot = if inside {
+                        let bounds = this.tab_bounds.borrow();
+                        if bounds.first().is_some_and(|b| b.size.width > px(0.)) {
+                            Some(
+                                bounds
+                                    .iter()
+                                    .filter(|b| b.center().x < e.event.position.x)
+                                    .count(),
+                            )
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if this.drag_slot.get() != slot {
+                        this.drag_slot.set(slot);
+                        cx.notify();
+                    }
+                },
+            ))
             // Disconnect the active tab's connection (Shift+Cmd+D). Confirmation
             // happens in `disconnect_active`; dialogs sit outside this root, so
             // modals never trigger it.
@@ -1161,6 +1308,11 @@ impl SqlHighlandView {
             .child(self.render_status_bar(cx))
             .into_any_element()
     }
+}
+
+/// An empty rect: the placeholder bounds for a tab before its first prepaint.
+fn zero_bounds() -> Bounds<Pixels> {
+    Bounds::new(point(px(0.), px(0.)), size(px(0.), px(0.)))
 }
 
 /// Shorten a label to at most `max` characters, appending an ellipsis when

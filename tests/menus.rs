@@ -42,6 +42,8 @@ async fn menu_coverage(_cx: &mut TestAppContext) {
         "ToggleSidebar",
         "NextTab",
         "PrevTab",
+        "MoveTabLeft",
+        "MoveTabRight",
         "DismissResults",
         "ZoomIn",
         "ZoomOut",

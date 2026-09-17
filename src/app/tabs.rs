@@ -607,15 +607,11 @@ impl SqlHighlandView {
 
     /// Scroll the tab strip so tab `ix` is visible.
     ///
-    /// The kit's `TabBar` scroll area tracks more children than the tab
-    /// wrappers: its sliding indicator plus one more lead them, and a trailing
-    /// spacer follows (`children = leading + tabs + 1`, leading = 2 with the
-    /// Underline bar). So display tab `ix` is scroll child `ix + 2`; indexing
-    /// by `ix` targets the previous tab and never reveals the newly active one
-    /// going Forward. `tests/tab_nav.rs` guards the offset.
+    /// The scroll container's only children are the tabs (the nav-arrow prefix
+    /// and the `+` suffix sit outside it), so the scroll index is the tab
+    /// index. `tests/tab_nav.rs` guards that the active tab stays on screen.
     fn scroll_tab_into_view(&self, ix: usize) {
-        const TAB_SCROLL_LEADING: usize = 2;
-        self.tab_scroll.scroll_to_item(TAB_SCROLL_LEADING + ix);
+        self.tab_scroll.scroll_to_item(ix);
     }
 
     /// Tab-strip back/forward: move to the previous/next tab in display order.
@@ -631,6 +627,53 @@ impl SqlHighlandView {
         if self.active + 1 < self.tabs.len() {
             self.select_tab(self.active + 1, window, cx);
         }
+    }
+
+    /// Move the tab at `from` to index `to`. No-op when either index is out
+    /// of range or the slots already match. The moved tab stays active, any
+    /// other active tab is remapped to its shifted slot, and the new order is
+    /// persisted so it survives relaunch.
+    pub(crate) fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if !self.reorder(from, to) {
+            return;
+        }
+        self.scroll_tab_into_view(self.active);
+        self.persist_tabs(cx);
+        cx.notify();
+    }
+
+    /// Splice the tab at `from` into slot `to`, remapping `active` across the
+    /// remove+insert. Returns false (and changes nothing) when the indices are
+    /// out of range or already equal.
+    fn reorder(&mut self, from: usize, to: usize) -> bool {
+        if from >= self.tabs.len() || to >= self.tabs.len() || from == to {
+            return false;
+        }
+        let moved = self.tabs.remove(from);
+        self.tabs.insert(to, moved);
+        // `remove` shifts everything after `from` left, then `insert` shifts
+        // everything from `to` right; track the active slot across both.
+        self.active = if self.active == from {
+            to
+        } else if from < self.active && to >= self.active {
+            self.active - 1
+        } else if from > self.active && to <= self.active {
+            self.active + 1
+        } else {
+            self.active
+        };
+        true
+    }
+
+    /// Move the active tab one slot left/right in display order. No-op at the
+    /// ends. Backs the Move Tab Left/Right actions (and drag reordering will
+    /// reuse [`move_tab`](Self::move_tab)).
+    pub(crate) fn move_active_tab(&mut self, dir: isize, cx: &mut Context<Self>) {
+        let to = self.active as isize + dir;
+        if to < 0 || to as usize >= self.tabs.len() {
+            return;
+        }
+        self.move_tab(self.active, to as usize, cx);
     }
 
     pub(super) fn check_external_change(

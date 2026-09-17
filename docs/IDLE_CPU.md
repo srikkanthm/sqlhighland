@@ -45,12 +45,10 @@ scheduling (or a platform frame pump), not in application logic.
 
 1. **GPUI's macOS frame pump presenting continuously** — the window never
    becoming fully idle, so a frame is drawn each display refresh.
-2. **Tab-bar Underline sliding indicator** — `spring()` in
-   `gpui-base/src/motion.rs:562` calls `window.request_animation_frame()`
-   (`:634`) until the spring settles. Introduced when the active tab moved to
-   the `Underline` variant. A target that keeps changing by a fraction per
-   frame (`anim_params` in `gpui-component/src/tab/tab_bar.rs:324`) would keep
-   it running.
+2. **Tab-bar Underline sliding indicator** — *removed in the tab-strip rework*:
+   the strip no longer uses the kit `TabBar` or its `spring()` indicator. Tabs
+   are plain `gpui_base::Tab`s with a static 2px underline
+   (`src/app/render.rs`), so this animation source is gone.
 3. **Scrollbar fade/thumb animation** — `gpui-base/src/scrollbar.rs:1234`
    (visibility) and `:1365` (thumb width) request frames while animating.
 4. **Focused text editor** — the query editor takes focus on launch
@@ -109,6 +107,6 @@ future change can't silently reintroduce idle spin.
 
 ## Related
 
-- `gpui-base/src/motion.rs`, `gpui-base/src/scrollbar.rs`,
-  `gpui-component/src/tab/tab_bar.rs` — the toolkit animation paths above.
+- `gpui-base/src/motion.rs`, `gpui-base/src/scrollbar.rs` — the toolkit
+  animation paths above.
 - [`docs/PROGRESS.md`](PROGRESS.md) — ongoing work log.

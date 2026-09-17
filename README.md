@@ -22,6 +22,9 @@ development — see [`docs/PROGRESS.md`](docs/PROGRESS.md) for the build log and
 - **Query editor** — tree-sitter SQL highlighting, code folding, **Format**
   button (`sqlformat`), **Cmd+Enter** runs the statement under the cursor
   (multi-statement scripts supported client-side).
+- **Tabs** — one editor per tab; **drag a tab** to reorder it (or Move Tab
+  Left/Right, `Cmd+Alt+←/→`), close with the `×`, and `+` opens a new one.
+  Order and drafts survive relaunch.
 - **Autocomplete & hover** — dictionary-backed table/column/sequence
   suggestions and JOIN…ON completion from foreign keys. Table/column hover
   cards are **opt-in** (Settings → Editor → Hover); Cmd-click a table for its

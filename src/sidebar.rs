@@ -14,8 +14,8 @@ use gpui_kit::*;
 use gpui_kit_assets::IconName as KitIcon;
 
 use crate::app::{
-    conn_menu_item, env_tag, ConnMenuOp, DismissResults, NextTab, OpenSql, PrevTab, SaveSql,
-    SaveSqlAs, SqlHighlandView,
+    conn_menu_item, env_tag, ConnMenuOp, DismissResults, MoveTabLeft, MoveTabRight, NextTab,
+    OpenSql, PrevTab, SaveSql, SaveSqlAs, SqlHighlandView,
 };
 
 impl SqlHighlandView {
@@ -234,6 +234,12 @@ impl SqlHighlandView {
                 }))
                 .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
                     this.cycle_tab(-1, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &MoveTabLeft, _, cx| {
+                    this.move_active_tab(-1, cx);
+                }))
+                .on_action(cx.listener(|this, _: &MoveTabRight, _, cx| {
+                    this.move_active_tab(1, cx);
                 }))
                 // Dismiss lives here too (same bubble-path reason):
                 // dialogs sit outside every root, so modals are safe.

@@ -49,7 +49,6 @@ use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::select::{SelectEvent, SelectState};
 use gpui_kit::component::slider::{SliderEvent, SliderState, SliderValue};
-use gpui_kit::component::tab::{Tab, TabBar, TabVariant};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableState};
 use gpui_kit::component::tree::{tree, TreeState};
 use gpui_kit::component::Size;
@@ -75,6 +74,8 @@ gpui_kit::actions!(
         Quit,
         NextTab,
         PrevTab,
+        MoveTabLeft,
+        MoveTabRight,
         CloseTab,
         NewTab,
         PickConnection,
@@ -106,6 +107,7 @@ mod connections;
 mod lsp;
 mod render;
 mod results;
+mod tab_drag;
 mod tabs;
 
 // Re-exported under `crate::app::…` for sibling modules (run, sidebar,
@@ -605,6 +607,17 @@ pub struct SqlHighlandView {
     pub(crate) tabs: Vec<QueryTab>,
     pub(crate) active: usize,
     pub(crate) tab_scroll: ScrollHandle,
+    /// Per-tab bounds from the last prepaint, in strip order. The tab model is
+    /// not touched while dragging, so these stay stable for the whole gesture —
+    /// the drop indicator is computed from them and cannot oscillate.
+    pub(crate) tab_bounds: Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>,
+    /// Bounds of the whole tab strip (window coords), for deciding whether a
+    /// drag is still over the strip.
+    pub(crate) tab_strip_bounds: Rc<std::cell::RefCell<Bounds<Pixels>>>,
+    /// Insertion slot the drag would drop into (0..=tabs.len()), or `None`
+    /// when no drag is over the strip. Drives the drop indicator only; the real
+    /// reorder happens once, on drop.
+    pub(crate) drag_slot: std::cell::Cell<Option<usize>>,
     pub(crate) untitled_counter: usize,
     pub(crate) sidebar_collapsed: bool,
     /// Measured width of the main content area, updated by `on_prepaint` on
@@ -1083,6 +1096,15 @@ impl SqlHighlandView {
         // and the grid alike; nothing in the kit binds ctrl-tab.
         cx.bind_keys([KeyBinding::new("ctrl-tab", NextTab, None)]);
         cx.bind_keys([KeyBinding::new("ctrl-shift-tab", PrevTab, None)]);
+        // Reorder the active tab. Two chords: Ctrl+Shift+PageUp/Down is the
+        // conventional move-tab binding but needs Fn on Mac laptops, so
+        // Cmd+Alt+Left/Right is offered as a keyboard-native alias. Both are
+        // free in the kit's Input bindings (which claim ctrl-shift-left/right
+        // and shift-alt-left/right for word selection, plus bare pageup/down).
+        cx.bind_keys([KeyBinding::new("ctrl-shift-pageup", MoveTabLeft, None)]);
+        cx.bind_keys([KeyBinding::new("ctrl-shift-pagedown", MoveTabRight, None)]);
+        cx.bind_keys([KeyBinding::new("cmd-alt-left", MoveTabLeft, None)]);
+        cx.bind_keys([KeyBinding::new("cmd-alt-right", MoveTabRight, None)]);
         cx.bind_keys([KeyBinding::new("cmd-w", CloseTab, None)]);
         cx.bind_keys([KeyBinding::new("cmd-t", NewTab, None)]);
         // Cmd+K picks a connection, then opens a new tab bound to it.
@@ -1140,6 +1162,12 @@ impl SqlHighlandView {
             tabs: Vec::new(),
             active: 0,
             tab_scroll: ScrollHandle::new(),
+            tab_bounds: Rc::new(std::cell::RefCell::new(Vec::new())),
+            tab_strip_bounds: Rc::new(std::cell::RefCell::new(Bounds::new(
+                point(px(0.), px(0.)),
+                size(px(0.), px(0.)),
+            ))),
+            drag_slot: std::cell::Cell::new(None),
             untitled_counter: 0,
             sidebar_collapsed: false,
             // Starts wide; `on_prepaint` corrects it on the first frame.
@@ -1662,6 +1690,8 @@ pub fn app_menus() -> Vec<Menu> {
                 MenuItem::Separator,
                 MenuItem::action("Next Tab", NextTab),
                 MenuItem::action("Previous Tab", PrevTab),
+                MenuItem::action("Move Tab Left", MoveTabLeft),
+                MenuItem::action("Move Tab Right", MoveTabRight),
                 MenuItem::Separator,
                 MenuItem::action("Dismiss Results", DismissResults),
                 MenuItem::Separator,
