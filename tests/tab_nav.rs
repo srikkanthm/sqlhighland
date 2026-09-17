@@ -57,13 +57,20 @@ fn active_tab(window: &Window) -> usize {
         .expect("exactly one tab should be selected")
 }
 
-/// Labels of the tabs in display order (indices are dense from zero).
+/// Labels of the tabs in display order (indices are dense from zero). The
+/// unsaved marker is a dot, surfaced in the accessible label as " (unsaved)";
+/// strip it so callers compare plain names.
 fn tab_labels(window: &Window) -> Vec<String> {
     (0..64usize)
         .map_while(|ix| {
-            window
-                .try_find(ix)
-                .and_then(|s| s.label().map(str::to_string))
+            window.try_find(ix).and_then(|s| {
+                s.label().map(|label| {
+                    label
+                        .strip_suffix(" (unsaved)")
+                        .unwrap_or(label)
+                        .to_string()
+                })
+            })
         })
         .collect()
 }
@@ -317,6 +324,50 @@ async fn tab_nav_scrolls_active_into_view(cx: &mut TestAppContext) {
             window.render_frame(cx);
             assert_eq!(active_tab(window), a + 1);
         }
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A dirty tab shows the amber dot and reports "(unsaved)" to accessibility,
+/// while its visible name stays plain (no asterisk).
+#[gpui_kit::test]
+async fn dirty_tab_shows_dot(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_tabs_dir("dirty");
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let slot: std::rc::Rc<std::cell::RefCell<Option<gpui_kit::Entity<SqlHighlandView>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let for_window = slot.clone();
+    let handle = cx.open_window(size(px(1100.), px(780.)), move |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        *for_window.borrow_mut() = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let view = slot.borrow().clone().expect("view captured at window open");
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find(("tab-dirty", 0usize)).is_none(),
+            "a clean tab has no dirty dot"
+        );
+
+        view.update(cx, |this, cx| {
+            this.debug_mark_memory_dirty();
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(
+            window.try_find(("tab-dirty", 0usize)).is_some(),
+            "a dirty tab shows the dot"
+        );
+        assert_eq!(tab_labels(window)[0], "T0", "visible name stays plain");
+        assert_eq!(
+            window.try_find(0usize).unwrap().label(),
+            Some("T0 (unsaved)"),
+            "accessibility carries the unsaved marker"
+        );
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);

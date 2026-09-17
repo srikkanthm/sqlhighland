@@ -17,27 +17,33 @@ pub(crate) struct TabDrag {
     pub(crate) label: SharedString,
 }
 
-/// The floating chip drawn under the cursor while a tab is dragged.
+/// The floating pill drawn under the cursor while a tab is dragged. It mirrors
+/// the active tab's capsule so the thing following the cursor reads as the tab.
 pub(crate) struct TabDragGhost {
     label: SharedString,
+    height: Pixels,
 }
 
 impl TabDragGhost {
-    pub(crate) fn new(label: SharedString) -> Self {
-        Self { label }
+    pub(crate) fn new(label: SharedString, height: Pixels) -> Self {
+        Self { label, height }
     }
 }
 
 impl Render for TabDragGhost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .px_3()
-            .py_1()
-            .rounded_md()
+            .h(self.height)
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .rounded_full()
             .bg(cx.theme().primary)
             .text_color(cx.theme().primary_foreground)
             .text_sm()
+            .font_weight(FontWeight::MEDIUM)
             .shadow_lg()
+            .opacity(0.92)
             .child(self.label.clone())
     }
 }

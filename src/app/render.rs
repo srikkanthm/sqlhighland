@@ -199,25 +199,33 @@ impl SqlHighlandView {
 
     /// The tab strip. Tabs are `gpui_base::Tab`s inside a scrollable row, so
     /// each keeps its role/selection accessibility and can also be dragged.
-    ///
-    /// A drag does not reorder the model: it only moves a drop indicator to the
-    /// insertion slot (computed from the *stable* tab bounds) and the reorder
-    /// happens once, on drop. Reordering live mutates the very layout the hit
-    /// test reads back, which cascades into visible flicker.
+    /// The active tab is a filled primary capsule; a dirty tab shows an amber
+    /// dot. A drag does not reorder the model: it only moves a drop indicator
+    /// to the insertion slot (computed from the *stable* tab bounds) and the
+    /// reorder happens once, on drop. Reordering live mutates the very layout
+    /// the hit test reads back, which cascades into visible flicker.
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let d = self.density();
-        let tab_h = match d.tab_size {
+        let tab_h: f32 = match d.tab_size {
             Size::XSmall => 26.0,
             Size::Small => 30.0,
             Size::Large => 44.0,
             _ => 36.0,
         };
         let tab_gap = if d.is_compact { 12.0 } else { 16.0 };
+        // The capsule sits well inside the strip (equal vertical margins keep
+        // the strip height). The close button uses the smallest size so it
+        // still fits in the shortened pill.
+        let pill_h = (tab_h - 14.0).max(20.0);
+        let pill_my = (tab_h - pill_h) / 2.0;
+        let close_size = Size::XSmall;
         let border = cx.theme().border;
         let primary = cx.theme().primary;
+        let primary_fg = cx.theme().primary_foreground;
         let transparent = cx.theme().transparent;
         let fg = cx.theme().foreground;
         let muted = cx.theme().muted_foreground;
+        let warning = cx.theme().warning;
         // Built before `tabs`: that map borrows `cx` for its listener
         // registrations, so a later `&mut cx` call would conflict.
         let nav = self.render_tab_nav(cx);
@@ -231,26 +239,33 @@ impl SqlHighlandView {
         let tabs = self.tabs.iter().enumerate().map(|(ix, tab)| {
             let selected = self.active == ix;
             let close_id = tab.id.clone();
-            let label: SharedString = if tab.dirty {
-                format!("{} *", tab.name).into()
+            let name = tab.name.clone();
+            // The unsaved marker is a dot, so the plain name alone would hide
+            // it from assistive tech; the accessible label carries it instead.
+            let aria: SharedString = if tab.dirty {
+                format!("{} (unsaved)", tab.name).into()
             } else {
-                tab.name.clone()
+                name.clone()
             };
             let drag = TabDrag {
                 id: tab.id.clone(),
-                label: label.clone(),
+                label: name.clone(),
             };
             let bounds = tab_bounds.clone();
             BaseTab::new(ix)
                 .selected(selected)
-                .aria_label(label.clone())
-                .h(px(tab_h))
+                .aria_label(aria)
+                .h(px(pill_h))
+                .my(px(pill_my))
+                .px_2()
                 .gap_1()
                 .flex_shrink_0()
                 .text_sm()
-                .border_b_2()
-                .border_color(if selected { primary } else { transparent })
-                .text_color(if selected { fg } else { muted })
+                // Pill: the active tab is a filled capsule; inactive tabs are
+                // transparent and only brighten on hover.
+                .rounded_full()
+                .bg(if selected { primary } else { transparent })
+                .text_color(if selected { primary_fg } else { muted })
                 .when(!selected, |this| this.hover(|this| this.text_color(fg)))
                 .on_prepaint(move |bounds_rect, _, _| {
                     if let Some(slot) = bounds.borrow_mut().get_mut(ix) {
@@ -260,20 +275,35 @@ impl SqlHighlandView {
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.select_tab(ix, window, cx);
                 }))
-                // Start a drag carrying the tab's stable id.
+                // Start a drag carrying the tab's stable id; the ghost is a
+                // pill matching the tab's height.
                 .on_drag(drag, move |value, _offset, _window, cx| {
-                    cx.new(|_| TabDragGhost::new(value.label.clone()))
+                    cx.new(|_| TabDragGhost::new(value.label.clone(), px(pill_h)))
                 })
                 .child(if selected {
-                    div().font_weight(FontWeight::MEDIUM).child(label)
+                    div().font_weight(FontWeight::MEDIUM).child(name)
                 } else {
-                    div().child(label)
+                    div().child(name)
+                })
+                .when(tab.dirty, |this| {
+                    this.child(
+                        div()
+                            .id(("tab-dirty", ix))
+                            .test_support()
+                            .w(px(6.))
+                            .h(px(6.))
+                            .rounded_full()
+                            .bg(warning),
+                    )
                 })
                 .child(
                     Button::new(("tab-close", ix))
                         .icon(KitIcon::X)
                         .ghost()
-                        .with_size(d.button_size)
+                        .with_size(close_size)
+                        // On the pill, follow the capsule's foreground so the
+                        // glyph does not disappear into the fill.
+                        .text_color(if selected { primary_fg } else { muted })
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             this.request_close_tab(&close_id, window, cx);
                         })),
