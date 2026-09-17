@@ -130,3 +130,8 @@ required-features = ["gui-test"]
 name = "sql_diagnostics"
 path = "tests/sql_diagnostics.rs"
 required-features = ["gui-test"]
+
+[[test]]
+name = "fonts"
+path = "tests/fonts.rs"
+required-features = ["gui-test"]

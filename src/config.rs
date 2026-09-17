@@ -265,6 +265,16 @@ pub const FONT_FAMILIES: &[(&str, &str)] = &[
     ("Courier New", "Courier New"),
 ];
 
+/// True when `family` may be offered as an editor font. The empty sentinel
+/// ("Theme default") always may; any other name must be reported by the text
+/// system's installed list — which includes families registered with
+/// `add_fonts`, so the embedded fonts pass on every machine. Best-effort: the
+/// list also carries GPUI's fallback-stack names, so a match means
+/// "resolvable", not "a real file exists".
+pub fn font_family_available(family: &str, installed: &[String]) -> bool {
+    family.is_empty() || installed.iter().any(|name| name == family)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Preferences {
     /// Exact registry theme name, or [`SYSTEM_THEME`]. Empty (or unknown)

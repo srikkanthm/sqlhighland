@@ -42,6 +42,12 @@ fn main() {
         // This must be called before using any GPUI Component features.
         gpui_kit::init(cx);
         guitheme::register_themes(cx);
+        // Embed the editor fonts before any window lays out text, so a picked
+        // family always resolves instead of falling back silently.
+        sqlhighland::fonts::register_bundled_fonts(cx);
+        // Remember the platform's default mono family before any user choice
+        // is applied, so "Theme default" can restore it later.
+        guitheme::capture_theme_mono_default(cx);
 
         // Window-independent commands. Quit and Settings live ONLY here
         // (no element-level duplicates): a second registration fires the

@@ -1034,9 +1034,13 @@ impl SqlHighlandView {
         let theme_select = cx.new(|cx| {
             SelectState::new(SearchableVec::new(theme_items), None, window, cx).searchable(true)
         });
-        // Settings → Editor → Font searchable dropdown.
+        // Settings → Editor → Font searchable dropdown. Embedded families
+        // always appear; OS-provided ones only when installed, so a pick never
+        // silently renders in a substitute font.
+        let installed_fonts = cx.text_system().all_font_names();
         let font_items: Vec<ChoiceItem> = FONT_FAMILIES
             .iter()
+            .filter(|(_, value)| crate::config::font_family_available(value, &installed_fonts))
             .map(|(label, value)| ChoiceItem {
                 label: SharedString::from(*label),
                 value: SharedString::from(*value),
@@ -1447,20 +1451,35 @@ impl SqlHighlandView {
             );
             this._subs.push(sub);
         }
-        // Font dropdown: apply + persist on confirm.
+        // Font dropdown: persist, then re-apply via `apply_preferences` so an
+        // explicit family stamps over the theme and the empty "Theme default"
+        // restores the theme's own family — `apply_theme` alone leaves
+        // `mono_font_family` untouched, so it cannot clear a stale pick.
         {
             let select = this.font_select.clone();
             let sub = cx.subscribe_in(
                 &select,
                 window,
-                move |this, _, ev: &SelectEvent<SearchableVec<ChoiceItem>>, _, cx| {
+                move |this, _, ev: &SelectEvent<SearchableVec<ChoiceItem>>, window, cx| {
                     if let SelectEvent::Confirm(Some(value)) = ev {
+                        let family = value.to_string();
+                        // Guard hand-edited prefs and fonts uninstalled after
+                        // the fact: an unresolvable family would fall back
+                        // silently instead of rendering.
+                        let installed = cx.text_system().all_font_names();
+                        if !crate::config::font_family_available(&family, &installed) {
+                            this.status =
+                                format!("{family} is not installed — keeping the current font")
+                                    .into();
+                            cx.notify();
+                            return;
+                        }
                         let mut prefs = Preferences::load();
-                        prefs.font_family = value.to_string();
+                        prefs.font_family = family;
                         if let Err(e) = prefs.save() {
                             this.status = format!("Preferences save failed: {e:#}").into();
                         }
-                        crate::guitheme::apply_font_prefs(&prefs, cx);
+                        crate::guitheme::apply_preferences(&prefs, Some(window), cx);
                         cx.notify();
                     }
                 },

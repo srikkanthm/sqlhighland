@@ -53,6 +53,9 @@ development — see [`docs/PROGRESS.md`](docs/PROGRESS.md) for the build log and
 - **Settings** (`⌘,`) — theme and editor font are **filterable dropdowns**; the
   results row cap and query timeout are free-form fields (blank/0 = unlimited);
   the CSV delimiter is a field with quick presets; grid density is a slider.
+  JetBrains Mono, Fira Code, Cascadia Code, and Hack are embedded in the app;
+  the remaining families are offered only when installed, so a pick never
+  renders in a substitute font.
 - **Status bar** — action status left (`Running…` / `N rows · M ms` /
   `Fetching more…`), connection status right.
 

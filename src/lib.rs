@@ -24,6 +24,8 @@ pub mod conn_picker;
 #[cfg(feature = "gui")]
 pub mod connection_dialog;
 #[cfg(feature = "gui")]
+pub mod fonts;
+#[cfg(feature = "gui")]
 pub mod guitheme;
 #[cfg(feature = "gui")]
 pub mod providers;

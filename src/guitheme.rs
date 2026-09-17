@@ -88,20 +88,53 @@ fn apply_config_by_name(name: &str, mode: ThemeMode, window: Option<&mut Window>
 }
 
 /// Apply saved preferences (convenience over [`apply_theme`]).
-/// User font overrides stamp over the active theme afterwards: editors
-/// keep their size across theme switches, family follows the theme
-/// unless explicitly chosen.
+/// Editors keep their size across theme switches; an explicit family stamps
+/// over the theme, while an empty family restores the theme's own family.
 pub fn apply_preferences(prefs: &Preferences, window: Option<&mut Window>, cx: &mut App) {
+    capture_theme_mono_default(cx);
     apply_theme(&prefs.theme_name(), window, cx);
     apply_font_prefs(prefs, cx);
 }
 
-/// Stamp user font choices over the active theme. Called on every apply
-/// (theme switches reset these fields, so the override must re-apply).
+/// The platform's default monospace family, captured once. "Theme default"
+/// restores it: `apply_config` leaves `mono_font_family` untouched when a
+/// theme declares none, so re-applying a theme cannot clear an explicit pick.
+#[derive(Clone)]
+struct ThemeMonoDefault(SharedString);
+
+impl Global for ThemeMonoDefault {}
+
+/// Capture the default mono family. Idempotent, so it can be called on every
+/// apply; the first call (at startup, before any user font is stamped) wins.
+pub fn capture_theme_mono_default(cx: &mut App) {
+    if cx.has_global::<ThemeMonoDefault>() {
+        return;
+    }
+    let family = Theme::global(cx).mono_font_family.clone();
+    cx.set_global(ThemeMonoDefault(family));
+}
+
+/// The mono family the selected theme declares itself, if any.
+fn theme_mono_family(selection: &str, cx: &App) -> Option<SharedString> {
+    ThemeRegistry::global(cx)
+        .themes()
+        .get(selection)
+        .and_then(|config| config.mono_font_family.clone())
+}
+
+/// Stamp user font choices over the active theme. An empty family means
+/// "follow the theme": restore the theme's own family (or the captured
+/// platform default), since applying a theme does not reset it.
 pub fn apply_font_prefs(prefs: &Preferences, cx: &mut App) {
+    let family = if prefs.font_family.is_empty() {
+        theme_mono_family(&prefs.theme_name(), cx)
+            .or_else(|| cx.try_global::<ThemeMonoDefault>().map(|d| d.0.clone()))
+    } else {
+        Some(prefs.font_family.clone().into())
+    };
     let theme = Theme::global_mut(cx);
-    if !prefs.font_family.is_empty() {
-        theme.mono_font_family = prefs.font_family.clone().into();
+    if let Some(family) = family {
+        theme.mono_font_family = family;
     }
     theme.mono_font_size = px(prefs.font_size as f32);
     cx.refresh_windows();
