@@ -40,6 +40,20 @@ name = \"T4\"
     dir
 }
 
+fn staged_named_tabs_dir(tag: &str, tabs: &[(&str, &str, &str)]) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("sqlhighland-tabnav-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let tabs_dir = dir.join("tabs");
+    std::fs::create_dir_all(&tabs_dir).unwrap();
+    let mut toml = String::new();
+    for (id, name, text) in tabs {
+        toml.push_str(&format!("[[tabs]]\nid = \"{id}\"\nname = \"{name}\"\n\n"));
+        std::fs::write(tabs_dir.join(format!("{id}.sql")), text).unwrap();
+    }
+    std::fs::write(dir.join("tabs.toml"), toml).unwrap();
+    dir
+}
+
 /// `SQLHIGHLAND_CONFIG_DIR` is process-global and cargo runs the tests in this
 /// binary on parallel threads, so serialize them: otherwise one test can
 /// redirect another's config lookups mid-run (and, for `persist_tabs`, its
@@ -370,5 +384,54 @@ async fn dirty_tab_shows_dot(cx: &mut TestAppContext) {
         );
     })
     .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Relaunching with an intact manifest must keep saved tab names byte-identical.
+/// Drafts whose first lines look like titles must not rename `Untitled` tabs,
+/// and no extra adopted tabs may appear on the next launch.
+#[gpui_kit::test]
+async fn restore_keeps_saved_tab_names(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_named_tabs_dir(
+        "restore-names",
+        &[
+            ("u7", "Untitled 7", "SELECT alpha FROM dual;\n"),
+            ("u8", "Untitled 8", "select beta from dual;\n"),
+        ],
+    );
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let first = cx.open_window(size(px(1100.), px(780.)), |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update_window(first.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(tab_labels(window), ["Untitled 7", "Untitled 8"]);
+        assert_eq!(active_tab(window), 0);
+    })
+    .unwrap();
+
+    // A subsequent launch over the same config dir must restore the same tabs.
+    let second = cx.open_window(size(px(1100.), px(780.)), |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update_window(second.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(tab_labels(window), ["Untitled 7", "Untitled 8"]);
+        assert_eq!(tab_labels(window).len(), 2, "no extra adopted tabs");
+        assert_eq!(active_tab(window), 0);
+    })
+    .unwrap();
+
+    let manifest = std::fs::read_to_string(dir.join("tabs.toml")).unwrap();
+    let names: Vec<&str> = manifest
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("name = \""))
+        .filter_map(|line| line.strip_suffix('"'))
+        .collect();
+    assert_eq!(names, ["Untitled 7", "Untitled 8"]);
     let _ = std::fs::remove_dir_all(&dir);
 }

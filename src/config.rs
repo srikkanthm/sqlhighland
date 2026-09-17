@@ -165,7 +165,12 @@ impl TabsManifest {
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 let backup = path.with_extension(format!("corrupt-{secs}.toml"));
-                let _ = std::fs::rename(&path, &backup);
+                if std::fs::rename(&path, &backup).is_ok() {
+                    crate::logging::warn(format!(
+                        "unparseable tabs manifest preserved as {}",
+                        backup.display()
+                    ));
+                }
                 Self::default()
             }
         }

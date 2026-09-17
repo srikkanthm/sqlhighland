@@ -165,6 +165,7 @@ impl SqlHighlandView {
             .map(|p| p.exists())
             .unwrap_or(false);
         let manifest = TabsManifest::load_preserving();
+        let manifest_entries = manifest.tabs.len();
         for saved in manifest.tabs {
             // Always start unbound after a restart so the user explicitly
             // picks a connection per tab; editor text still restores.
@@ -213,7 +214,14 @@ impl SqlHighlandView {
         let orphans = TabsManifest::orphan_drafts(&known);
         let adopted = !orphans.is_empty();
         if adopted {
+            let total_bytes: usize = orphans.iter().map(|(_, text)| text.len()).sum();
+            let ids: Vec<&str> = orphans.iter().map(|(id, _)| id.as_str()).collect();
             self.status = format!("Recovered {} tab(s) from unsaved drafts", orphans.len()).into();
+            crate::logging::warn(format!(
+                "recovered {} orphan draft(s) with no manifest entry (manifest_entries={}, ids={ids:?}, bytes={total_bytes})",
+                orphans.len(),
+                manifest_entries
+            ));
         }
         for (id, text) in orphans {
             self.untitled_counter += 1;
