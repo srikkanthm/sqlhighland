@@ -1096,15 +1096,16 @@ impl SqlHighlandView {
         // and the grid alike; nothing in the kit binds ctrl-tab.
         cx.bind_keys([KeyBinding::new("ctrl-tab", NextTab, None)]);
         cx.bind_keys([KeyBinding::new("ctrl-shift-tab", PrevTab, None)]);
-        // Reorder the active tab. Two chords: Ctrl+Shift+PageUp/Down is the
-        // conventional move-tab binding but needs Fn on Mac laptops, so
-        // Cmd+Alt+Left/Right is offered as a keyboard-native alias. Both are
-        // free in the kit's Input bindings (which claim ctrl-shift-left/right
-        // and shift-alt-left/right for word selection, plus bare pageup/down).
-        cx.bind_keys([KeyBinding::new("ctrl-shift-pageup", MoveTabLeft, None)]);
-        cx.bind_keys([KeyBinding::new("ctrl-shift-pagedown", MoveTabRight, None)]);
+        // Reorder the active tab. Cmd+Alt+Left/Right is the primary chord; the
+        // menu shows the first binding registered for an action, so it comes
+        // first. Ctrl+Shift+PageUp/Down is the conventional alias, but it needs
+        // Fn on Mac laptops, so it is secondary. Both are free in the kit's
+        // Input bindings (which claim ctrl-shift-left/right and
+        // shift-alt-left/right for word selection, plus bare pageup/down).
         cx.bind_keys([KeyBinding::new("cmd-alt-left", MoveTabLeft, None)]);
         cx.bind_keys([KeyBinding::new("cmd-alt-right", MoveTabRight, None)]);
+        cx.bind_keys([KeyBinding::new("ctrl-shift-pageup", MoveTabLeft, None)]);
+        cx.bind_keys([KeyBinding::new("ctrl-shift-pagedown", MoveTabRight, None)]);
         cx.bind_keys([KeyBinding::new("cmd-w", CloseTab, None)]);
         cx.bind_keys([KeyBinding::new("cmd-t", NewTab, None)]);
         // Cmd+K picks a connection, then opens a new tab bound to it.
