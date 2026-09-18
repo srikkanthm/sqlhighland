@@ -158,6 +158,11 @@ pub struct ConnectionConfig {
     /// Password handling. Missing on older entries; legacy file behavior.
     #[serde(default)]
     pub password_mode: PasswordMode,
+    /// Persist this connection's dictionary/suggestions cache to disk so a
+    /// restart loads it instead of refetching. Off by default: when unset the
+    /// cache lives in memory only (the pre-existing behavior).
+    #[serde(default)]
+    pub cache_metadata_to_disk: bool,
 }
 
 impl ConnectionConfig {
@@ -222,6 +227,7 @@ impl Default for ConnectionConfig {
             service_kind: ServiceKind::default(),
             ssl: false,
             password_mode: PasswordMode::default(),
+            cache_metadata_to_disk: false,
         }
     }
 }
@@ -244,6 +250,7 @@ impl std::fmt::Debug for ConnectionConfig {
             .field("service_kind", &self.service_kind)
             .field("ssl", &self.ssl)
             .field("password_mode", &self.password_mode)
+            .field("cache_metadata_to_disk", &self.cache_metadata_to_disk)
             .finish()
     }
 }

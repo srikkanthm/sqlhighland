@@ -48,6 +48,12 @@ fn base_dir() -> anyhow::Result<PathBuf> {
     Ok(home.join(".config").join("sqlhighland"))
 }
 
+/// Directory holding per-connection persisted suggestions caches
+/// (`metadata/<conn_id>.json.gz`). Created on demand by the writer.
+pub fn metadata_cache_dir() -> anyhow::Result<PathBuf> {
+    Ok(base_dir()?.join("metadata"))
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SavedConfig {
     #[serde(default)]
@@ -398,6 +404,10 @@ pub struct Preferences {
     /// cache refreshes only on reconnect or a manual refresh). Default 0.
     #[serde(default = "default_metadata_ttl")]
     pub metadata_ttl_secs: u64,
+    /// Ceiling (MB) on a per-connection on-disk suggestions cache; a larger
+    /// cache is skipped. 0 disables the cap. Default 20.
+    #[serde(default = "default_metadata_disk_cap_mb")]
+    pub metadata_disk_cap_mb: u64,
     // --- Legacy family+mode matrix (pre-flat themes). Still parsed (via
     // the original key names) so old files migrate instead of resetting;
     // never written back. ---
@@ -429,6 +439,7 @@ impl Default for Preferences {
             font_size: default_font_size(),
             query_timeout_secs: default_query_timeout(),
             metadata_ttl_secs: default_metadata_ttl(),
+            metadata_disk_cap_mb: default_metadata_disk_cap_mb(),
             legacy_family: LegacyFamily::default(),
             legacy_mode: LegacyMode::default(),
             legacy_catppuccin_dark: LegacyCatppuccinDark::default(),
@@ -498,6 +509,13 @@ fn default_query_timeout() -> u64 {
 /// Suggestions cache TTL default: 0 = never expire while connected.
 fn default_metadata_ttl() -> u64 {
     0
+}
+
+/// Default ceiling (MB) on a per-connection persisted suggestions cache. A
+/// cache larger than this is not written to disk (the connection keeps working
+/// from memory). 0 disables the cap.
+fn default_metadata_disk_cap_mb() -> u64 {
+    20
 }
 
 /// Suggestion popup behavior for the query editor.
@@ -616,6 +634,16 @@ impl Preferences {
             Some(std::time::Duration::from_secs(self.metadata_ttl_secs))
         }
     }
+
+    /// Ceiling on a per-connection on-disk suggestions cache, or `None` when
+    /// uncapped (the setting is 0).
+    pub fn metadata_disk_cap(&self) -> Option<u64> {
+        if self.metadata_disk_cap_mb == 0 {
+            None
+        } else {
+            Some(self.metadata_disk_cap_mb * 1024 * 1024)
+        }
+    }
 }
 
 impl Preferences {
@@ -641,13 +669,11 @@ impl Preferences {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
 
     /// `SQLHIGHLAND_CONFIG_DIR` is process-global: tests using it must hold
     /// this lock to avoid racing each other.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        crate::testenv::config_dir_lock()
     }
 
     #[test]
@@ -767,6 +793,12 @@ mod tests {
         // Suggestions cache never expires by default.
         assert_eq!(p.metadata_ttl_secs, 0);
         assert!(p.metadata_ttl().is_none());
+        // On-disk cache cap defaults to 20 MB.
+        assert_eq!(p.metadata_disk_cap_mb, 20);
+        assert_eq!(p.metadata_disk_cap(), Some(20 * 1024 * 1024));
+        // 0 disables the cap.
+        let uncapped: Preferences = toml::from_str("metadata_disk_cap_mb = 0\n").unwrap();
+        assert!(uncapped.metadata_disk_cap().is_none());
         assert_eq!(p.ui_density, UiDensity::Compact);
         let p: Preferences = toml::from_str("theme = \"Nord Dark\"\n").unwrap();
         assert_eq!(p.result_cap, 100_000);

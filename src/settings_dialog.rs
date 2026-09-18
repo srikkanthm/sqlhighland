@@ -124,6 +124,7 @@ impl SqlHighlandView {
             query_timeout_input: self.query_timeout_input.clone(),
             csv_delim_input: self.csv_delim_input.clone(),
             metadata_ttl_input: self.metadata_ttl_input.clone(),
+            metadata_disk_cap_input: self.metadata_disk_cap_input.clone(),
             theme_select: self.theme_select.clone(),
             font_select: self.font_select.clone(),
             density_select: self.density_select.clone(),
@@ -211,6 +212,20 @@ impl SqlHighlandView {
                 cx,
             );
         });
+        // Seed the on-disk suggestions cache cap (MB; blank when uncapped).
+        let metadata_disk_cap_input = controls.metadata_disk_cap_input;
+        let cap_mb = Preferences::load().metadata_disk_cap_mb;
+        metadata_disk_cap_input.update(cx, |state, cx| {
+            state.set_value(
+                if cap_mb == 0 {
+                    String::new()
+                } else {
+                    cap_mb.to_string()
+                },
+                window,
+                cx,
+            );
+        });
         // Seed the theme/font dropdowns with the current selection.
         let theme_select = controls.theme_select;
         let theme = Preferences::load().theme_name();
@@ -253,6 +268,7 @@ impl SqlHighlandView {
             let timeout_input = timeout_input.clone();
             let delim_input = delim_input.clone();
             let metadata_ttl_input = metadata_ttl_input.clone();
+            let metadata_disk_cap_input = metadata_disk_cap_input.clone();
             let theme_select = theme_select.clone();
             let font_select = font_select.clone();
             let density_select = density_select.clone();
@@ -504,6 +520,12 @@ impl SqlHighlandView {
                                                                                             {
                                                                                                 c.fetched_at =
                                                                                                     None;
+                                                                                                // Re-consult any
+                                                                                                // on-disk copy too: the
+                                                                                                // filter is part of its
+                                                                                                // fingerprint.
+                                                                                                c.disk_loaded =
+                                                                                                    false;
                                                                                             }
                                                                                         }
                                                                                         cx.notify();
@@ -557,6 +579,43 @@ impl SqlHighlandView {
                                             "ttl",
                                             "expire",
                                             "dictionary",
+                                        ]),
+                                        SettingItem::render(move |_, _, _| {
+                                            let input = metadata_disk_cap_input.clone();
+                                            v_flex().gap_1().child(
+                                                div()
+                                                    .id("settings-metadata-disk-cap")
+                                                    .w_full()
+                                                    .p(pad)
+                                                    .rounded_md()
+                                                    .child(
+                                                        v_flex()
+                                                            .gap_1()
+                                                            .child(
+                                                                div().text_sm().child(
+                                                                    "On-disk suggestions cache cap (MB)",
+                                                                ),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(muted)
+                                                                    .child(
+                                                                        "Per connection, when caching is enabled on it. Blank or 0 = no cap.",
+                                                                    ),
+                                                            )
+                                                            .child(Input::new(&input).w_full().with_size(control)),
+                                                    ),
+                                            )
+                                        })
+                                        .keywords([
+                                            "suggestions",
+                                            "cache",
+                                            "disk",
+                                            "size",
+                                            "cap",
+                                            "limit",
+                                            "mb",
                                         ]),
                                     ]),
                                     SettingGroup::new().title("Syntax").items(vec![

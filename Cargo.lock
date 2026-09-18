@@ -6778,6 +6778,7 @@ name = "sqlhighland"
 version = "0.10.0"
 dependencies = [
  "anyhow",
+ "flate2",
  "gpui-kit",
  "gpui-kit-assets",
  "gpui-pre",
@@ -6786,6 +6787,7 @@ dependencies = [
  "oracledb",
  "rust_xlsxwriter",
  "serde",
+ "serde_json",
  "sqlformat",
  "toml 0.8.23",
  "tree-sitter",

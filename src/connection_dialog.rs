@@ -63,6 +63,7 @@ impl SqlHighlandView {
             service_kind: self.dialog.pending_service_kind,
             ssl: self.dialog.pending_ssl,
             password_mode: self.dialog.pending_password_mode,
+            cache_metadata_to_disk: self.dialog.pending_cache_to_disk,
         }
     }
 
@@ -134,6 +135,7 @@ impl SqlHighlandView {
         self.dialog.pending_ssl = false;
         self.dialog.pending_password_mode = PasswordMode::default_for_new();
         self.dialog.pending_engine = DbEngine::default();
+        self.dialog.pending_cache_to_disk = false;
         // Blank form: text fields empty, standard Oracle port kept.
         self.fill_form(
             &ConnectionConfig {
@@ -164,6 +166,7 @@ impl SqlHighlandView {
         self.dialog.pending_ssl = cfg.ssl;
         self.dialog.pending_password_mode = cfg.password_mode;
         self.dialog.pending_engine = cfg.engine;
+        self.dialog.pending_cache_to_disk = cfg.cache_metadata_to_disk;
         self.fill_form(&cfg, window, cx);
         self.open_connection_dialog(&title, window, cx);
     }
@@ -191,6 +194,8 @@ impl SqlHighlandView {
         let kind_cell: Rc<RefCell<ServiceKind>> =
             Rc::new(RefCell::new(self.dialog.pending_service_kind));
         let ssl_cell: Rc<RefCell<bool>> = Rc::new(RefCell::new(self.dialog.pending_ssl));
+        let cache_cell: Rc<RefCell<bool>> =
+            Rc::new(RefCell::new(self.dialog.pending_cache_to_disk));
         let pwmode_cell: Rc<RefCell<PasswordMode>> =
             Rc::new(RefCell::new(self.dialog.pending_password_mode));
         // Same pattern for the engine row (today a single Oracle pill).
@@ -387,6 +392,48 @@ impl SqlHighlandView {
                                                                 .ok();
                                                         })
                                                 }),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .gap_1()
+                                                .child(
+                                                    h_flex()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(muted)
+                                                                .child("Cache suggestions on disk"),
+                                                        )
+                                                        .child({
+                                                            let cell = cache_cell.clone();
+                                                            let current = *cell.borrow();
+                                                            let row_view = view.clone();
+                                                            Switch::new("conn-cache-disk")
+                                                                .small()
+                                                                .checked(current)
+                                                                .on_change(move |checked, _, cx| {
+                                                                    *cell.borrow_mut() = *checked;
+                                                                    row_view
+                                                                        .update(cx, |this, cx| {
+                                                                            this.dialog
+                                                                                .pending_cache_to_disk =
+                                                                                *checked;
+                                                                            cx.notify();
+                                                                        })
+                                                                        .ok();
+                                                                })
+                                                        }),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(muted)
+                                                        .child(
+                                                            "Loads instantly after restart; refresh from the connection menu when the schema changes.",
+                                                        ),
+                                                ),
                                         )
                                         .child(
                                             v_flex()
@@ -622,6 +669,11 @@ impl SqlHighlandView {
             self.connections.push(cfg.clone());
         }
         self.dialog.editing = None;
+        // Turning disk caching off drops the persisted cache so it cannot
+        // linger; re-enabling refetches on the next connect.
+        if !cfg.cache_metadata_to_disk {
+            crate::metadata::delete_cache(&cfg.id);
+        }
         self.persist(cx);
         self.status = format!("Saved {}", cfg.name).into();
         cx.notify();

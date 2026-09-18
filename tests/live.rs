@@ -21,6 +21,7 @@ fn cfg() -> ConnectionConfig {
         service_kind: Default::default(),
         ssl: false,
         password_mode: Default::default(),
+        cache_metadata_to_disk: false,
     }
 }
 

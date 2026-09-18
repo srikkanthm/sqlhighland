@@ -269,7 +269,7 @@ pub fn resolve_qualifier(qualifier: &str, aliases: &HashMap<String, TableRef>) -
 /// A referential constraint between two tables. Column vectors are
 /// position-aligned (`from_cols[i]` references `to_cols[i]`); composite
 /// keys render as `a.x = b.x AND a.y = b.y`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ForeignKey {
     pub name: String,
     pub from_owner: Option<String>,

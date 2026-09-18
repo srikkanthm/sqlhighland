@@ -395,6 +395,7 @@ pub struct SettingsControls {
     pub(crate) query_timeout_input: Entity<InputState>,
     pub(crate) csv_delim_input: Entity<InputState>,
     pub(crate) metadata_ttl_input: Entity<InputState>,
+    pub(crate) metadata_disk_cap_input: Entity<InputState>,
     pub(crate) theme_select: Entity<SelectState<SearchableVec<SharedString>>>,
     pub(crate) font_select: Entity<SelectState<SearchableVec<ChoiceItem>>>,
     pub(crate) density_select: Entity<SelectState<SearchableVec<SharedString>>>,
@@ -552,6 +553,8 @@ pub(crate) struct ConnectionDialogState {
     pub(crate) pending_service_kind: ServiceKind,
     pub(crate) pending_ssl: bool,
     pub(crate) pending_password_mode: PasswordMode,
+    /// Persist this connection's suggestions cache to disk (opt-in).
+    pub(crate) pending_cache_to_disk: bool,
     /// Pending database engine. Only Oracle exists today, so the row is
     /// display-only — but the dialog owns the value like role/kind.
     pub(crate) pending_engine: DbEngine,
@@ -685,6 +688,11 @@ pub struct SqlHighlandView {
     /// Suggestions/dictionary cache TTL; `None` = never expires by time.
     /// Mirrors preferences and is updated live from the Settings field.
     pub(crate) metadata_ttl: Option<std::time::Duration>,
+    /// Ceiling (bytes) on a per-connection on-disk suggestions cache;
+    /// `None` = uncapped. Mirrors preferences.
+    pub(crate) metadata_disk_cap: Option<u64>,
+    /// Settings → Editor → on-disk suggestions cache cap (MB) field.
+    pub(crate) metadata_disk_cap_input: Entity<InputState>,
     /// Settings → Editor → Suggestions cache TTL field (minutes).
     pub(crate) metadata_ttl_input: Entity<InputState>,
     /// Show table/column detail cards on editor hover. Mirrors preferences.
@@ -1038,6 +1046,18 @@ impl SqlHighlandView {
                     (ttl_secs / 60).to_string()
                 })
         });
+        // Settings → Editor → on-disk suggestions cache cap (MB; blank/0 =
+        // uncapped).
+        let cap_mb = Preferences::load().metadata_disk_cap_mb;
+        let metadata_disk_cap_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("20")
+                .default_value(if cap_mb == 0 {
+                    String::new()
+                } else {
+                    cap_mb.to_string()
+                })
+        });
         // Settings → Results CSV delimiter (single character; "tab" for tab).
         let delim = Preferences::load().csv_delimiter;
         let csv_delim_input = cx.new(|cx| {
@@ -1189,6 +1209,7 @@ impl SqlHighlandView {
                 pending_service_kind: ServiceKind::default(),
                 pending_ssl: false,
                 pending_password_mode: PasswordMode::default(),
+                pending_cache_to_disk: false,
                 pending_engine: DbEngine::default(),
                 password_snapshot: None,
                 name,
@@ -1221,7 +1242,9 @@ impl SqlHighlandView {
             show_system: prefs.show_system_schemas,
             ui_density: prefs.ui_density,
             metadata_ttl: prefs.metadata_ttl(),
+            metadata_disk_cap: prefs.metadata_disk_cap(),
             metadata_ttl_input,
+            metadata_disk_cap_input,
             hover_details: prefs.hover_details,
             result_cap: prefs.result_cap,
             fetch_size: crate::config::clamp_fetch_size(prefs.fetch_size),
@@ -1438,6 +1461,41 @@ impl SqlHighlandView {
                     let mut prefs = Preferences::load();
                     if prefs.metadata_ttl_secs != secs {
                         prefs.metadata_ttl_secs = secs;
+                        let _ = prefs.save();
+                    }
+                }
+            });
+            this._subs.push(sub);
+        }
+        // On-disk suggestions cache cap field (MB; blank/0 = uncapped).
+        {
+            let input = this.metadata_disk_cap_input.clone();
+            let input_sub = input.clone();
+            let sub = cx.subscribe_in(&input, window, move |this, _, ev: &InputEvent, _, cx| {
+                if !matches!(
+                    ev,
+                    InputEvent::Change | InputEvent::Blur | InputEvent::PressEnter { .. }
+                ) {
+                    return;
+                }
+                let text = input_sub.read(cx).value().to_string();
+                let trimmed = text.trim();
+                let parsed = if trimmed.is_empty() {
+                    Some(0u64)
+                } else if trimmed.bytes().all(|b| b.is_ascii_digit()) {
+                    trimmed.parse::<u64>().ok()
+                } else {
+                    None
+                };
+                if let Some(mb) = parsed {
+                    this.metadata_disk_cap = if mb == 0 {
+                        None
+                    } else {
+                        Some(mb * 1024 * 1024)
+                    };
+                    let mut prefs = Preferences::load();
+                    if prefs.metadata_disk_cap_mb != mb {
+                        prefs.metadata_disk_cap_mb = mb;
                         let _ = prefs.save();
                     }
                 }

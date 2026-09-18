@@ -11,6 +11,9 @@ pub mod model;
 pub mod schema;
 pub mod session;
 pub mod sql;
+// Test-only shared lock (see the module docs).
+#[cfg(test)]
+pub(crate) mod testenv;
 // GUI lives in the lib (gui-gated) so headless UI tests can drive the real
 // view; the binary is a thin launcher over it.
 #[cfg(feature = "gui")]

@@ -16,6 +16,11 @@ oracledb = "26.0.0-beta.4"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+# On-disk metadata-cache serialization (JSON + gzip). Both were already in the
+# lock file transitively; promoted to direct deps so the persisted suggestions
+# cache can be written/read here.
+serde_json = "1"
+flate2 = "1"
 # Stable ids for saved connections.
 uuid = { version = "1", features = ["v4"] }
 # Cross-platform secret storage for connection passwords: picks the native

@@ -94,6 +94,7 @@ impl SqlHighlandView {
         }
         let removed = self.connections.remove(ix);
         crate::keychain::delete(&removed.id);
+        crate::metadata::delete_cache(&removed.id);
         self.unlocked.remove(&removed.id);
         if self
             .pending
@@ -231,11 +232,18 @@ impl SqlHighlandView {
         // Dropping the session rolls back any open transaction: clear the
         // "Uncommitted" flags so a later tab close doesn't prompt for it.
         self.clear_pending(conn_id);
-        // Mark the dictionary cache stale so a reconnect refetches it. (With
-        // the TTL set to "never", this is what keeps suggestions honest across
-        // a disconnect/reconnect.)
-        if let Some(cache) = self.browser.meta.get(conn_id) {
-            lock(cache).fetched_at = None;
+        // Mark the dictionary cache stale so a reconnect refetches it — unless
+        // the connection persists its cache to disk, in which case the
+        // reconnect should load the saved copy instead.
+        let disk_cached = self
+            .connections
+            .iter()
+            .find(|c| c.id == conn_id)
+            .is_some_and(|c| c.cache_metadata_to_disk);
+        if !disk_cached {
+            if let Some(cache) = self.browser.meta.get(conn_id) {
+                lock(cache).fetched_at = None;
+            }
         }
         // Tabs keep their fetched rows; further paging goes stale (guarded).
         // No "Disconnected" notice: the status bar derives live state itself.

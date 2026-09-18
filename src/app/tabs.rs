@@ -1627,8 +1627,30 @@ impl SqlHighlandView {
         );
     }
 
-    /// Test hook: make the active tab a dirty external SQL file (guards on
-    /// quit). The path need not exist — the guard only checks that there is
+    /// Test hook: run the dictionary warm-up for `conn_id` (the same call a
+    /// connect makes), so a test can exercise the on-disk load path without a
+    /// database.
+    #[cfg(feature = "gui-test")]
+    pub fn debug_ensure_meta(&mut self, conn_id: &str, cx: &mut Context<Self>) {
+        self.ensure_meta(conn_id, cx);
+    }
+
+    /// Test hook: table names currently cached for `conn_id` (sorted).
+    #[cfg(feature = "gui-test")]
+    pub fn debug_cached_tables(&self, conn_id: &str) -> Vec<String> {
+        let Some(cache) = self.browser.meta.get(conn_id) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = lock(cache)
+            .tables
+            .iter()
+            .map(|t| format!("{}.{}", t.owner, t.name))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Test hook: make the active tab a dirty external SQL file (guards on    /// quit). The path need not exist — the guard only checks that there is
     /// one and that the tab is dirty.
     #[cfg(feature = "gui-test")]
     pub fn debug_mark_file_dirty(&mut self, path: std::path::PathBuf) {

@@ -12,6 +12,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use anyhow::Context as _;
+use serde::{Deserialize, Serialize};
+
 use crate::complete::{ForeignKey, SYSTEM_SCHEMAS};
 use crate::db::DbClient;
 use crate::schema::DbEngine;
@@ -20,7 +23,7 @@ use crate::schema::DbEngine;
 /// come close).
 pub const DICT_MAX_ROWS: usize = 100_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TableKind {
     Table,
     View,
@@ -30,14 +33,14 @@ pub enum TableKind {
     Synonym,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TableId {
     pub owner: String,
     pub name: String,
     pub kind: TableKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnMeta {
     pub name: String,
     pub data_type: String,
@@ -46,7 +49,7 @@ pub struct ColumnMeta {
 }
 
 /// One synonym: `owner.name` resolves to `[table_owner.]table_name`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Synonym {
     pub owner: String,
     pub name: String,
@@ -55,7 +58,7 @@ pub struct Synonym {
 }
 
 /// One callable member of a package (`pkg.member`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackageMember {
     pub owner: String,
     pub package: String,
@@ -76,6 +79,9 @@ pub struct MetadataCache {
     pub package_members: HashMap<(String, String), Vec<String>>,
     pub fetched_at: Option<Instant>,
     pub loading: bool,
+    /// Whether an on-disk cache has already been consulted this session, so a
+    /// miss is not retried on every `ensure_meta` call. Runtime-only.
+    pub disk_loaded: bool,
 }
 
 impl MetadataCache {
@@ -174,6 +180,225 @@ impl MetadataCache {
 
 /// Snapshot shared with the completion provider (cheap `Arc` clone).
 pub type SharedCache = Arc<Mutex<MetadataCache>>;
+
+// -- On-disk persistence -----------------------------------------------------
+
+/// Format version for the persisted cache. Bump on any shape change so an old
+/// file is ignored (and refetched) instead of mis-parsed.
+pub const METADATA_CACHE_VERSION: u32 = 1;
+
+/// Identity of the connection + filter a cache was fetched for. A persisted
+/// cache is only reused when this matches the current connection and
+/// `show_system`, so editing a connection (host/user/role/…) or toggling
+/// system schemas invalidates the file instead of serving the wrong schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheFingerprint {
+    pub engine: String,
+    pub host: String,
+    pub port: u16,
+    pub service_name: String,
+    pub service_kind: String,
+    pub ssl: bool,
+    pub user: String,
+    pub role: String,
+    pub include_system: bool,
+}
+
+impl CacheFingerprint {
+    /// Fingerprint the connection params + system-schema filter.
+    pub fn of(cfg: &crate::model::ConnectionConfig, include_system: bool) -> Self {
+        Self {
+            engine: cfg.engine.label().to_string(),
+            host: cfg.host.clone(),
+            port: cfg.port,
+            service_name: cfg.service_name.clone(),
+            service_kind: cfg.service_kind.label().to_string(),
+            ssl: cfg.ssl,
+            user: cfg.user.clone(),
+            role: cfg.role.label().to_string(),
+            include_system,
+        }
+    }
+}
+
+/// Serializable mirror of [`MetadataCache`]. `fetched_at` is unix millis
+/// (not `Instant`, which has no stable serialization) and `loading` is
+/// runtime-only, so neither round-trips. The tuple-keyed maps become entry
+/// vectors: JSON object keys must be strings, and `(owner, name)` is not.
+pub type SynonymEntry = ((String, String), (Option<String>, String));
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetadataCacheDisk {
+    pub version: u32,
+    pub fingerprint: CacheFingerprint,
+    /// Unix epoch millis when the data was fetched, or 0 when unknown.
+    pub fetched_at_ms: u64,
+    pub tables: Vec<TableId>,
+    pub columns: Vec<((String, String), Vec<ColumnMeta>)>,
+    pub sequences: Vec<TableId>,
+    pub fks: Vec<ForeignKey>,
+    pub synonyms: Vec<SynonymEntry>,
+    pub package_members: Vec<((String, String), Vec<String>)>,
+}
+
+impl MetadataCacheDisk {
+    /// Capture a cache for `fingerprint`. `fetched_at` is preserved as millis
+    /// relative to now so a loaded cache keeps its original age.
+    pub fn capture(cache: &MetadataCache, fingerprint: CacheFingerprint) -> Self {
+        let fetched_at_ms = cache
+            .fetched_at
+            .map(|t| t.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+            .map(|age| now_unix_millis().saturating_sub(age))
+            .unwrap_or(0);
+        Self {
+            version: METADATA_CACHE_VERSION,
+            fingerprint,
+            fetched_at_ms,
+            tables: cache.tables.clone(),
+            columns: cache
+                .columns
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            sequences: cache.sequences.clone(),
+            fks: cache.fks.clone(),
+            synonyms: cache
+                .synonyms
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            package_members: cache
+                .package_members
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        }
+    }
+
+    /// Rebuild a runtime cache. `fetched_at` is reconstructed from the saved
+    /// timestamp; a timestamp in the future (clock moved back) reads as now.
+    pub fn into_cache(self) -> MetadataCache {
+        let fetched_at = (self.fetched_at_ms > 0).then(|| {
+            let age = now_unix_millis().saturating_sub(self.fetched_at_ms);
+            Instant::now()
+                .checked_sub(std::time::Duration::from_millis(age))
+                .unwrap_or_else(Instant::now)
+        });
+        MetadataCache {
+            tables: self.tables,
+            columns: self.columns.into_iter().collect(),
+            sequences: self.sequences,
+            fks: self.fks,
+            synonyms: self.synonyms.into_iter().collect(),
+            package_members: self.package_members.into_iter().collect(),
+            fetched_at,
+            loading: false,
+            disk_loaded: true,
+        }
+    }
+}
+
+fn now_unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+/// Path of a connection's persisted cache file.
+pub fn cache_path(conn_id: &str) -> anyhow::Result<std::path::PathBuf> {
+    anyhow::ensure!(
+        !conn_id.is_empty()
+            && !conn_id.contains(['/', '\\', ':', '\0'])
+            && conn_id != "."
+            && conn_id != "..",
+        "unsafe connection id {conn_id:?}"
+    );
+    Ok(crate::config::metadata_cache_dir()?.join(format!("{conn_id}.json.gz")))
+}
+
+/// Load and decompress a persisted cache. Returns `None` for a missing file,
+/// an unreadable/corrupt one, a version mismatch, or a fingerprint mismatch
+/// (each treated as a miss → refetch). Never panics.
+pub fn load_cache(conn_id: &str, fingerprint: &CacheFingerprint) -> Option<MetadataCache> {
+    let path = cache_path(conn_id).ok()?;
+    let bytes = std::fs::read(&path).ok()?;
+    let disk: MetadataCacheDisk = decode_cache(&bytes)?;
+    if disk.version != METADATA_CACHE_VERSION || disk.fingerprint != *fingerprint {
+        return None;
+    }
+    Some(disk.into_cache())
+}
+
+/// Delete a connection's persisted cache (best-effort; a missing file is fine).
+pub fn delete_cache(conn_id: &str) {
+    if let Ok(path) = cache_path(conn_id) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Serialize + gzip a cache and write it atomically. Returns the uncompressed
+/// size so the caller can report a cap skip. `cap` (bytes) is the ceiling on
+/// the uncompressed payload; `None` is uncapped. A cache over the cap is not
+/// written and `Ok(None)` is returned.
+pub fn save_cache(
+    conn_id: &str,
+    disk: &MetadataCacheDisk,
+    cap: Option<u64>,
+) -> anyhow::Result<Option<u64>> {
+    let json = serde_json::to_vec(disk).context("encoding metadata cache")?;
+    let size = json.len() as u64;
+    if cap.is_some_and(|cap| size > cap) {
+        return Ok(None);
+    }
+    let gz = encode_cache(&json)?;
+    let path = cache_path(conn_id)?;
+    write_bytes_atomic(&path, &gz)?;
+    Ok(Some(size))
+}
+
+/// Gzip `json`.
+fn encode_cache(json: &[u8]) -> anyhow::Result<Vec<u8>> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write as _;
+    let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+    enc.write_all(json).context("gzip metadata cache")?;
+    enc.finish().context("finishing gzip metadata cache")
+}
+
+/// Gunzip + parse.
+fn decode_cache(bytes: &[u8]) -> Option<MetadataCacheDisk> {
+    use flate2::read::GzDecoder;
+    use std::io::Read as _;
+    let mut dec = GzDecoder::new(bytes);
+    let mut json = Vec::new();
+    dec.read_to_end(&mut json).ok()?;
+    serde_json::from_slice(&json).ok()
+}
+
+/// Atomic write of raw bytes (the text-based [`crate::fsutil::write_atomic`]
+/// takes a `&str`; a gzip payload is binary).
+fn write_bytes_atomic(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    use std::io::Write as _;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+        let _ = crate::fsutil::restrict(parent, 0o700);
+    }
+    let tmp = path.with_extension("tmp");
+    {
+        let mut file =
+            std::fs::File::create(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        file.sync_all().ok();
+    }
+    let _ = crate::fsutil::restrict(&tmp, 0o600);
+    std::fs::rename(&tmp, path).with_context(|| format!("moving {}", path.display()))?;
+    Ok(())
+}
 
 /// System-schema predicate on `owner_col` (dictionary owners are stored
 /// uppercase). Empty when `include_system`. `own_schema` (connected user)
@@ -837,5 +1062,152 @@ mod tests {
         // finite TTL only trips once elapsed exceeds it.
         assert!(!cache.is_stale(None));
         assert!(!cache.is_stale(Some(std::time::Duration::from_secs(3600))));
+    }
+
+    /// Process-global env (the config dir) → serialize these tests.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::testenv::config_dir_lock()
+    }
+
+    fn staged_cache_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sqlhighland-metacache-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir) };
+        dir
+    }
+
+    fn sample_fingerprint() -> CacheFingerprint {
+        CacheFingerprint {
+            engine: "Oracle".to_string(),
+            host: "db.example".to_string(),
+            port: 1521,
+            service_name: "pdb1".to_string(),
+            service_kind: "Service".to_string(),
+            ssl: false,
+            user: "SCOTT".to_string(),
+            role: "SYSDEFAULT".to_string(),
+            include_system: false,
+        }
+    }
+
+    #[test]
+    fn cache_round_trips_through_disk() {
+        let _guard = env_lock();
+        let dir = staged_cache_dir("roundtrip");
+        let mut db = fake();
+        let cache = MetadataCache {
+            tables: fetch_tables_blocking(&mut db, true, "").unwrap(),
+            columns: fetch_columns_blocking(&mut db, true, "").unwrap(),
+            sequences: fetch_sequences_blocking(&mut db, true, "").unwrap(),
+            fks: fetch_fks_blocking(&mut db, true, "").unwrap(),
+            fetched_at: Some(Instant::now()),
+            ..Default::default()
+        };
+        let fp = sample_fingerprint();
+        let disk = MetadataCacheDisk::capture(&cache, fp.clone());
+        save_cache("conn-1", &disk, None).unwrap();
+
+        let loaded = load_cache("conn-1", &fp).expect("cache loads back");
+        assert_eq!(loaded.tables.len(), cache.tables.len());
+        assert_eq!(loaded.columns.len(), cache.columns.len());
+        assert_eq!(loaded.sequences.len(), cache.sequences.len());
+        assert_eq!(loaded.fks.len(), cache.fks.len());
+        // Fresh data survives: a just-fetched cache is not stale under any TTL.
+        assert!(!loaded.is_stale(Some(std::time::Duration::from_secs(3600))));
+        // A loaded cache is marked as already consulted.
+        assert!(loaded.disk_loaded);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_fingerprint_mismatch_is_a_miss() {
+        let _guard = env_lock();
+        let dir = staged_cache_dir("fingerprint");
+        let cache = MetadataCache {
+            tables: vec![TableId {
+                owner: "SCOTT".to_string(),
+                name: "EMP".to_string(),
+                kind: TableKind::Table,
+            }],
+            fetched_at: Some(Instant::now()),
+            ..Default::default()
+        };
+        let fp = sample_fingerprint();
+        save_cache(
+            "conn-1",
+            &MetadataCacheDisk::capture(&cache, fp.clone()),
+            None,
+        )
+        .unwrap();
+        // Same fingerprint hits; a changed host/user/filter misses.
+        assert!(load_cache("conn-1", &fp).is_some());
+        let mut other = fp.clone();
+        other.host = "other.example".to_string();
+        assert!(load_cache("conn-1", &other).is_none());
+        let mut other = fp.clone();
+        other.include_system = true;
+        assert!(load_cache("conn-1", &other).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_corrupt_file_is_ignored() {
+        let _guard = env_lock();
+        let dir = staged_cache_dir("corrupt");
+        let path = cache_path("conn-1").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"not gzip").unwrap();
+        assert!(load_cache("conn-1", &sample_fingerprint()).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_size_cap_skips_write() {
+        let _guard = env_lock();
+        let dir = staged_cache_dir("cap");
+        let cache = MetadataCache {
+            tables: vec![TableId {
+                owner: "SCOTT".to_string(),
+                name: "EMP".to_string(),
+                kind: TableKind::Table,
+            }],
+            ..Default::default()
+        };
+        let disk = MetadataCacheDisk::capture(&cache, sample_fingerprint());
+        // A 1-byte cap is exceeded → nothing written.
+        let written = save_cache("conn-1", &disk, Some(1)).unwrap();
+        assert_eq!(written, None);
+        assert!(!cache_path("conn-1").unwrap().exists());
+        // Uncapped writes and reports the uncompressed size.
+        let written = save_cache("conn-1", &disk, None).unwrap();
+        assert!(written.unwrap() > 0);
+        assert!(cache_path("conn-1").unwrap().exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_delete_removes_file() {
+        let _guard = env_lock();
+        let dir = staged_cache_dir("delete");
+        let disk = MetadataCacheDisk::capture(&MetadataCache::default(), sample_fingerprint());
+        save_cache("conn-1", &disk, None).unwrap();
+        assert!(cache_path("conn-1").unwrap().exists());
+        delete_cache("conn-1");
+        assert!(!cache_path("conn-1").unwrap().exists());
+        // Deleting a missing file is a no-op.
+        delete_cache("conn-1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_path_rejects_traversal() {
+        assert!(cache_path("../escape").is_err());
+        assert!(cache_path("a/b").is_err());
+        assert!(cache_path("").is_err());
+        assert!(cache_path("ok-id").is_ok());
     }
 }

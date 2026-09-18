@@ -267,6 +267,49 @@ impl SqlHighlandView {
             .entry(conn_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(MetadataCache::default())))
             .clone();
+        let Some(mut cfg) = self.connections.iter().find(|c| c.id == conn_id).cloned() else {
+            return;
+        };
+        // Disk-cached connections: install the persisted copy on first use so
+        // completion and the browser are populated without a round trip. A
+        // fingerprint/version/corruption miss falls through to a fetch. Done
+        // synchronously (small gz read + parse) but only once per session; a
+        // forced refresh skips it so "Refresh suggestions" always hits the DB.
+        if cfg.cache_metadata_to_disk && !force {
+            let need_load = {
+                let mut c = lock(&cache);
+                if c.disk_loaded {
+                    false
+                } else {
+                    c.disk_loaded = true;
+                    true
+                }
+            };
+            if need_load {
+                let fp = crate::metadata::CacheFingerprint::of(&cfg, self.show_system);
+                if let Some(loaded) = crate::metadata::load_cache(conn_id, &fp) {
+                    let adopted = {
+                        let mut c = lock(&cache);
+                        // Only adopt if nothing was fetched in the meantime.
+                        if c.fetched_at.is_none() {
+                            let disk_loaded = c.disk_loaded;
+                            *c = loaded;
+                            c.disk_loaded = disk_loaded;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if adopted {
+                        // New data landed: rebuild an open tree (like a fetch).
+                        // Done after the guard drops — `refresh_browser` locks
+                        // this same cache.
+                        self.refresh_browser(conn_id, cx);
+                        cx.notify();
+                    }
+                }
+            }
+        }
         let stale = {
             let c = lock(&cache);
             (force || c.is_stale(self.metadata_ttl)) && !c.loading
@@ -274,9 +317,6 @@ impl SqlHighlandView {
         if !stale {
             return;
         }
-        let Some(mut cfg) = self.connections.iter().find(|c| c.id == conn_id).cloned() else {
-            return;
-        };
         // Same unlock/keychain preference as runs; background triggers
         // never prompt — a missing password just fails this fetch.
         if let Some(pw) = self.effective_password(&cfg) {
@@ -303,6 +343,11 @@ impl SqlHighlandView {
         // The connected user's own schema is always exempt server-side.
         let include_system = self.show_system;
         let own_schema = cfg.user.clone();
+        // Persist this connection's cache after a successful fetch when the
+        // user opted in. The fingerprint guards reuse across param/filter edits.
+        let cache_to_disk = cfg.cache_metadata_to_disk;
+        let fingerprint = crate::metadata::CacheFingerprint::of(&cfg, include_system);
+        let disk_cap = self.metadata_disk_cap;
         cx.spawn(async move |_, cx| {
             // Per-dictionary outcomes: one failing query must never nuke
             // the rest (a broken FK query once emptied every cache).
@@ -426,6 +471,27 @@ impl SqlHighlandView {
                 }
                 // Fresh dictionaries rebuild an open schema-browser tree.
                 this.refresh_browser(&conn_bg, cx);
+                // Persist for the next launch (opt-in). Snapshot under the
+                // lock, then write on the background executor so a large cache
+                // never blocks the UI thread.
+                if cache_to_disk {
+                    let disk = lock(&cache);
+                    let disk = crate::metadata::MetadataCacheDisk::capture(&disk, fingerprint);
+                    let bg = cx.background_executor().clone();
+                    let id = conn_bg.clone();
+                    bg.spawn(async move {
+                        match crate::metadata::save_cache(&id, &disk, disk_cap) {
+                            Ok(None) => crate::logging::warn(format!(
+                                "suggestions cache for {id} exceeds the disk cap; not persisted"
+                            )),
+                            Ok(Some(_)) => {}
+                            Err(e) => crate::logging::warn(format!(
+                                "suggestions cache save failed for {id}: {e:#}"
+                            )),
+                        }
+                    })
+                    .detach();
+                }
                 cx.notify();
             })
             .ok();
