@@ -237,6 +237,15 @@ impl SqlHighlandView {
         let known: std::collections::HashSet<String> =
             self.tabs.iter().map(|t| t.id.clone()).collect();
         let orphans = TabsManifest::orphan_drafts(&known);
+        // Empty drafts (blank starter / close-replacement tabs whose manifest
+        // entry was lost) carry no user data. Adopting them is what piles up
+        // blank tabs, so drop them instead. Only drafts with text recover.
+        let (empty, orphans): (Vec<_>, Vec<_>) = orphans
+            .into_iter()
+            .partition(|(_, text)| text.trim().is_empty());
+        for (id, _) in &empty {
+            TabsManifest::delete_draft(id);
+        }
         let adopted = !orphans.is_empty();
         if adopted {
             let total_bytes: usize = orphans.iter().map(|(_, text)| text.len()).sum();
@@ -1178,25 +1187,23 @@ impl SqlHighlandView {
         let text = self.tabs[ix].editor.read(cx).value().to_string();
         let bg = cx.background_executor().clone();
         let save_id = self.tabs[ix].id.clone();
-        let write_id = save_id.clone();
         let task = cx.spawn(async move |view, cx| {
             bg.timer(DRAFT_DEBOUNCE).await;
-            let outcome = bg
-                .spawn(async move {
-                    TabsManifest::write_draft(&write_id, &text).map_err(|e| e.to_string())
-                })
-                .await;
+            // Re-check and write together, under the entity. If the tab closed
+            // while the debounce was pending, its draft was already deleted and
+            // must not be recreated: a late write would leave an orphan draft
+            // that orphan adoption turns into an unwanted blank tab next launch.
             view.update(cx, |this, cx| {
                 let Some(tab) = this.tab_by_id(&save_id) else {
-                    return; // Tab closed while waiting; draft already removed.
+                    return;
                 };
-                match outcome {
+                match TabsManifest::write_draft(&save_id, &text) {
                     Ok(()) => {
                         tab.dirty = false;
                         this.persist_tabs(cx);
                     }
-                    Err(msg) => {
-                        this.status = format!("Draft save failed: {msg}").into();
+                    Err(e) => {
+                        this.status = format!("Draft save failed: {e:#}").into();
                     }
                 }
                 cx.notify();

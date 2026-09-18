@@ -10,6 +10,7 @@ use gpui_kit::component::Root;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{px, size, AppContext, TestAppContext, Window};
 use sqlhighland::app::SqlHighlandView;
+use std::time::Duration;
 
 fn staged_tabs_dir(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("sqlhighland-tabnav-{tag}-{}", std::process::id()));
@@ -728,5 +729,80 @@ async fn orphan_draft_adopts_with_neutral_name(cx: &mut TestAppContext) {
         );
     })
     .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Empty orphan drafts (stray blank tabs) are dropped, not adopted; only drafts
+/// with text recover. This is what kept blank tabs from piling up.
+#[gpui_kit::test]
+async fn empty_orphan_drafts_are_not_adopted(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_empty_dir("empty-orphan");
+    let tabs_dir = dir.join("tabs");
+    std::fs::create_dir_all(&tabs_dir).unwrap();
+    std::fs::write(tabs_dir.join("blank1.sql"), "").unwrap();
+    std::fs::write(tabs_dir.join("blank2.sql"), "   \n").unwrap();
+    std::fs::write(tabs_dir.join("real.sql"), "SELECT 1 FROM dual;").unwrap();
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let handle = cx.open_window(size(px(1100.), px(780.)), |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            tab_labels(window),
+            ["Untitled 1"],
+            "only the draft with text is adopted"
+        );
+        assert!(
+            !tabs_dir.join("blank1.sql").exists() && !tabs_dir.join("blank2.sql").exists(),
+            "empty orphan drafts are removed"
+        );
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A closed tab's debounced draft flush must never (re)create its draft: a late
+/// write would orphan the draft and adoption would resurrect it as a rogue tab.
+#[gpui_kit::test]
+async fn closed_tab_leaves_no_orphan_draft(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_tabs_dir("draft-orphan");
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let draft = dir.join("tabs").join("t0.sql");
+    let slot: std::rc::Rc<std::cell::RefCell<Option<gpui_kit::Entity<SqlHighlandView>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let for_window = slot.clone();
+    let handle = cx.open_window(size(px(1100.), px(780.)), move |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        *for_window.borrow_mut() = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let view = slot.borrow().clone().expect("view captured at window open");
+
+    // Schedule a flush, then let the debounce elapse: the draft appears.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        view.update(cx, |this, cx| this.debug_schedule_draft_save(cx));
+    })
+    .unwrap();
+    cx.executor().advance_clock(Duration::from_millis(1600));
+    cx.run_until_parked();
+    assert!(draft.exists(), "the debounced flush wrote the draft");
+
+    // Close the (blank) tab, then let more time pass: the draft stays gone.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click(("tab-close", 0usize), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    assert!(!draft.exists(), "closing removes the draft");
+    cx.executor().advance_clock(Duration::from_millis(1600));
+    cx.run_until_parked();
+    assert!(!draft.exists(), "a closed tab never recreates its draft");
     let _ = std::fs::remove_dir_all(&dir);
 }

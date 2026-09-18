@@ -148,11 +148,16 @@ mod imp {
     }
 }
 
-/// Temp path beside the target. Appending (not replacing) the extension
-/// keeps `a.sql` and `a.toml` temps distinct.
+/// Temp path beside the target. Appending (not replacing) the extension keeps
+/// `a.sql` and `a.toml` temps distinct. A pid + sequence suffix keeps two app
+/// instances (or two writes in one process) from sharing one temp file: with a
+/// fixed name they could interleave writes and rename a half-written manifest
+/// into place.
 fn temp_path(path: &Path) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut p = path.as_os_str().to_owned();
-    p.push(".tmp");
+    p.push(format!(".{}.{seq}.tmp", std::process::id()));
     PathBuf::from(p)
 }
 
