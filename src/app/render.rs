@@ -226,6 +226,8 @@ impl SqlHighlandView {
         let fg = cx.theme().foreground;
         let muted = cx.theme().muted_foreground;
         let warning = cx.theme().warning;
+        // Inactive-tab hover fill: the same subtle accent the sidebar rows use.
+        let tab_hover_bg = cx.theme().accent.opacity(0.5);
         // Built before `tabs`: that map borrows `cx` for its listener
         // registrations, so a later `&mut cx` call would conflict.
         let nav = self.render_tab_nav(cx);
@@ -266,11 +268,13 @@ impl SqlHighlandView {
                 .flex_shrink_0()
                 .text_sm()
                 // Pill: the active tab is a filled capsule; inactive tabs are
-                // transparent and only brighten on hover.
+                // transparent until hovered, then show the same capsule shape.
                 .rounded_full()
                 .bg(if selected { primary } else { transparent })
                 .text_color(if selected { primary_fg } else { muted })
-                .when(!selected, |this| this.hover(|this| this.text_color(fg)))
+                .when(!selected, |this| {
+                    this.hover(|this| this.bg(tab_hover_bg).text_color(fg))
+                })
                 .on_prepaint(move |bounds_rect, _, _| {
                     if let Some(slot) = bounds.borrow_mut().get_mut(ix) {
                         *slot = bounds_rect;
