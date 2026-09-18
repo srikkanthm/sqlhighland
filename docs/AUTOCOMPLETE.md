@@ -333,8 +333,14 @@ completion.
   so an N-statement buffer costs N+1 parses. Background + debounced, so it
   only bounds worker tail latency; sharing a tree is possible but complicated
   by the masking. Revisit if profiling flags it.
-- **Cast context**: `Dialect::data_types` (`ORACLE_DATA_TYPES`) is cataloged but
-  not yet surfaced (Phase F).
+- **Cast context**: `Dialect::data_types` (`ORACLE_DATA_TYPES`) is surfaced at
+  `CAST(x AS |)`; Postgres `x::t` still needs the Postgres dialect (Phase F).
+- **Remaining from the gap audit**: standalone procedures/functions at call
+  sites (only package members are fetched); CTE explicit column lists
+  (`WITH cte(a,b) AS`); quoting non-fold-safe identifiers on insert;
+  `GROUPING SETS`/`ROLLUP`/`CUBE`/`NULLS FIRST`/`NULLS LAST`; hover/definition
+  using the structural scope; fuzzy subsequence matching; window `ORDER BY`
+  already offered but frame sub-clauses are minimal.
 
 ## Risks
 
