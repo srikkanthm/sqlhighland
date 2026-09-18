@@ -266,9 +266,31 @@ pub fn classify_context(
         Clause::Start => CompleteContext::StatementStart,
         Clause::Select => CompleteContext::SelectList,
         Clause::From => CompleteContext::AfterFrom,
+        Clause::FromTail(origin) => CompleteContext::FromTail(origin),
         Clause::Predicate => CompleteContext::Predicate,
         Clause::Bare => CompleteContext::BareWord,
     }
+}
+
+/// Which clause introduced the table reference the cursor is past. Drives the
+/// continuation keywords offered after a table (`FROM t ` → `WHERE/JOIN/…`,
+/// `UPDATE t ` → `SET`, …).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FromOrigin {
+    /// `FROM t` / `DELETE FROM t`.
+    From,
+    /// `JOIN t`.
+    Join,
+    /// `INSERT INTO t`.
+    Into,
+    /// `MERGE INTO t`.
+    Merge,
+    /// `UPDATE t`.
+    Update,
+    /// `CREATE TABLE t` (or other DDL table).
+    Table,
+    /// `MERGE … USING t`.
+    Using,
 }
 
 /// Clause scope from a token scan (see `scan_clause`).
@@ -277,6 +299,9 @@ enum Clause {
     Start,
     Select,
     From,
+    /// Past a table reference: the table-introducing clause is remembered so
+    /// the caller offers the right continuations instead of every keyword.
+    FromTail(FromOrigin),
     Predicate,
     Bare,
 }
@@ -293,12 +318,27 @@ fn clause_keyword(word_upper: &str) -> Option<Clause> {
     }
 }
 
+/// Origin of a table reference from its introducing keyword (`prev` is the
+/// token before it, used to tell `INSERT INTO` from `MERGE INTO`).
+fn from_origin(up: &str, prev: Option<&str>) -> FromOrigin {
+    match up {
+        "JOIN" => FromOrigin::Join,
+        "INTO" if prev.is_some_and(|p| p.eq_ignore_ascii_case("MERGE")) => FromOrigin::Merge,
+        "INTO" => FromOrigin::Into,
+        "UPDATE" => FromOrigin::Update,
+        "TABLE" => FromOrigin::Table,
+        "USING" => FromOrigin::Using,
+        _ => FromOrigin::From,
+    }
+}
+
 /// Walk tokens back from the cursor word: commas start a fresh list item
 /// (skip the completed word before them), DISTINCT/ALL/AS are transparent,
 /// `(` opens expression scope, `)` and misc keywords bail to Bare, and a
 /// `.` skips its qualifier. A bare identifier between the cursor and a
-/// SELECT/FROM keyword means alias/complete-identifier position → Bare
-/// (never tables/columns); other clauses ignore it.
+/// SELECT means the select-list tail (`Select`); before a table-introducing
+/// keyword it is the table tail (`FromTail`), which the caller narrows to the
+/// valid continuations.
 fn scan_clause(toks: &[String]) -> Clause {
     if toks.is_empty() {
         return Clause::Start;
@@ -306,7 +346,7 @@ fn scan_clause(toks: &[String]) -> Clause {
     let mut saw_ident = false;
     let mut skip_word = false;
     let mut depth = 0u32;
-    for t in toks.iter().rev() {
+    for (i, t) in toks.iter().enumerate().rev() {
         match t.as_str() {
             "," => {
                 saw_ident = false;
@@ -347,19 +387,18 @@ fn scan_clause(toks: &[String]) -> Clause {
             continue;
         }
         match clause_keyword(up.as_str()) {
-            Some(Clause::Select) => {
-                return if saw_ident {
-                    Clause::Bare
-                } else {
-                    Clause::Select
-                };
-            }
+            // An identifier already seen just means we are still inside the
+            // list, not that the context is unknown.
+            Some(Clause::Select) => return Clause::Select,
             Some(Clause::From) => {
-                return if saw_ident {
-                    Clause::Bare
-                } else {
-                    Clause::From
-                };
+                if saw_ident {
+                    let prev = i
+                        .checked_sub(1)
+                        .and_then(|j| toks.get(j))
+                        .map(|s| s.as_str());
+                    return Clause::FromTail(from_origin(up.as_str(), prev));
+                }
+                return Clause::From;
             }
             Some(other) => return other,
             None => saw_ident = true,
@@ -389,7 +428,7 @@ pub fn allows_empty_prefix(text: &str, offset: usize) -> bool {
     let toks = tokenize(&text[base..offset]);
     matches!(
         scan_clause(&toks),
-        Clause::Select | Clause::From | Clause::Predicate
+        Clause::Select | Clause::From | Clause::FromTail(_) | Clause::Predicate
     )
 }
 /// True when `offset` sits inside a string literal, quoted identifier, or

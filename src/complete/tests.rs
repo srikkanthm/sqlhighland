@@ -114,8 +114,18 @@ fn context_gates_by_grammar_position() {
     assert_eq!(at("SELECT * FROM emp GROUP BY d, "), Predicate);
     assert_eq!(at("UPDATE emp SET "), Predicate);
     // Ambiguous: keywords only.
-    assert_eq!(at("SELECT emp "), BareWord);
-    assert_eq!(at("SELECT * FROM emp "), BareWord);
+    assert_eq!(at("SELECT emp "), SelectList);
+    assert_eq!(at("SELECT * FROM emp "), FromTail(FromOrigin::From));
+    // Past a table: origin-aware continuations, never statement starters.
+    assert_eq!(
+        at("SELECT * FROM emp e JOIN dept d "),
+        FromTail(FromOrigin::Join)
+    );
+    assert_eq!(at("DELETE FROM emp "), FromTail(FromOrigin::From));
+    assert_eq!(at("UPDATE emp "), FromTail(FromOrigin::Update));
+    assert_eq!(at("INSERT INTO emp "), FromTail(FromOrigin::Into));
+    assert_eq!(at("MERGE INTO emp "), FromTail(FromOrigin::Merge));
+    assert_eq!(at("MERGE INTO t USING emp "), FromTail(FromOrigin::Using));
     // Subqueries scope inward.
     assert_eq!(at("SELECT * FROM (SELECT "), SelectList);
     // New statement after terminator starts over.
@@ -134,9 +144,11 @@ fn empty_prefix_allowed_only_after_operand_keywords() {
     assert!(at("SELECT * FROM "));
     assert!(at("SELECT "));
     assert!(at("SELECT * FROM emp WHERE x=1 AND "));
-    assert!(!at("SELECT * FROM emp "));
-    assert!(!at("SELECT emp "));
     assert!(!at(""));
+    // Past a table reference (and a select-list identifier) the empty prefix
+    // pops the valid continuations.
+    assert!(at("SELECT * FROM emp "));
+    assert!(at("SELECT emp "));
     // Finished conditions stay in predicate scope (AND/OR offered).
     assert!(at("SELECT * FROM emp e JOIN dept d ON e.x = 1 "));
 }
@@ -146,8 +158,8 @@ fn follow_sets_cover_transitions() {
     // The reported gaps: FROM after a select list, ORDER after predicates.
     assert!(SELECT_FOLLOW.contains(&"FROM"));
     assert!(SELECT_FOLLOW.contains(&"WHERE"));
-    assert!(PRED_FOLLOW.contains(&"ORDER"));
-    assert!(PRED_FOLLOW.contains(&"GROUP"));
+    assert!(PRED_FOLLOW.contains(&"ORDER BY"));
+    assert!(PRED_FOLLOW.contains(&"GROUP BY"));
 }
 
 #[test]
@@ -159,6 +171,12 @@ fn keyword_subsets_are_sane() {
         .chain(PRED_KEYWORDS)
         .chain(SELECT_FOLLOW)
         .chain(PRED_FOLLOW)
+        .chain(FROM_FOLLOW)
+        .chain(JOIN_FOLLOW)
+        .chain(UPDATE_FOLLOW)
+        .chain(INTO_FOLLOW)
+        .chain(MERGE_FOLLOW)
+        .chain(USING_FOLLOW)
     {
         assert!(ORACLE_KEYWORDS.contains(kw), "{kw} unknown");
     }
@@ -205,6 +223,7 @@ fn ranking_prefers_scope_then_prefix_then_usage() {
         kind,
         owner: None,
         usage,
+        depth: 0,
     };
     let cands = vec![
         cand("EMPLOYEE_AUDIT", CandidateKind::Table, 99),
@@ -222,6 +241,26 @@ fn ranking_prefers_scope_then_prefix_then_usage() {
     ];
     let out = rank_candidates("dep", tied, "", 10);
     assert_eq!(out[0].label, "DEPTNO");
+}
+
+#[test]
+fn ranking_prefers_the_nearest_scope() {
+    let cand = |label: &str, depth: u8| Candidate {
+        label: label.into(),
+        detail: "".into(),
+        kind: CandidateKind::ColumnInScope,
+        owner: None,
+        usage: 0,
+        depth,
+    };
+    // Same column from an inner and an outer scope: the nearer one wins.
+    let out = rank_candidates(
+        "deptno",
+        vec![cand("D.DEPTNO", 1), cand("E.DEPTNO", 0)],
+        "",
+        10,
+    );
+    assert_eq!(out[0].label, "E.DEPTNO");
 }
 
 #[test]
@@ -250,6 +289,7 @@ fn ranking_prefers_own_schema() {
         kind: CandidateKind::Table,
         owner: Some(owner.into()),
         usage: 0,
+        depth: 0,
     };
     let cands = vec![cand("DVSYS.DBA_X", "DVSYS"), cand("SCOTT.DEPT", "SCOTT")];
     let out = rank_candidates("d", cands, "SCOTT", 10);
@@ -264,6 +304,7 @@ fn ranking_prefers_functions_over_keywords() {
         kind,
         owner: None,
         usage: 0,
+        depth: 0,
     };
     let cands = vec![
         cand("CASE", CandidateKind::Keyword),
@@ -282,6 +323,7 @@ fn dotted_labels_score_on_object_part() {
         kind: CandidateKind::Table,
         owner: None,
         usage: 0,
+        depth: 0,
     };
     // `emp` must prefer the table named EMP… over *TEMP* substring noise.
     let cands = vec![cand("SYS.MVIEW$_ADV_TEMP"), cand("SYSTEM.EMPLOYEES")];
@@ -698,4 +740,41 @@ fn split_dotted_handles_quotes() {
         (None, "MixedCase".to_string())
     );
     assert_eq!(split_dotted("emp"), (None, "emp".to_string()));
+}
+
+#[test]
+fn oracle_dialect_exposes_the_catalog() {
+    let d = oracle();
+    assert_eq!(d.name(), "Oracle");
+    assert_eq!(d.fold(), Fold::Upper);
+    assert_eq!(d.identifier_quote(), '"');
+    assert!(!d.supports_dollar_quoting());
+
+    // Catalogs are wired to the shared constants (no accidental empty set).
+    assert_eq!(d.statement_starters(), STMT_KEYWORDS);
+    assert_eq!(d.keywords(), ORACLE_KEYWORDS);
+    assert_eq!(d.functions(), ORACLE_FUNCTIONS);
+    assert_eq!(d.system_schemas(), SYSTEM_SCHEMAS);
+    assert_eq!(d.sequence_members(), ["NEXTVAL", "CURRVAL"]);
+    assert!(d.uses_sequence_pseudocolumns());
+
+    // Function names never double as keywords (also asserted elsewhere).
+    for (name, _) in d.functions() {
+        assert!(!d.keywords().contains(name), "{name} is both");
+    }
+
+    // Data types are present and don't shadow function names.
+    assert!(d.data_types().contains(&"VARCHAR2"));
+    assert!(d.data_types().contains(&"NUMBER"));
+    for ty in d.data_types() {
+        assert!(!d.functions().iter().any(|(n, _)| n == ty), "{ty} is both");
+    }
+
+    assert!(d.is_system_schema("sys"));
+    assert!(d.is_system_schema("APEX_240200"));
+    assert!(!d.is_system_schema("SCOTT"));
+
+    // Own-schema rule: the connected user is the preferred (bare) schema.
+    assert_eq!(d.preferred_schemas("scott"), ["scott".to_string()]);
+    assert!(d.preferred_schemas("").is_empty());
 }

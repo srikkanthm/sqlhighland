@@ -37,3 +37,5 @@ pub mod settings_dialog;
 pub mod sidebar;
 #[cfg(feature = "gui")]
 pub mod sqlparse;
+#[cfg(feature = "gui")]
+pub mod sqlscope;

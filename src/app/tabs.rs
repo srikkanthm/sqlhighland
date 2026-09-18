@@ -154,6 +154,7 @@ impl SqlHighlandView {
             save_task: None,
             diagnostics_task: None,
             last_structural: Vec::new(),
+            scope: None,
             _subs: subs,
         });
     }
@@ -1051,10 +1052,16 @@ impl SqlHighlandView {
         if !self.sql_diagnostics {
             self.tabs[ix].diagnostics_task = None;
             self.tabs[ix].last_structural.clear();
+            // Diagnostics off: no structural pass runs, so no scope either —
+            // completion falls back to its lexical path.
+            self.tabs[ix].scope = None;
             push_editor_diagnostics(&editor, "", &[], cx);
             return;
         }
         let text = editor.read(cx).value().to_string();
+        // Invalidate the previous scope now; the debounced pass repopulates it.
+        // During the gap, completion's lexical fallback covers the buffer.
+        self.tabs[ix].scope = None;
         // Immediate, flicker-free: current lexical issues + last structural.
         let mut immediate = crate::sql::lexical_issues(&text);
         immediate.extend(self.tabs[ix].last_structural.iter().cloned());
@@ -1062,22 +1069,29 @@ impl SqlHighlandView {
         immediate.truncate(crate::sqlparse::ISSUE_CAP);
         push_editor_diagnostics(&editor, &text, &immediate, cx);
 
-        // Debounced structural recompute on the background executor.
+        // Debounced structural recompute on the background executor: syntax
+        // issues plus the query scope used by completion.
         let view = cx.entity().downgrade();
         let tab_key = self.tabs[ix].id.clone();
         let tab_key_bg = tab_key.clone();
         let bg = cx.background_executor().clone();
-        let scope = self.sql_check_scope;
+        let check_scope = self.sql_check_scope;
         let task = cx.spawn(async move |_, cx| {
             bg.timer(Self::DIAGNOSTICS_DEBOUNCE).await;
-            let structural = bg
-                .spawn(async move { crate::sqlparse::syntax_issues(&text, scope) })
+            let (structural, scope) = bg
+                .spawn(async move {
+                    (
+                        crate::sqlparse::syntax_issues(&text, check_scope),
+                        crate::sqlscope::extract(&text),
+                    )
+                })
                 .await;
             view.update(cx, |this, cx| {
                 let Some(tab) = this.tab_by_id(&tab_key_bg) else {
                     return;
                 };
                 tab.last_structural = structural.clone();
+                tab.scope = Some(scope);
                 let editor = tab.editor.clone();
                 let text = editor.read(cx).value().to_string();
                 let mut issues = crate::sql::lexical_issues(&text);
@@ -1130,6 +1144,57 @@ impl SqlHighlandView {
             .diagnostics()
             .map(|set| set.len())
             .unwrap_or(0)
+    }
+
+    /// Test hook: install a structural scope on the active tab, extracted from
+    /// `sql` (which the caller then passes to `debug_completion_labels` so byte
+    /// offsets line up).
+    #[cfg(feature = "gui-test")]
+    pub fn debug_set_scope_from_sql(&mut self, sql: &str) {
+        self.tabs[self.active].scope = Some(crate::sqlscope::extract(sql));
+    }
+
+    /// Test hook: completion labels for the active tab at `offset` (manual
+    /// trigger, so the 2-char gate is bypassed).
+    #[cfg(feature = "gui-test")]
+    pub fn debug_completion_labels(&mut self, text: &str, offset: usize) -> Vec<String> {
+        let tab_id = self.active_tab().id.clone();
+        let (items, _, _) = self.completion_items_for(&tab_id, text, offset, true);
+        items.into_iter().map(|item| item.label).collect()
+    }
+
+    /// Test hook: bind the active tab to `conn_id` so completion reads that
+    /// connection's dictionary cache.
+    #[cfg(feature = "gui-test")]
+    pub fn debug_set_connection(&mut self, conn_id: &str) {
+        self.tabs[self.active].connection_id = Some(conn_id.to_string());
+    }
+
+    /// Test hook: install a one-table dictionary cache (owner/table/columns) so
+    /// completion has real columns without a database.
+    #[cfg(feature = "gui-test")]
+    pub fn debug_insert_meta(&mut self, conn_id: &str, owner: &str, table: &str, cols: &[&str]) {
+        use crate::metadata::{ColumnMeta, MetadataCache, TableId, TableKind};
+        let mut cache = MetadataCache::default();
+        cache.tables.push(TableId {
+            owner: owner.to_string(),
+            name: table.to_string(),
+            kind: TableKind::Table,
+        });
+        cache.columns.insert(
+            (owner.to_ascii_uppercase(), table.to_ascii_uppercase()),
+            cols.iter()
+                .map(|c| ColumnMeta {
+                    name: c.to_string(),
+                    data_type: "NUMBER".to_string(),
+                    comments: String::new(),
+                })
+                .collect(),
+        );
+        self.browser.meta.insert(
+            conn_id.to_string(),
+            std::sync::Arc::new(std::sync::Mutex::new(cache)),
+        );
     }
 
     /// Test hook: make the active tab a dirty external SQL file (guards on

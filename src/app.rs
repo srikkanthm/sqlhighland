@@ -279,6 +279,10 @@ pub(crate) struct QueryTab {
     /// immediately after an edit so squiggles don't flicker off while the
     /// next debounced pass runs.
     pub(crate) last_structural: Vec<crate::sql::SqlIssue>,
+    /// Structural query scope from the last debounced pass, for
+    /// scope-correct completion. `None` (not yet computed, or diagnostics
+    /// disabled) means completion uses its lexical fallback.
+    pub(crate) scope: Option<crate::complete::ScopeForest>,
     pub(crate) _subs: Vec<Subscription>,
 }
 

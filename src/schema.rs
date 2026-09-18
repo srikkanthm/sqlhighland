@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::complete::Dialect;
 use crate::complete::{display_name, is_system_schema};
 use crate::metadata::{MetadataCache, TableKind};
 
@@ -27,6 +28,14 @@ impl DbEngine {
     pub fn label(self) -> &'static str {
         match self {
             DbEngine::Oracle => "Oracle",
+        }
+    }
+
+    /// Completion dialect for this engine. New variants add an arm here and
+    /// an `impl Dialect`; the completion engine itself is unchanged.
+    pub fn dialect(self) -> &'static dyn Dialect {
+        match self {
+            DbEngine::Oracle => crate::complete::oracle(),
         }
     }
 }
@@ -405,5 +414,11 @@ mod tests {
             OracleProvider.object_title("SYSTEM", "EMPLOYEES", "SYSTEM"),
             "EMPLOYEES"
         );
+    }
+
+    #[test]
+    fn engine_maps_to_its_dialect() {
+        assert_eq!(DbEngine::Oracle.dialect().name(), "Oracle");
+        assert_eq!(DbEngine::default().dialect().name(), "Oracle");
     }
 }

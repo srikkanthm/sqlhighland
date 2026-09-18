@@ -31,6 +31,9 @@ pub enum CompleteContext {
     /// After `WHERE`/`GROUP`/`ORDER`/`HAVING`/`BY`/`AND`/`OR`/`SET`/`WHEN`/
     /// `ON` (started condition) — in-scope columns, functions. Never tables.
     Predicate,
+    /// Past a table reference (`FROM t `, `UPDATE t `, …) — only the clause
+    /// continuations valid for that statement (never statement starters/DDL).
+    FromTail(FromOrigin),
     /// `owner.` after `FROM`/`JOIN` — tables of that owner (bare names).
     OwnerTables(String),
     /// After `alias.` or `table.` — columns of that object only.
@@ -72,6 +75,10 @@ pub struct Candidate {
     pub owner: Option<String>,
     /// Usage count for recency/frequency boost (0 = never used).
     pub usage: u64,
+    /// Scope proximity: 0 = innermost scope, higher = farther out. Breaks ties
+    /// between otherwise-equal candidates so a correlated column resolves to
+    /// the nearest definition. 0 for candidates with no scope.
+    pub depth: u8,
 }
 
 impl Candidate {
@@ -89,13 +96,17 @@ impl Candidate {
 mod aliases;
 mod catalog;
 mod context;
+mod dialect;
 mod ranking;
+mod scope;
 
 // Re-exports preserve the public `crate::complete::…` API across the split.
 pub use aliases::*;
 pub use catalog::*;
 pub use context::*;
+pub use dialect::*;
 pub use ranking::*;
+pub use scope::*;
 
 #[cfg(test)]
 mod tests;

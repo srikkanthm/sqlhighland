@@ -322,6 +322,16 @@ impl SqlHighlandView {
             .unwrap_or_default()
     }
 
+    /// Engine of a tab's bound connection (Oracle when unbound/unknown), for
+    /// dialect-specific completion.
+    pub(crate) fn engine_of(&self, conn_id: &Option<String>) -> crate::schema::DbEngine {
+        conn_id
+            .as_deref()
+            .and_then(|id| self.connections.iter().find(|c| c.id == id))
+            .map(|c| c.engine)
+            .unwrap_or_default()
+    }
+
     /// Copy the grid selection to the clipboard. Precedence: any native text
     /// selection (output pane / editor) wins; then the app-owned grid
     /// selection (rows or a whole column, honoring the CSV delimiter); then

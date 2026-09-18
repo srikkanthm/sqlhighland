@@ -135,3 +135,8 @@ required-features = ["gui-test"]
 name = "fonts"
 path = "tests/fonts.rs"
 required-features = ["gui-test"]
+
+[[test]]
+name = "completion_scope"
+path = "tests/completion_scope.rs"
+required-features = ["gui-test"]

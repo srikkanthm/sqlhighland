@@ -5,15 +5,18 @@
 
 use gpui::{Context, Window};
 
+use std::collections::HashMap;
+
 use crate::app::{SqlHighlandView, COMPLETE_LIMIT};
 use crate::complete::{
     allows_empty_prefix, ambiguous_columns, build_alias_map, byte_to_lsp_pos, classify_context,
-    detect_join_on, display_name, function_insert, insert_text_for, is_system_schema,
-    is_trivia_position, join_condition_candidates, rank_candidates, resolve_qualifier, scope_label,
-    short_comment, word_prefix, Candidate, CandidateKind, CompleteContext, ForeignKey, ScopeTable,
-    EXPR_KEYWORDS, ORACLE_FUNCTIONS, ORACLE_KEYWORDS, PRED_FOLLOW, PRED_KEYWORDS, SELECT_FOLLOW,
-    STMT_KEYWORDS,
+    detect_join_on, display_name, function_insert, insert_text_for, is_trivia_position,
+    join_condition_candidates, owners_match, rank_candidates, resolve_qualifier, scope_label,
+    short_comment, word_prefix, Candidate, CandidateKind, CompleteContext, DmlKind, ForeignKey,
+    FromOrigin, Relation, RelationKind, ScopeForest, ScopeTable, TableRef, FROM_FOLLOW,
+    INTO_FOLLOW, JOIN_FOLLOW, MERGE_FOLLOW, UPDATE_FOLLOW, USING_FOLLOW,
 };
+use crate::metadata::{ColumnMeta, SharedCache};
 use crate::session::lock;
 use crate::sql::statement_at;
 
@@ -52,6 +55,10 @@ impl SqlHighlandView {
                 return empty;
             }
         }
+        // Structural scope from the last debounced pass (None/empty → lexical
+        // fallback below). Cloned only after the cheap gates above, since the
+        // completion callback runs synchronously on the UI thread.
+        let structural = tab.scope.clone().filter(|s| !s.is_empty());
         // Snapshot the cache (clone the Arc; never lock the session here).
         // Missing/stale cache kicks a background refresh; this request
         // completes from keywords + whatever is cached.
@@ -70,8 +77,29 @@ impl SqlHighlandView {
             // means no refresh could ever clear it (stuck-status bug).
             self.status = "Loading suggestions…".into();
         }
-        let stmt = statement_at(text, offset).unwrap_or_else(|| text.to_string());
-        let aliases = build_alias_map(&stmt);
+        // Scope-correct aliases + in-scope tables when the structural pass has
+        // run; otherwise the lexical statement scan (unchanged behavior). A
+        // structural gap (no relations resolved at this offset) also falls back
+        // rather than suppressing columns.
+        let (aliases, scope_tables) = match structural.as_ref() {
+            Some(forest) => {
+                let (aliases, tables) = scope_from_forest(forest, offset, &cache);
+                if aliases.is_empty() && tables.is_empty() {
+                    let stmt = statement_at(text, offset).unwrap_or_else(|| text.to_string());
+                    let aliases = build_alias_map(&stmt);
+                    let tables = lexical_scope_tables(&aliases, &cache);
+                    (aliases, tables)
+                } else {
+                    (aliases, tables)
+                }
+            }
+            None => {
+                let stmt = statement_at(text, offset).unwrap_or_else(|| text.to_string());
+                let aliases = build_alias_map(&stmt);
+                let tables = lexical_scope_tables(&aliases, &cache);
+                (aliases, tables)
+            }
+        };
         // JOIN … ON with a fresh condition short-circuits everything else:
         // FK-derived conditions or no popup at all.
         let head_end = offset.min(text.len());
@@ -91,7 +119,13 @@ impl SqlHighlandView {
             // No FK links the pair: fall through to Predicate (columns for a
             // hand-written condition) instead of an empty popup.
         }
-        let is_seq = |n: &str| cache.as_ref().is_some_and(|c| lock(c).is_sequence(n));
+        let dialect = self.engine_of(&conn_id).dialect();
+        // Sequence pseudo-columns (`seq.`) only exist where the dialect has
+        // them; otherwise a qualified prefix resolves as a normal table.
+        let is_seq = |n: &str| {
+            dialect.uses_sequence_pseudocolumns()
+                && cache.as_ref().is_some_and(|c| lock(c).is_sequence(n))
+        };
         let ctx = classify_context(text, offset, &is_seq);
         let show_system = self.show_system;
         let mut cands: Vec<Candidate> = Vec::new();
@@ -112,39 +146,13 @@ impl SqlHighlandView {
         // or hold system rows from an unfiltered fetch): hide system owners
         // except the connected user's own schema.
         let hide_system = |owner: &str| {
-            !show_system && !owner.eq_ignore_ascii_case(&own_schema) && is_system_schema(owner)
+            !show_system
+                && !owner.eq_ignore_ascii_case(&own_schema)
+                && dialect.is_system_schema(owner)
         };
-        // In-scope tables as ScopeTables: single resolution shared by
-        // column completion (with ambiguity info) and qualifier detail.
-        // Deterministic alias order.
-        let mut scope_order: Vec<String> = aliases.keys().cloned().collect();
-        scope_order.sort();
-        let scope_tables: Vec<ScopeTable> = if let Some(cache) = &cache {
-            let cache = lock(cache);
-            let mut seen = std::collections::HashSet::new();
-            let mut out = Vec::new();
-            for alias in &scope_order {
-                let Some(tref) = aliases.get(alias) else {
-                    continue;
-                };
-                let key = (
-                    tref.owner.clone().unwrap_or_default().to_ascii_uppercase(),
-                    tref.name.to_ascii_uppercase(),
-                );
-                if !seen.insert(key) {
-                    continue;
-                }
-                let cols = cache.columns_for(tref.owner.as_deref(), &tref.name);
-                out.push(ScopeTable {
-                    owner: tref.owner.clone(),
-                    table: tref.name.clone(),
-                    cols,
-                });
-            }
-            out
-        } else {
-            Vec::new()
-        };
+        // In-scope tables as ScopeTables (columns, alias detail) come from
+        // `aliases` + `scope_tables`, built above from the structural scope
+        // when available.
         // Shared builders: columns of in-scope tables, keyword lists,
         // function skeletons. Each context composes only what SQL allows.
         let column_detail = |col: &crate::metadata::ColumnMeta, scope_name: &str| -> String {
@@ -164,7 +172,9 @@ impl SqlHighlandView {
         };
         let push_scope_columns = |cands: &mut Vec<Candidate>| {
             let ambiguous = ambiguous_columns(&scope_tables);
-            for t in &scope_tables {
+            // `scope_tables` is nearest-scope-first, so the enumerate index is
+            // the proximity used as a ranking tie-break.
+            for (depth, t) in scope_tables.iter().enumerate() {
                 for col in &t.cols {
                     // Collision across scope tables: qualify so the insert
                     // is unambiguous SQL (`e.DEPTNO`, never bare `DEPTNO`).
@@ -182,6 +192,7 @@ impl SqlHighlandView {
                         kind: CandidateKind::ColumnInScope,
                         owner: owner_out,
                         usage: usage_of(&conn_id, &col.name),
+                        depth: depth.min(u8::MAX as usize) as u8,
                     });
                 }
             }
@@ -194,17 +205,19 @@ impl SqlHighlandView {
                     kind: CandidateKind::Keyword,
                     owner: None,
                     usage: 0,
+                    depth: 0,
                 });
             }
         };
         let push_functions = |cands: &mut Vec<Candidate>| {
-            for (name, sig) in ORACLE_FUNCTIONS {
+            for (name, sig) in dialect.functions() {
                 cands.push(Candidate {
                     label: function_insert(name),
                     detail: sig.to_string(),
                     kind: CandidateKind::Function,
                     owner: None,
                     usage: usage_of(&conn_id, name),
+                    depth: 0,
                 });
             }
         };
@@ -223,44 +236,86 @@ impl SqlHighlandView {
                     kind: CandidateKind::Sequence,
                     owner: Some(s.owner.clone()),
                     usage: usage_of(&conn_id, &s.name),
+                    depth: 0,
                 });
             }
         };
+        // DML positions: an INSERT column list or UPDATE SET body offers the
+        // target table's columns only (plus expressions for UPDATE), instead
+        // of the generic context's keyword noise.
+        if let Some(anchor) = structural.as_ref().and_then(|s| s.dml_at(offset)) {
+            let mut dml: Vec<Candidate> = relation_columns(&anchor.target, &cache)
+                .into_iter()
+                .map(|col| Candidate {
+                    label: col.name.clone(),
+                    detail: column_detail(&col, &anchor.target.name),
+                    kind: CandidateKind::ColumnInScope,
+                    owner: anchor.target.owner.clone(),
+                    usage: usage_of(&conn_id, &col.name),
+                    depth: 0,
+                })
+                .collect();
+            if anchor.kind == DmlKind::UpdateSet {
+                // The SET right-hand/left-hand sides are expressions.
+                push_functions(&mut dml);
+            }
+            let ranked = rank_candidates(&prefix, dml, &own_schema, COMPLETE_LIMIT);
+            if !ranked.is_empty() {
+                return (
+                    Self::to_items(ranked, text, word_start, offset),
+                    word_start,
+                    prefix,
+                );
+            }
+            // Target unresolvable (unknown table): fall through to the generic
+            // context rather than showing nothing.
+        }
         match &ctx {
             // Handled above via detect_join_on — unreachable here.
             CompleteContext::JoinOn { .. } => {}
             CompleteContext::SequenceMember(_) => {
-                for kw in ["NEXTVAL", "CURRVAL"] {
+                for kw in dialect.sequence_members() {
                     cands.push(Candidate {
                         label: kw.to_string(),
                         detail: "SEQUENCE".to_string(),
                         kind: CandidateKind::Keyword,
                         owner: None,
                         usage: 0,
+                        depth: 0,
                     });
                 }
             }
             CompleteContext::ColumnOf(q) => {
                 if let Some(tref) = resolve_qualifier(q, &aliases) {
-                    let cols = cache.as_ref().map(|c| {
-                        let c = lock(c);
-                        c.columns_for(tref.owner.as_deref(), &tref.name)
-                    });
-                    if let Some(cols) = cols {
-                        for col in cols {
-                            cands.push(Candidate {
-                                label: col.name.clone(),
-                                detail: column_detail(&col, &tref.name),
-                                kind: CandidateKind::ColumnInScope,
-                                owner: tref.owner.clone(),
-                                usage: usage_of(&conn_id, &col.name),
-                            });
-                        }
+                    // A CTE/subquery relation carries its own columns; a base
+                    // table/view resolves through the dictionary cache.
+                    let cols: Vec<ColumnMeta> = scope_tables
+                        .iter()
+                        .find(|t| {
+                            t.table.eq_ignore_ascii_case(&tref.name)
+                                && owners_match(&t.owner, &tref.owner)
+                        })
+                        .map(|t| t.cols.clone())
+                        .or_else(|| {
+                            cache
+                                .as_ref()
+                                .map(|c| lock(c).columns_for(tref.owner.as_deref(), &tref.name))
+                        })
+                        .unwrap_or_default();
+                    for col in cols {
+                        cands.push(Candidate {
+                            label: col.name.clone(),
+                            detail: column_detail(&col, &tref.name),
+                            kind: CandidateKind::ColumnInScope,
+                            owner: tref.owner.clone(),
+                            usage: usage_of(&conn_id, &col.name),
+                            depth: 0,
+                        });
                     }
                 }
             }
             CompleteContext::StatementStart => {
-                push_keywords(&mut cands, STMT_KEYWORDS);
+                push_keywords(&mut cands, dialect.statement_starters());
             }
             CompleteContext::AfterFrom => {
                 // Tables only — keywords never follow FROM. Own-schema
@@ -279,6 +334,7 @@ impl SqlHighlandView {
                             kind: CandidateKind::Table,
                             owner: Some(t.owner.clone()),
                             usage: usage_of(&conn_id, &t.name),
+                            depth: 0,
                         });
                     }
                 }
@@ -297,6 +353,7 @@ impl SqlHighlandView {
                             kind: CandidateKind::Table,
                             owner: Some(t.owner.clone()),
                             usage: usage_of(&conn_id, &t.name),
+                            depth: 0,
                         });
                     }
                 }
@@ -305,21 +362,61 @@ impl SqlHighlandView {
                 push_scope_columns(&mut cands);
                 push_functions(&mut cands);
                 push_sequences(&mut cands);
-                push_keywords(&mut cands, EXPR_KEYWORDS);
-                push_keywords(&mut cands, SELECT_FOLLOW);
+                push_keywords(&mut cands, dialect.expr_keywords());
+                push_keywords(&mut cands, dialect.select_follow());
             }
             CompleteContext::Predicate => {
                 push_scope_columns(&mut cands);
                 push_functions(&mut cands);
                 push_sequences(&mut cands);
-                push_keywords(&mut cands, PRED_KEYWORDS);
-                push_keywords(&mut cands, PRED_FOLLOW);
+                push_keywords(&mut cands, dialect.predicate_keywords());
+                push_keywords(&mut cands, dialect.predicate_follow());
+                // In ORDER BY, the select-list aliases are valid too (Oracle
+                // allows aliases only there). Skip names already offered as
+                // columns (redundant).
+                if let Some(forest) = structural
+                    .as_ref()
+                    .filter(|s| s.allows_projection_alias(offset))
+                {
+                    let columns: std::collections::HashSet<String> = scope_tables
+                        .iter()
+                        .flat_map(|t| t.cols.iter().map(|c| c.name.to_ascii_uppercase()))
+                        .collect();
+                    for alias in forest.projection_at(offset) {
+                        if columns.contains(&alias.to_ascii_uppercase()) {
+                            continue;
+                        }
+                        cands.push(Candidate {
+                            label: alias.clone(),
+                            detail: "SELECT alias".to_string(),
+                            kind: CandidateKind::Column,
+                            owner: None,
+                            usage: usage_of(&conn_id, alias),
+                            depth: 0,
+                        });
+                    }
+                }
+            }
+            CompleteContext::FromTail(origin) => {
+                // Past a table reference: only the continuations valid for the
+                // introducing clause (never statement starters/DDL/functions).
+                let kws: &[&str] = match origin {
+                    FromOrigin::From => FROM_FOLLOW,
+                    FromOrigin::Join => JOIN_FOLLOW,
+                    FromOrigin::Update => UPDATE_FOLLOW,
+                    FromOrigin::Into => INTO_FOLLOW,
+                    FromOrigin::Merge => MERGE_FOLLOW,
+                    FromOrigin::Using => USING_FOLLOW,
+                    // DDL table tail: no meaningful keyword continuation.
+                    FromOrigin::Table => &[],
+                };
+                push_keywords(&mut cands, kws);
             }
             CompleteContext::BareWord => {
                 // Ambiguous position: keywords + functions, minus the
                 // function names (which complete as call skeletons below).
-                for kw in ORACLE_KEYWORDS {
-                    if ORACLE_FUNCTIONS.iter().any(|(n, _)| n == kw) {
+                for kw in dialect.keywords() {
+                    if dialect.functions().iter().any(|(n, _)| n == kw) {
                         continue;
                     }
                     cands.push(Candidate {
@@ -328,6 +425,7 @@ impl SqlHighlandView {
                         kind: CandidateKind::Keyword,
                         owner: None,
                         usage: 0,
+                        depth: 0,
                     });
                 }
                 push_functions(&mut cands);
@@ -431,5 +529,209 @@ impl SqlHighlandView {
         if self.browser.usage.len() > 5000 {
             self.browser.usage.clear();
         }
+    }
+}
+
+/// Columns of a relation: base tables/views from the dictionary cache, a
+/// CTE/subquery from its own projection names.
+fn relation_columns(rel: &Relation, cache: &Option<SharedCache>) -> Vec<ColumnMeta> {
+    match rel.kind {
+        RelationKind::Table => cache
+            .as_ref()
+            .map(|c| lock(c).columns_for(rel.owner.as_deref(), &rel.name))
+            .unwrap_or_default(),
+        RelationKind::Cte | RelationKind::Subquery => rel
+            .columns
+            .iter()
+            .map(|name| ColumnMeta {
+                name: name.clone(),
+                data_type: String::new(),
+                comments: String::new(),
+            })
+            .collect(),
+    }
+}
+
+/// Aliases + in-scope tables from the structural scope at `offset`: relations
+/// are nearest-scope-first (so a subquery alias shadows an outer one), and a
+/// CTE/subquery relation carries its own projection columns.
+fn scope_from_forest(
+    forest: &ScopeForest,
+    offset: usize,
+    cache: &Option<SharedCache>,
+) -> (HashMap<String, TableRef>, Vec<ScopeTable>) {
+    let mut aliases = HashMap::new();
+    let mut tables = Vec::new();
+    for rel in forest.visible_relations(offset) {
+        aliases.insert(
+            rel.key(),
+            TableRef {
+                owner: rel.owner.clone(),
+                name: rel.name.clone(),
+            },
+        );
+        tables.push(ScopeTable {
+            owner: rel.owner.clone(),
+            table: rel.name.clone(),
+            cols: relation_columns(rel, cache),
+        });
+    }
+    (aliases, tables)
+}
+
+/// Lexical fallback: aliases from the statement scan, columns from the cache
+/// (the pre-scope behavior, unchanged).
+fn lexical_scope_tables(
+    aliases: &HashMap<String, TableRef>,
+    cache: &Option<SharedCache>,
+) -> Vec<ScopeTable> {
+    let mut order: Vec<String> = aliases.keys().cloned().collect();
+    order.sort();
+    let Some(cache) = cache else {
+        return Vec::new();
+    };
+    let cache = lock(cache);
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for alias in &order {
+        let Some(tref) = aliases.get(alias) else {
+            continue;
+        };
+        let key = (
+            tref.owner.clone().unwrap_or_default().to_ascii_uppercase(),
+            tref.name.to_ascii_uppercase(),
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+        let cols = cache.columns_for(tref.owner.as_deref(), &tref.name);
+        out.push(ScopeTable {
+            owner: tref.owner.clone(),
+            table: tref.name.clone(),
+            cols,
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::complete::{Relation, Scope};
+    use crate::metadata::{MetadataCache, TableId, TableKind};
+    use std::sync::{Arc, Mutex};
+
+    fn col(name: &str) -> ColumnMeta {
+        ColumnMeta {
+            name: name.to_string(),
+            data_type: "NUMBER".to_string(),
+            comments: String::new(),
+        }
+    }
+
+    fn cache_with_emp() -> Option<SharedCache> {
+        let mut cache = MetadataCache::default();
+        cache.tables.push(TableId {
+            owner: "SCOTT".to_string(),
+            name: "EMP".to_string(),
+            kind: TableKind::Table,
+        });
+        cache.columns.insert(
+            ("SCOTT".to_string(), "EMP".to_string()),
+            vec![col("EMPNO"), col("ENAME")],
+        );
+        Some(Arc::new(Mutex::new(cache)))
+    }
+
+    fn forest() -> ScopeForest {
+        ScopeForest {
+            scopes: vec![Scope {
+                start: 0,
+                end: 100,
+                depth: 0,
+                relations: vec![
+                    Relation {
+                        alias: "e".to_string(),
+                        owner: Some("SCOTT".to_string()),
+                        name: "EMP".to_string(),
+                        kind: RelationKind::Table,
+                        columns: Vec::new(),
+                    },
+                    Relation {
+                        alias: "recent".to_string(),
+                        owner: None,
+                        name: "recent".to_string(),
+                        kind: RelationKind::Cte,
+                        columns: vec!["id".to_string(), "total".to_string()],
+                    },
+                ],
+                projection: vec![],
+                order_group: vec![],
+            }],
+            dml: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn scope_from_forest_maps_aliases_and_columns() {
+        let cache = cache_with_emp();
+        let (aliases, tables) = scope_from_forest(&forest(), 10, &cache);
+        assert!(aliases.contains_key("e"));
+        assert_eq!(aliases["e"].name, "EMP");
+        assert!(aliases.contains_key("recent"));
+
+        let emp = tables.iter().find(|t| t.table == "EMP").unwrap();
+        let emp_cols: Vec<&str> = emp.cols.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(emp_cols, ["EMPNO", "ENAME"], "table columns from the cache");
+
+        let cte = tables.iter().find(|t| t.table == "recent").unwrap();
+        let cte_cols: Vec<&str> = cte.cols.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(cte_cols, ["id", "total"], "CTE columns from the scope");
+    }
+
+    #[test]
+    fn relation_columns_reads_cache_or_scope() {
+        let cache = cache_with_emp();
+        let table = Relation {
+            alias: "e".to_string(),
+            owner: Some("SCOTT".to_string()),
+            name: "EMP".to_string(),
+            kind: RelationKind::Table,
+            columns: Vec::new(),
+        };
+        let cols: Vec<String> = relation_columns(&table, &cache)
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(cols, ["EMPNO", "ENAME"]);
+
+        let cte = Relation {
+            alias: "recent".to_string(),
+            owner: None,
+            name: "recent".to_string(),
+            kind: RelationKind::Cte,
+            columns: vec!["id".to_string()],
+        };
+        let cols: Vec<String> = relation_columns(&cte, &cache)
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(cols, ["id"]);
+    }
+
+    #[test]
+    fn lexical_fallback_reads_columns_from_cache() {
+        let cache = cache_with_emp();
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            "e".to_string(),
+            TableRef {
+                owner: Some("SCOTT".to_string()),
+                name: "EMP".to_string(),
+            },
+        );
+        let tables = lexical_scope_tables(&aliases, &cache);
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].cols.len(), 2);
     }
 }

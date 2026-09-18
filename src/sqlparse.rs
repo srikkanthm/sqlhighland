@@ -276,7 +276,7 @@ fn friendly_kind(kind: &str) -> String {
 }
 
 /// Parse with a progress budget. Returns `None` on setup failure or timeout.
-fn parse(chunk: &str) -> Option<tree_sitter::Tree> {
+pub(crate) fn parse(chunk: &str) -> Option<tree_sitter::Tree> {
     let mut parser = Parser::new();
     parser
         .set_language(&Language::new(tree_sitter_sequel::LANGUAGE))

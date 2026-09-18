@@ -426,6 +426,7 @@ pub fn join_condition_candidates(
                 kind: CandidateKind::JoinCondition,
                 owner: None,
                 usage: 0,
+                depth: 0,
             });
         }
     }
@@ -445,7 +446,7 @@ fn fk_pairs(fk: &ForeignKey, a: &TableRef, b: &TableRef) -> Option<(Vec<String>,
     None
 }
 
-pub(super) fn owners_match(a: &Option<String>, b: &Option<String>) -> bool {
+pub(crate) fn owners_match(a: &Option<String>, b: &Option<String>) -> bool {
     match (a, b) {
         (Some(x), Some(y)) => x.eq_ignore_ascii_case(y),
         _ => true,
