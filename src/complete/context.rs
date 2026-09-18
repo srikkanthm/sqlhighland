@@ -267,6 +267,13 @@ pub fn classify_context(
         Clause::Select => CompleteContext::SelectList,
         Clause::From => CompleteContext::AfterFrom,
         Clause::FromTail(origin) => CompleteContext::FromTail(origin),
+        Clause::CaseStart => CompleteContext::CaseStart,
+        Clause::CaseCondition => CompleteContext::CaseCondition,
+        Clause::CaseResult => CompleteContext::CaseResult,
+        Clause::SubqueryStart => CompleteContext::SubqueryStart,
+        Clause::CastType => CompleteContext::CastType,
+        Clause::Window => CompleteContext::WindowClause,
+        Clause::UsingColumns => CompleteContext::UsingColumns,
         Clause::Predicate => CompleteContext::Predicate,
         Clause::Bare => CompleteContext::BareWord,
     }
@@ -302,6 +309,21 @@ enum Clause {
     /// Past a table reference: the table-introducing clause is remembered so
     /// the caller offers the right continuations instead of every keyword.
     FromTail(FromOrigin),
+    /// Just after `CASE` — the next keyword is `WHEN`.
+    CaseStart,
+    /// In a `WHEN` condition.
+    CaseCondition,
+    /// In a `THEN`/`ELSE` result.
+    CaseResult,
+    /// A fresh query begins: after `(` following `FROM`/`IN`/`EXISTS`/`JOIN`,
+    /// or after a set operator (`UNION`/`INTERSECT`/`MINUS`).
+    SubqueryStart,
+    /// `CAST(expr AS |` — data types.
+    CastType,
+    /// `OVER (|` — window clause keywords.
+    Window,
+    /// `USING (|` — columns common to the joined relations.
+    UsingColumns,
     Predicate,
     Bare,
 }
@@ -338,7 +360,8 @@ fn from_origin(up: &str, prev: Option<&str>) -> FromOrigin {
 /// `.` skips its qualifier. A bare identifier between the cursor and a
 /// SELECT means the select-list tail (`Select`); before a table-introducing
 /// keyword it is the table tail (`FromTail`), which the caller narrows to the
-/// valid continuations.
+/// valid continuations. `CASE … END` nesting is tracked so its keywords
+/// resolve (and so the cursor after `END` returns to the enclosing clause).
 fn scan_clause(toks: &[String]) -> Clause {
     if toks.is_empty() {
         return Clause::Start;
@@ -346,6 +369,7 @@ fn scan_clause(toks: &[String]) -> Clause {
     let mut saw_ident = false;
     let mut skip_word = false;
     let mut depth = 0u32;
+    let mut case_depth = 0u32;
     for (i, t) in toks.iter().enumerate().rev() {
         match t.as_str() {
             "," => {
@@ -360,7 +384,22 @@ fn scan_clause(toks: &[String]) -> Clause {
                     skip_word = true;
                     continue;
                 }
-                return Clause::Select;
+                // What precedes the `(` decides what it opens.
+                let before = i
+                    .checked_sub(1)
+                    .and_then(|j| toks.get(j))
+                    .map(|s| s.to_ascii_uppercase());
+                return match before.as_deref() {
+                    Some("CAST") => Clause::CastType,
+                    Some("OVER") => Clause::Window,
+                    Some("USING") => Clause::UsingColumns,
+                    // A relation/subquery is expected here: `FROM (`, `IN (`,
+                    // `EXISTS (`, `JOIN (`.
+                    Some("IN") | Some("EXISTS") | Some("FROM") | Some("JOIN") => {
+                        Clause::SubqueryStart
+                    }
+                    _ => Clause::Select,
+                };
             }
             ")" => {
                 depth += 1;
@@ -373,6 +412,46 @@ fn scan_clause(toks: &[String]) -> Clause {
             _ => {}
         }
         let up = t.to_ascii_uppercase();
+        // A PL/SQL block's BEGIN/DECLARE makes clause scanning meaningless;
+        // bail out rather than guess (its END would otherwise look like a
+        // CASE close).
+        if up == "BEGIN" || up == "DECLARE" {
+            return Clause::Bare;
+        }
+        // CASE keywords come before the clause table (which maps WHEN to a
+        // predicate). `END` opens a region to skip; its matching `CASE` closes
+        // it and scanning continues, so the cursor after `END` resolves to the
+        // enclosing clause.
+        match up.as_str() {
+            "END" => {
+                case_depth += 1;
+                continue;
+            }
+            "CASE" => {
+                if case_depth == 0 {
+                    return Clause::CaseStart;
+                }
+                case_depth -= 1;
+                continue;
+            }
+            "WHEN" => {
+                if case_depth == 0 {
+                    return Clause::CaseCondition;
+                }
+                continue;
+            }
+            "THEN" | "ELSE" => {
+                if case_depth == 0 {
+                    return Clause::CaseResult;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        // A set operation starts a new query: the next keyword is SELECT/WITH.
+        if matches!(up.as_str(), "UNION" | "INTERSECT" | "MINUS") {
+            return Clause::SubqueryStart;
+        }
         if up == "DISTINCT" || up == "ALL" || up == "AS" {
             saw_ident = false;
             skip_word = false;
@@ -428,7 +507,17 @@ pub fn allows_empty_prefix(text: &str, offset: usize) -> bool {
     let toks = tokenize(&text[base..offset]);
     matches!(
         scan_clause(&toks),
-        Clause::Select | Clause::From | Clause::FromTail(_) | Clause::Predicate
+        Clause::Select
+            | Clause::From
+            | Clause::FromTail(_)
+            | Clause::CaseStart
+            | Clause::CaseCondition
+            | Clause::CaseResult
+            | Clause::SubqueryStart
+            | Clause::CastType
+            | Clause::Window
+            | Clause::UsingColumns
+            | Clause::Predicate
     )
 }
 /// True when `offset` sits inside a string literal, quoted identifier, or

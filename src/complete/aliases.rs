@@ -143,6 +143,25 @@ pub(super) fn tokenize(s: &str) -> Vec<String> {
                 }
             }
             out.push(std::mem::take(&mut cur));
+        } else if c == '\'' {
+            // Single-quoted string literal: its contents are data, never
+            // tokens (a literal like `'from'` must not switch the clause).
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            loop {
+                match chars.next() {
+                    None => break,
+                    Some('\'') => {
+                        if chars.peek() == Some(&'\'') {
+                            chars.next(); // escaped `''`
+                        } else {
+                            break;
+                        }
+                    }
+                    Some(_) => {}
+                }
+            }
         } else if is_word_char(c) {
             cur.push(c);
         } else {
@@ -289,24 +308,16 @@ fn find_last_keyword(head: &str, keyword: &str, from: usize) -> Option<usize> {
     last
 }
 
-/// Whole-word check for AND/OR in a tail segment (multi-condition ON tails
-/// are out of scope for suggestions).
-fn has_and_or(tail: &str) -> bool {
-    let clean = strip_string_literals(tail);
-    find_last_keyword(&clean, "AND", 0).is_some() || find_last_keyword(&clean, "OR", 0).is_some()
-}
-
-/// Detect `JOIN <table> [[AS] alias] ON |` with the cursor in a fresh
-/// (operator-free, single-condition) ON tail. Returns the right side as
-/// written plus its resolved table. `head` is buffer text before the cursor;
-/// `aliases` resolves `AS` aliases to concrete tables.
-///
-/// v1 limits: only the first (operator-free) condition suggests; `AND`/`OR`
-/// tails and quoted JOIN prose fall back to normal completion.
+/// Detect `JOIN <table> [[AS] alias] ON …` with the cursor in the ON tail.
+/// Returns the right side as written, its resolved table, and the byte offset
+/// just past the `ON` (so the caller can tell which conditions are already
+/// typed and not re-suggest them). Works whether the tail is fresh or already
+/// has conditions, so `… ON a = b AND |` can offer the remaining FK links.
+/// `head` is buffer text before the cursor; `aliases` resolves `AS` aliases.
 pub fn detect_join_on(
     head: &str,
     aliases: &HashMap<String, TableRef>,
-) -> Option<(String, TableRef)> {
+) -> Option<(String, TableRef, usize)> {
     let clean = strip_string_literals(head);
     // Last JOIN at/after buffer start (`find_last_keyword` returns the end
     // offset; back up over the keyword for slicing).
@@ -352,15 +363,12 @@ pub fn detect_join_on(
     // Byte offset of that ON in the original head: search after join_pos.
     // (`clean` preserves length, so offsets transfer.)
     let on_end = find_last_keyword(&clean, "ON", join_pos)?;
-    let tail = &head[on_end.min(head.len())..];
-    if tail.contains('=') || has_and_or(tail) {
-        return None;
-    }
+    let tail_start = on_end.min(head.len());
     let tref = match aliases.get(&alias.to_lowercase()) {
         Some(t) => t.clone(),
         None => TableRef { owner, name },
     };
-    Some((alias, tref))
+    Some((alias, tref, tail_start))
 }
 
 /// FK join-condition candidates between the just-joined table and every

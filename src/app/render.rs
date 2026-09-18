@@ -1075,6 +1075,7 @@ impl SqlHighlandView {
                 crate::metadata::TableKind::Table => "TABLE",
                 crate::metadata::TableKind::View => "VIEW",
                 crate::metadata::TableKind::Sequence => "SEQUENCE",
+                crate::metadata::TableKind::Synonym => "SYNONYM",
             },
             TabKind::Query => "",
         };

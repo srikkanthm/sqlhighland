@@ -34,6 +34,23 @@ pub enum CompleteContext {
     /// Past a table reference (`FROM t `, `UPDATE t `, …) — only the clause
     /// continuations valid for that statement (never statement starters/DDL).
     FromTail(FromOrigin),
+    /// Just after `CASE` — offer `WHEN`.
+    CaseStart,
+    /// Inside a `WHEN` condition — columns/functions, predicate operators, and
+    /// `THEN`.
+    CaseCondition,
+    /// Inside a `THEN`/`ELSE` result — columns/functions and the case keywords
+    /// that follow a result (`WHEN`/`ELSE`/`END`).
+    CaseResult,
+    /// A fresh query begins (`FROM (`, `IN (`, `EXISTS (`, `UNION …`) — offer
+    /// `SELECT`/`WITH`.
+    SubqueryStart,
+    /// `CAST(expr AS |` — data types.
+    CastType,
+    /// `OVER (|` — window clause keywords (`PARTITION BY`, `ORDER BY`, …).
+    WindowClause,
+    /// `USING (|` — columns common to the joined relations.
+    UsingColumns,
     /// `owner.` after `FROM`/`JOIN` — tables of that owner (bare names).
     OwnerTables(String),
     /// After `alias.` or `table.` — columns of that object only.
@@ -41,6 +58,8 @@ pub enum CompleteContext {
     ColumnOf(String),
     /// Qualifier is a known sequence — offer `NEXTVAL`/`CURRVAL`.
     SequenceMember(String),
+    /// Qualifier is a known package (`pkg.`) — offer its members.
+    PackageMember(String),
     /// In `JOIN <right> [alias] ON |` with a fresh (operator-free) condition —
     /// offer FK-derived `left.col = right.col` conditions.
     JoinOn {

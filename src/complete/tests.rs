@@ -149,8 +149,82 @@ fn empty_prefix_allowed_only_after_operand_keywords() {
     // pops the valid continuations.
     assert!(at("SELECT * FROM emp "));
     assert!(at("SELECT emp "));
+    // CASE keywords pop right after the space.
+    assert!(at("SELECT CASE "));
+    assert!(at("SELECT CASE WHEN x THEN "));
+    assert!(at("SELECT CASE WHEN x THEN 1 ELSE "));
     // Finished conditions stay in predicate scope (AND/OR offered).
     assert!(at("SELECT * FROM emp e JOIN dept d ON e.x = 1 "));
+}
+
+#[test]
+fn case_expression_contexts() {
+    use CompleteContext::*;
+    let no_seq = |_: &str| false;
+    let at = |sql: &str| classify_context(sql, sql.len(), &no_seq);
+    // CASE start: the next keyword is WHEN.
+    assert_eq!(at("SELECT CASE "), CaseStart);
+    // WHEN condition (columns/operators, then THEN).
+    assert_eq!(at("SELECT CASE WHEN "), CaseCondition);
+    assert_eq!(at("SELECT CASE WHEN EMAIL = "), CaseCondition);
+    // THEN/ELSE result (an expression).
+    assert_eq!(at("SELECT CASE WHEN EMAIL = 'x' THEN "), CaseResult);
+    assert_eq!(
+        at("SELECT CASE WHEN EMAIL = 'x' THEN 'a' ELSE "),
+        CaseResult
+    );
+    // After END the enclosing clause is back: select list (alias, comma, FROM).
+    assert_eq!(at("SELECT CASE WHEN x THEN 1 END "), SelectList);
+    assert_eq!(at("SELECT CASE WHEN x THEN 1 END ss "), SelectList);
+    // Nested CASE: the inner END returns to the outer result; the outer END to
+    // the select list.
+    assert_eq!(
+        at("SELECT CASE WHEN x THEN CASE WHEN y THEN 1 END ELSE "),
+        CaseResult
+    );
+    assert_eq!(
+        at("SELECT CASE WHEN x THEN CASE WHEN y THEN 1 END ELSE 2 END "),
+        SelectList
+    );
+    // A CASE in WHERE returns to the predicate after its END.
+    assert_eq!(
+        at("SELECT * FROM t WHERE CASE WHEN x THEN 1 END = "),
+        Predicate
+    );
+}
+
+#[test]
+fn structural_expression_contexts() {
+    use CompleteContext::*;
+    let no_seq = |_: &str| false;
+    let at = |sql: &str| classify_context(sql, sql.len(), &no_seq);
+    // A fresh query after FROM (/ IN (/ EXISTS (/ set operators.
+    assert_eq!(at("SELECT * FROM ("), SubqueryStart);
+    assert_eq!(at("SELECT * FROM t WHERE x IN ("), SubqueryStart);
+    assert_eq!(at("SELECT * FROM t WHERE EXISTS ("), SubqueryStart);
+    assert_eq!(at("SELECT * FROM t JOIN ("), SubqueryStart);
+    assert_eq!(at("SELECT 1 UNION "), SubqueryStart);
+    assert_eq!(at("SELECT 1 UNION ALL "), SubqueryStart);
+    assert_eq!(at("SELECT 1 MINUS "), SubqueryStart);
+    // A plain expression paren stays a select list.
+    assert_eq!(at("SELECT ("), SelectList);
+    // CAST target types and analytic windows.
+    assert_eq!(at("SELECT CAST(x AS "), CastType);
+    assert_eq!(at("SELECT CAST(NVL(a, b) AS "), CastType);
+    assert_eq!(at("SELECT ROW_NUMBER() OVER ("), WindowClause);
+    // USING column list.
+    assert_eq!(at("SELECT * FROM a JOIN b USING ("), UsingColumns);
+}
+
+#[test]
+fn string_literals_do_not_shift_clause() {
+    use CompleteContext::*;
+    let no_seq = |_: &str| false;
+    let at = |sql: &str| classify_context(sql, sql.len(), &no_seq);
+    // A quoted keyword is data, not a clause keyword.
+    assert_eq!(at("SELECT 'from' "), SelectList);
+    assert_eq!(at("SELECT * FROM t WHERE x = 'where' "), Predicate);
+    assert_eq!(at("SELECT * FROM t WHERE x = 'a''b' AND "), Predicate);
 }
 
 #[test]
@@ -177,6 +251,11 @@ fn keyword_subsets_are_sane() {
         .chain(INTO_FOLLOW)
         .chain(MERGE_FOLLOW)
         .chain(USING_FOLLOW)
+        .chain(CASE_START_KEYWORDS)
+        .chain(CASE_CONDITION_KEYWORDS)
+        .chain(CASE_RESULT_KEYWORDS)
+        .chain(SUBQUERY_START_KEYWORDS)
+        .chain(WINDOW_KEYWORDS)
     {
         assert!(ORACLE_KEYWORDS.contains(kw), "{kw} unknown");
     }
@@ -380,12 +459,14 @@ fn trivia_respects_scope_nesting() {
 #[test]
 fn detect_join_on_finds_fresh_condition() {
     let aliases = build_alias_map("SELECT * FROM emp e JOIN dept d ON ");
-    let (alias, tref) = detect_join_on("SELECT * FROM emp e JOIN dept d ON ", &aliases).unwrap();
+    let (alias, tref, tail) =
+        detect_join_on("SELECT * FROM emp e JOIN dept d ON ", &aliases).unwrap();
     assert_eq!(alias, "d");
     assert_eq!(tref.name, "dept");
+    assert_eq!(tail, "SELECT * FROM emp e JOIN dept d ON".len());
     // AS alias + owner-qualified.
     let aliases = build_alias_map("SELECT * FROM scott.emp JOIN scott.dept AS dd ON ");
-    let (alias, tref) = detect_join_on(
+    let (alias, tref, _) = detect_join_on(
         "SELECT * FROM scott.emp JOIN scott.dept AS dd ON ",
         &aliases,
     )
@@ -394,9 +475,12 @@ fn detect_join_on_finds_fresh_condition() {
     assert_eq!(tref.owner.as_deref(), Some("scott"));
     // No ON yet → None.
     assert!(detect_join_on("SELECT * FROM emp e JOIN dept d", &aliases).is_none());
-    // Condition already started → None (v1: first condition only).
-    assert!(detect_join_on("SELECT * FROM emp e JOIN dept d ON e.x = 1", &aliases).is_none());
-    assert!(detect_join_on("SELECT * FROM emp e JOIN dept d ON e.x = 1 AND ", &aliases).is_none());
+    // A started condition still detects the tail (the caller filters typed
+    // conditions), including after AND.
+    let started = "SELECT * FROM emp e JOIN dept d ON e.x = 1";
+    let (_, _, tail) = detect_join_on(started, &aliases).unwrap();
+    assert_eq!(&started[tail..], " e.x = 1");
+    assert!(detect_join_on("SELECT * FROM emp e JOIN dept d ON e.x = 1 AND ", &aliases).is_some());
     // Quoted JOIN prose doesn't fool it.
     assert!(detect_join_on("SELECT 'join dept on ' FROM emp e", &aliases).is_none());
 }

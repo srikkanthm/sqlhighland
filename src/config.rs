@@ -54,6 +54,55 @@ pub struct SavedConfig {
     pub connections: Vec<ConnectionConfig>,
 }
 
+/// One persisted usage row: how often `label` was used on a connection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UsageRow {
+    conn: String,
+    label: String,
+    count: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct UsageStats {
+    #[serde(default)]
+    rows: Vec<UsageRow>,
+}
+
+/// Load the persisted usage counts used by completion ranking. Missing or
+/// unreadable/corrupt files load as empty (ranking just starts fresh).
+pub fn load_usage() -> std::collections::HashMap<(String, String), u64> {
+    let Ok(path) = base_dir().map(|d| d.join("usage.toml")) else {
+        return std::collections::HashMap::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return std::collections::HashMap::new();
+    };
+    let stats: UsageStats = toml::from_str(&text).unwrap_or_default();
+    stats
+        .rows
+        .into_iter()
+        .map(|r| ((r.conn, r.label), r.count))
+        .collect()
+}
+
+/// Persist usage counts. Sorted for a stable file (and diff-friendly).
+pub fn save_usage(map: &std::collections::HashMap<(String, String), u64>) -> anyhow::Result<()> {
+    let path = base_dir()?.join("usage.toml");
+    let mut rows: Vec<UsageRow> = map
+        .iter()
+        .map(|((conn, label), count)| UsageRow {
+            conn: conn.clone(),
+            label: label.clone(),
+            count: *count,
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        (a.conn.as_str(), a.label.as_str()).cmp(&(b.conn.as_str(), b.label.as_str()))
+    });
+    let text = toml::to_string_pretty(&UsageStats { rows }).context("encoding usage stats")?;
+    crate::fsutil::write_atomic(&path, &text, false)
+}
+
 impl SavedConfig {
     pub fn default_path() -> anyhow::Result<PathBuf> {
         Ok(base_dir()?.join("connections.toml"))
@@ -740,6 +789,25 @@ mod tests {
         assert!(!c.ssl);
         assert_eq!(c.password_mode, crate::model::PasswordMode::File);
         assert_eq!(c.engine, crate::schema::DbEngine::Oracle);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn usage_stats_round_trip() {
+        let _guard = env_lock();
+        let dir = std::env::temp_dir().join(format!("sqlhighland-usage-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        unsafe { std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir) };
+
+        let mut map = std::collections::HashMap::new();
+        map.insert(("c1".to_string(), "EMP".to_string()), 7);
+        map.insert(("c1".to_string(), "DEPT".to_string()), 2);
+        save_usage(&map).unwrap();
+        assert_eq!(load_usage(), map);
+
+        // Missing file loads empty.
+        std::fs::remove_file(dir.join("usage.toml")).unwrap();
+        assert!(load_usage().is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 

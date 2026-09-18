@@ -1163,6 +1163,93 @@ impl SqlHighlandView {
         items.into_iter().map(|item| item.label).collect()
     }
 
+    /// Test hook: add a single-column foreign key to `conn_id`'s cache, for
+    /// JOIN … ON suggestions. Repeat calls accumulate.
+    #[cfg(feature = "gui-test")]
+    pub fn debug_insert_fk(
+        &mut self,
+        conn_id: &str,
+        from_table: &str,
+        from_col: &str,
+        to_table: &str,
+        to_col: &str,
+    ) {
+        use crate::complete::ForeignKey;
+        use crate::metadata::MetadataCache;
+        let entry = self
+            .browser
+            .meta
+            .entry(conn_id.to_string())
+            .or_insert_with(|| {
+                std::sync::Arc::new(std::sync::Mutex::new(MetadataCache::default()))
+            });
+        let mut cache = entry.lock().unwrap_or_else(|e| e.into_inner());
+        cache.fks.push(ForeignKey {
+            name: format!("{from_table}_{to_table}_FK"),
+            from_owner: None,
+            from_table: from_table.to_string(),
+            from_cols: vec![from_col.to_string()],
+            to_owner: None,
+            to_table: to_table.to_string(),
+            to_cols: vec![to_col.to_string()],
+        });
+    }
+
+    /// Test hook: add a synonym `owner.name → [table_owner.]table_name`.
+    #[cfg(feature = "gui-test")]
+    pub fn debug_insert_synonym(
+        &mut self,
+        conn_id: &str,
+        owner: &str,
+        name: &str,
+        table_owner: &str,
+        table_name: &str,
+    ) {
+        use crate::metadata::{MetadataCache, TableId, TableKind};
+        let entry = self
+            .browser
+            .meta
+            .entry(conn_id.to_string())
+            .or_insert_with(|| {
+                std::sync::Arc::new(std::sync::Mutex::new(MetadataCache::default()))
+            });
+        let mut cache = entry.lock().unwrap_or_else(|e| e.into_inner());
+        cache.synonyms.insert(
+            (owner.to_ascii_uppercase(), name.to_ascii_uppercase()),
+            (Some(table_owner.to_string()), table_name.to_string()),
+        );
+        cache.tables.push(TableId {
+            owner: owner.to_string(),
+            name: name.to_string(),
+            kind: TableKind::Synonym,
+        });
+    }
+
+    /// Test hook: add a package member (`owner.package.member`) to `conn_id`.
+    #[cfg(feature = "gui-test")]
+    pub fn debug_insert_package_member(
+        &mut self,
+        conn_id: &str,
+        owner: &str,
+        package: &str,
+        member: &str,
+    ) {
+        use crate::metadata::MetadataCache;
+        let entry = self
+            .browser
+            .meta
+            .entry(conn_id.to_string())
+            .or_insert_with(|| {
+                std::sync::Arc::new(std::sync::Mutex::new(MetadataCache::default()))
+            });
+        let mut cache = entry.lock().unwrap_or_else(|e| e.into_inner());
+        cache
+            .package_members
+            .entry((owner.to_ascii_uppercase(), package.to_ascii_uppercase()))
+            .or_default()
+            .push(member.to_string());
+    }
+
     /// Test hook: bind the active tab to `conn_id` so completion reads that
     /// connection's dictionary cache.
     #[cfg(feature = "gui-test")]
@@ -1170,12 +1257,19 @@ impl SqlHighlandView {
         self.tabs[self.active].connection_id = Some(conn_id.to_string());
     }
 
-    /// Test hook: install a one-table dictionary cache (owner/table/columns) so
-    /// completion has real columns without a database.
+    /// Test hook: add a dictionary table (owner/table/columns) to `conn_id`'s
+    /// cache, creating it if absent. Repeat calls accumulate.
     #[cfg(feature = "gui-test")]
     pub fn debug_insert_meta(&mut self, conn_id: &str, owner: &str, table: &str, cols: &[&str]) {
         use crate::metadata::{ColumnMeta, MetadataCache, TableId, TableKind};
-        let mut cache = MetadataCache::default();
+        let entry = self
+            .browser
+            .meta
+            .entry(conn_id.to_string())
+            .or_insert_with(|| {
+                std::sync::Arc::new(std::sync::Mutex::new(MetadataCache::default()))
+            });
+        let mut cache = entry.lock().unwrap_or_else(|e| e.into_inner());
         cache.tables.push(TableId {
             owner: owner.to_string(),
             name: table.to_string(),
@@ -1190,10 +1284,6 @@ impl SqlHighlandView {
                     comments: String::new(),
                 })
                 .collect(),
-        );
-        self.browser.meta.insert(
-            conn_id.to_string(),
-            std::sync::Arc::new(std::sync::Mutex::new(cache)),
         );
     }
 

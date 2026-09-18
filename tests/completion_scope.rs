@@ -296,3 +296,276 @@ async fn from_tail_offers_only_continuations(cx: &mut TestAppContext) {
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+/// CASE expressions in the select list: `WHEN` after `CASE`, `THEN` after a
+/// `WHEN` condition, the case keywords after a result, and the enclosing
+/// select list after `END`.
+#[gpui_kit::test]
+async fn case_expression_completion(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_dir("case");
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let slot: std::rc::Rc<std::cell::RefCell<Option<gpui_kit::Entity<SqlHighlandView>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let for_window = slot.clone();
+    let handle = cx.open_window(size(px(1100.), px(780.)), move |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        *for_window.borrow_mut() = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let view = slot.borrow().clone().expect("view captured at window open");
+    cx.update_window(handle.into(), |_, _window, cx| {
+        view.update(cx, |this, _| {
+            this.debug_set_connection("c1");
+            this.debug_insert_meta("c1", "SCOTT", "EMP", &["EMPNO", "ENAME", "SAL"]);
+            let labels = |this: &mut SqlHighlandView, sql: &str| {
+                this.debug_completion_labels(sql, sql.len())
+            };
+            let has = |l: &[String], want: &str| l.iter().any(|x| x.eq_ignore_ascii_case(want));
+
+            let start = "SELECT CASE ";
+            let l = labels(this, start);
+            assert!(has(&l, "WHEN"), "CASE start missing WHEN: {l:?}");
+
+            // A CASE in WHERE has EMP in scope, so the WHEN condition offers
+            // its columns (and THEN), but no clause transitions.
+            let cond = "SELECT * FROM EMP WHERE CASE WHEN ";
+            let l = labels(this, cond);
+            assert!(has(&l, "THEN"), "WHEN condition missing THEN: {l:?}");
+            assert!(has(&l, "ENAME"), "WHEN condition missing column: {l:?}");
+            assert!(
+                !has(&l, "ORDER BY"),
+                "WHEN condition should not offer clause transitions: {l:?}"
+            );
+
+            let res = "SELECT * FROM EMP WHERE CASE WHEN ENAME = 'x' THEN ";
+            let l = labels(this, res);
+            for want in ["END", "WHEN", "ELSE"] {
+                assert!(has(&l, want), "THEN result missing {want}: {l:?}");
+            }
+            assert!(!has(&l, "FROM"), "THEN result should not offer FROM: {l:?}");
+
+            // After the CASE's END in WHERE, the predicate resumes.
+            let where_end = "SELECT * FROM EMP WHERE CASE WHEN ENAME = 'x' THEN 'a' END ";
+            let l = labels(this, where_end);
+            assert!(has(&l, "AND"), "after END in WHERE missing AND: {l:?}");
+            assert!(
+                !has(&l, "FROM"),
+                "after END in WHERE should be a predicate, not a select list: {l:?}"
+            );
+
+            // In the select list, END returns to the select-list tail.
+            let select_end = "SELECT CASE WHEN ENAME = 'x' THEN 'a' END ";
+            let l = labels(this, select_end);
+            assert!(has(&l, "FROM"), "after END missing FROM: {l:?}");
+            assert!(
+                !has(&l, "AND"),
+                "after END should be the select list, not a predicate: {l:?}"
+            );
+        });
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+/// Subquery starts, CAST types, analytic windows, and USING columns.
+#[gpui_kit::test]
+async fn structural_expression_completion(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_dir("structural");
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let slot: std::rc::Rc<std::cell::RefCell<Option<gpui_kit::Entity<SqlHighlandView>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let for_window = slot.clone();
+    let handle = cx.open_window(size(px(1100.), px(780.)), move |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        *for_window.borrow_mut() = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let view = slot.borrow().clone().expect("view captured at window open");
+    cx.update_window(handle.into(), |_, _window, cx| {
+        view.update(cx, |this, _| {
+            this.debug_set_connection("c1");
+            this.debug_insert_meta("c1", "SCOTT", "A", &["IDA", "NAME"]);
+            this.debug_insert_meta("c1", "SCOTT", "B", &["IDB", "NAME"]);
+            let labels = |this: &mut SqlHighlandView, sql: &str| {
+                this.debug_completion_labels(sql, sql.len())
+            };
+            let has = |l: &[String], want: &str| l.iter().any(|x| x.eq_ignore_ascii_case(want));
+
+            let sub = "SELECT * FROM (";
+            let l = labels(this, sub);
+            assert!(has(&l, "SELECT"), "subquery start missing SELECT: {l:?}");
+            assert!(
+                !has(&l, "INSERT INTO"),
+                "subquery start should be query-only: {l:?}"
+            );
+
+            let union = "SELECT 1 UNION ALL ";
+            let l = labels(this, union);
+            assert!(has(&l, "SELECT"), "after UNION missing SELECT: {l:?}");
+
+            let cast = "SELECT CAST(x AS ";
+            let l = labels(this, cast);
+            assert!(has(&l, "NUMBER"), "CAST missing types: {l:?}");
+            assert!(has(&l, "VARCHAR2"), "CAST missing types: {l:?}");
+
+            let win = "SELECT ROW_NUMBER() OVER (";
+            let l = labels(this, win);
+            assert!(has(&l, "PARTITION BY"), "OVER missing PARTITION BY: {l:?}");
+
+            let using = "SELECT * FROM A JOIN B USING (";
+            let l = labels(this, using);
+            assert!(has(&l, "NAME"), "USING missing common column NAME: {l:?}");
+            assert!(
+                !has(&l, "IDA"),
+                "USING should not offer non-common columns: {l:?}"
+            );
+            assert!(
+                !has(&l, "IDB"),
+                "USING should not offer non-common columns: {l:?}"
+            );
+        });
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+/// JOIN … ON keeps offering FK-derived conditions after the first one is
+/// typed (the `AND` tail), and does not re-suggest what is already written.
+#[gpui_kit::test]
+async fn join_on_conditions_after_and(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_dir("join-on");
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let slot: std::rc::Rc<std::cell::RefCell<Option<gpui_kit::Entity<SqlHighlandView>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let for_window = slot.clone();
+    let handle = cx.open_window(size(px(1100.), px(780.)), move |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        *for_window.borrow_mut() = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let view = slot.borrow().clone().expect("view captured at window open");
+    cx.update_window(handle.into(), |_, _window, cx| {
+        view.update(cx, |this, _| {
+            this.debug_set_connection("c1");
+            this.debug_insert_meta("c1", "SCOTT", "EMP", &["EMPNO", "ENAME", "DEPTNO"]);
+            this.debug_insert_meta("c1", "SCOTT", "DEPT", &["DEPTNO", "DNAME"]);
+            this.debug_insert_fk("c1", "EMP", "DEPTNO", "DEPT", "DEPTNO");
+            let labels = |this: &mut SqlHighlandView, sql: &str| {
+                this.debug_completion_labels(sql, sql.len())
+            };
+            let has = |l: &[String], want: &str| l.iter().any(|x| x.eq_ignore_ascii_case(want));
+
+            let fresh = "SELECT * FROM EMP e JOIN DEPT d ON ";
+            let l = labels(this, fresh);
+            assert!(
+                has(&l, "e.DEPTNO = d.DEPTNO"),
+                "fresh ON missing FK condition: {l:?}"
+            );
+
+            // After a hand-written first condition, the FK link still shows.
+            let and_tail = "SELECT * FROM EMP e JOIN DEPT d ON e.ENAME = d.ENAME AND ";
+            let l = labels(this, and_tail);
+            assert!(
+                has(&l, "e.DEPTNO = d.DEPTNO"),
+                "AND tail missing remaining FK condition: {l:?}"
+            );
+
+            // Once typed, it is not re-suggested (falls back to the predicate).
+            let used = "SELECT * FROM EMP e JOIN DEPT d ON e.DEPTNO = d.DEPTNO AND ";
+            let l = labels(this, used);
+            assert!(
+                !has(&l, "e.DEPTNO = d.DEPTNO"),
+                "typed condition should not be re-suggested: {l:?}"
+            );
+            assert!(
+                has(&l, "AND"),
+                "after a typed condition the predicate resumes: {l:?}"
+            );
+        });
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+/// A synonym is suggested after FROM and resolves to its table's columns.
+#[gpui_kit::test]
+async fn synonym_completion_and_columns(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_dir("synonym");
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let slot: std::rc::Rc<std::cell::RefCell<Option<gpui_kit::Entity<SqlHighlandView>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let for_window = slot.clone();
+    let handle = cx.open_window(size(px(1100.), px(780.)), move |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        *for_window.borrow_mut() = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let view = slot.borrow().clone().expect("view captured at window open");
+    cx.update_window(handle.into(), |_, _window, cx| {
+        view.update(cx, |this, _| {
+            this.debug_set_connection("c1");
+            this.debug_insert_meta("c1", "SCOTT", "EMP", &["EMPNO", "ENAME", "DEPTNO"]);
+            this.debug_insert_synonym("c1", "SCOTT", "EMP_SYN", "SCOTT", "EMP");
+            let labels = |this: &mut SqlHighlandView, sql: &str| {
+                this.debug_completion_labels(sql, sql.len())
+            };
+            let has = |l: &[String], want: &str| l.iter().any(|x| x.eq_ignore_ascii_case(want));
+
+            let from = "SELECT * FROM EMP_S";
+            let l = labels(this, from);
+            assert!(
+                l.iter().any(|x| x.to_ascii_uppercase().contains("EMP_SYN")),
+                "synonym not suggested after FROM: {l:?}"
+            );
+
+            let where_clause = "SELECT * FROM EMP_SYN WHERE ";
+            let l = labels(this, where_clause);
+            assert!(
+                has(&l, "ENAME"),
+                "synonym did not resolve to its table's columns: {l:?}"
+            );
+        });
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+/// `pkg.` completes the package's members as calls.
+#[gpui_kit::test]
+async fn package_member_completion(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_dir("package");
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let slot: std::rc::Rc<std::cell::RefCell<Option<gpui_kit::Entity<SqlHighlandView>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let for_window = slot.clone();
+    let handle = cx.open_window(size(px(1100.), px(780.)), move |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        *for_window.borrow_mut() = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let view = slot.borrow().clone().expect("view captured at window open");
+    cx.update_window(handle.into(), |_, _window, cx| {
+        view.update(cx, |this, _| {
+            this.debug_set_connection("c1");
+            this.debug_insert_package_member("c1", "SCOTT", "UTIL", "ADD_ONE");
+            this.debug_insert_package_member("c1", "SCOTT", "UTIL", "TO_UPPER");
+            let sql = "SELECT UTIL.";
+            let labels = this.debug_completion_labels(sql, sql.len());
+            assert!(
+                labels.iter().any(|l| l.eq_ignore_ascii_case("ADD_ONE()")),
+                "package member missing: {labels:?}"
+            );
+            assert!(
+                labels.iter().any(|l| l.eq_ignore_ascii_case("TO_UPPER()")),
+                "package member missing: {labels:?}"
+            );
+        });
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

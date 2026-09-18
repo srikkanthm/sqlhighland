@@ -1210,7 +1210,7 @@ impl SqlHighlandView {
             unlocked: std::collections::HashMap::new(),
             browser: BrowserState {
                 meta: std::collections::HashMap::new(),
-                usage: std::collections::HashMap::new(),
+                usage: crate::config::load_usage(),
                 open: std::collections::HashSet::new(),
                 expanded: std::collections::HashMap::new(),
                 trees: std::collections::HashMap::new(),

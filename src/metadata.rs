@@ -25,6 +25,9 @@ pub enum TableKind {
     Table,
     View,
     Sequence,
+    /// A synonym: queryable like a table; columns resolve through
+    /// [`MetadataCache::synonyms`].
+    Synonym,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +45,23 @@ pub struct ColumnMeta {
     pub comments: String,
 }
 
+/// One synonym: `owner.name` resolves to `[table_owner.]table_name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Synonym {
+    pub owner: String,
+    pub name: String,
+    pub table_owner: Option<String>,
+    pub table_name: String,
+}
+
+/// One callable member of a package (`pkg.member`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageMember {
+    pub owner: String,
+    pub package: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MetadataCache {
     pub tables: Vec<TableId>,
@@ -49,6 +69,11 @@ pub struct MetadataCache {
     pub sequences: Vec<TableId>,
     /// Referential constraints for JOIN … ON suggestions.
     pub fks: Vec<ForeignKey>,
+    /// Synonym resolution: `(owner_upper, synonym_upper)` → `(table_owner,
+    /// table_name)`. Used to serve columns for a synonym name.
+    pub synonyms: HashMap<(String, String), (Option<String>, String)>,
+    /// Package members: `(owner_upper, package_upper)` → member names.
+    pub package_members: HashMap<(String, String), Vec<String>>,
     pub fetched_at: Option<Instant>,
     pub loading: bool,
 }
@@ -75,8 +100,29 @@ impl MetadataCache {
     }
 
     /// Columns for `(owner, table)` (both compared uppercase). `None` owner
-    /// matches any owner with that table name (merged).
+    /// matches any owner with that table name (merged). A name with no direct
+    /// columns is retried through the synonym map.
     pub fn columns_for(&self, owner: Option<&str>, table: &str) -> Vec<ColumnMeta> {
+        let direct = self.direct_columns(owner, table);
+        if !direct.is_empty() {
+            return direct;
+        }
+        let t = table.to_ascii_uppercase();
+        let resolved = match owner {
+            Some(o) => self.synonyms.get(&(o.to_ascii_uppercase(), t)),
+            None => self
+                .synonyms
+                .iter()
+                .find(|((_, syn), _)| *syn == t)
+                .map(|(_, v)| v),
+        };
+        match resolved {
+            Some((to, tn)) => self.direct_columns(to.as_deref(), tn),
+            None => direct,
+        }
+    }
+
+    fn direct_columns(&self, owner: Option<&str>, table: &str) -> Vec<ColumnMeta> {
         let t = table.to_ascii_uppercase();
         match owner {
             Some(o) => {
@@ -99,6 +145,30 @@ impl MetadataCache {
                 out
             }
         }
+    }
+
+    /// True when `upper_name` names a package (any owner).
+    pub fn is_package_name(&self, upper_name: &str) -> bool {
+        self.package_members.keys().any(|(_, p)| p == upper_name)
+    }
+
+    /// Members of `[owner.]package` (case-insensitive); a `None` owner matches
+    /// any owner. Deduped, document order.
+    pub fn package_member_names(&self, owner: Option<&str>, package: &str) -> Vec<String> {
+        let p = package.to_ascii_uppercase();
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for ((o, pkg), members) in &self.package_members {
+            if *pkg != p || owner.is_some_and(|want| !o.eq_ignore_ascii_case(want)) {
+                continue;
+            }
+            for m in members {
+                if seen.insert(m.to_ascii_uppercase()) {
+                    out.push(m.clone());
+                }
+            }
+        }
+        out
     }
 }
 
@@ -143,8 +213,8 @@ pub fn system_filter_sql(owner_col: &str, include_system: bool, own_schema: &str
     }
 }
 
-/// Fetch tables+views as `(owner, name, kind)` triples. `own_schema`
-/// (connected user) is always exempt from the system filter.
+/// Fetch tables+views+materialized views as `(owner, name, kind)` triples.
+/// `own_schema` (connected user) is always exempt from the system filter.
 pub fn fetch_tables_blocking(
     db: &mut dyn DbClient,
     include_system: bool,
@@ -153,7 +223,9 @@ pub fn fetch_tables_blocking(
     let filter = system_filter_sql("owner", include_system, own_schema);
     let r = db.run_query(
         &format!(
-            "SELECT owner, table_name, 'TABLE' FROM all_tables{filter} UNION ALL SELECT owner, view_name, 'VIEW' FROM all_views{filter}"
+            "SELECT owner, table_name, 'TABLE' FROM all_tables{filter} \
+             UNION ALL SELECT owner, view_name, 'VIEW' FROM all_views{filter} \
+             UNION ALL SELECT owner, mview_name, 'VIEW' FROM all_mviews{filter}"
         ),
         DICT_MAX_ROWS,
         &[],
@@ -296,6 +368,65 @@ pub fn fetch_sequences_blocking(
         .collect())
 }
 
+/// Fetch synonyms as `owner.name → [table_owner.]table_name`.
+pub fn fetch_synonyms_blocking(
+    db: &mut dyn DbClient,
+    include_system: bool,
+    own_schema: &str,
+) -> Result<Vec<Synonym>, crate::db::DbError> {
+    let filter = system_filter_sql("owner", include_system, own_schema);
+    let r = db.run_query(
+        &format!("SELECT owner, synonym_name, table_owner, table_name FROM all_synonyms{filter}"),
+        DICT_MAX_ROWS,
+        &[],
+    )?;
+    Ok(r.rows
+        .iter()
+        .filter_map(|row| match row.as_slice() {
+            [Some(o), Some(n), to, Some(t)] => Some(Synonym {
+                owner: o.clone(),
+                name: n.clone(),
+                table_owner: to.clone(),
+                table_name: t.clone(),
+            }),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Fetch package members (`pkg.member`) from `ALL_PROCEDURES`.
+pub fn fetch_package_members_blocking(
+    db: &mut dyn DbClient,
+    include_system: bool,
+    own_schema: &str,
+) -> Result<Vec<PackageMember>, crate::db::DbError> {
+    let pred = system_predicate("owner", include_system, own_schema);
+    let scope = if pred.is_empty() {
+        String::new()
+    } else {
+        format!(" AND ({pred})")
+    };
+    let r = db.run_query(
+        &format!(
+            "SELECT owner, object_name, procedure_name FROM all_procedures \
+             WHERE procedure_name IS NOT NULL{scope}"
+        ),
+        DICT_MAX_ROWS,
+        &[],
+    )?;
+    Ok(r.rows
+        .iter()
+        .filter_map(|row| match row.as_slice() {
+            [Some(o), Some(p), Some(m)] => Some(PackageMember {
+                owner: o.clone(),
+                package: p.clone(),
+                name: m.clone(),
+            }),
+            _ => None,
+        })
+        .collect())
+}
+
 /// Engine-specific dictionary fetching for autocomplete, hover, and the
 /// schema browser. The Oracle provider is the only implementation today; a
 /// second engine supplies its own and a [`DbEngine`] arm in [`provider_for`],
@@ -325,6 +456,18 @@ pub trait MetadataProvider: Send + Sync {
         include_system: bool,
         own_schema: &str,
     ) -> Result<Vec<TableId>, crate::db::DbError>;
+    fn fetch_synonyms(
+        &self,
+        db: &mut dyn DbClient,
+        include_system: bool,
+        own_schema: &str,
+    ) -> Result<Vec<Synonym>, crate::db::DbError>;
+    fn fetch_package_members(
+        &self,
+        db: &mut dyn DbClient,
+        include_system: bool,
+        own_schema: &str,
+    ) -> Result<Vec<PackageMember>, crate::db::DbError>;
 }
 
 /// Oracle dictionary provider: delegates to the `*_blocking` fetchers below.
@@ -366,6 +509,24 @@ impl MetadataProvider for OracleMetadata {
     ) -> Result<Vec<TableId>, crate::db::DbError> {
         fetch_sequences_blocking(db, include_system, own_schema)
     }
+
+    fn fetch_synonyms(
+        &self,
+        db: &mut dyn DbClient,
+        include_system: bool,
+        own_schema: &str,
+    ) -> Result<Vec<Synonym>, crate::db::DbError> {
+        fetch_synonyms_blocking(db, include_system, own_schema)
+    }
+
+    fn fetch_package_members(
+        &self,
+        db: &mut dyn DbClient,
+        include_system: bool,
+        own_schema: &str,
+    ) -> Result<Vec<PackageMember>, crate::db::DbError> {
+        fetch_package_members_blocking(db, include_system, own_schema)
+    }
 }
 
 /// The dictionary provider for an engine. Add a match arm per [`DbEngine`].
@@ -387,6 +548,8 @@ mod tests {
         columns: QueryResult,
         sequences: QueryResult,
         constraints: QueryResult,
+        synonyms: QueryResult,
+        packages: QueryResult,
     }
 
     fn qr(cols: &[&str], rows: &[Vec<Option<&str>>]) -> QueryResult {
@@ -425,6 +588,10 @@ mod tests {
                 Ok(std::mem::replace(&mut self.columns, qr(&[], &[])))
             } else if sql.contains("all_sequences") {
                 Ok(std::mem::replace(&mut self.sequences, qr(&[], &[])))
+            } else if sql.contains("all_synonyms") {
+                Ok(std::mem::replace(&mut self.synonyms, qr(&[], &[])))
+            } else if sql.contains("all_procedures") {
+                Ok(std::mem::replace(&mut self.packages, qr(&[], &[])))
             } else if sql.contains("all_constraints") {
                 Ok(std::mem::replace(&mut self.constraints, qr(&[], &[])))
             } else {
@@ -523,6 +690,21 @@ mod tests {
                     ],
                 ],
             ),
+            synonyms: qr(
+                &["OWNER", "SYNONYM_NAME", "TABLE_OWNER", "TABLE_NAME"],
+                &[
+                    vec![Some("SCOTT"), Some("EMP_SYN"), Some("SCOTT"), Some("EMP")],
+                    // No table target → dropped.
+                    vec![Some("SCOTT"), Some("BAD_SYN"), None, None],
+                ],
+            ),
+            packages: qr(
+                &["OWNER", "OBJECT_NAME", "PROCEDURE_NAME"],
+                &[
+                    vec![Some("SCOTT"), Some("UTIL"), Some("ADD_ONE")],
+                    vec![Some("SCOTT"), Some("UTIL"), Some("TO_UPPER")],
+                ],
+            ),
         }
     }
 
@@ -538,8 +720,53 @@ mod tests {
     }
 
     #[test]
+    fn synonyms_fetch_and_column_indirection() {
+        let mut db = fake();
+        let syns = fetch_synonyms_blocking(&mut db, true, "").unwrap();
+        assert_eq!(syns.len(), 1, "rows with no table target are dropped");
+        assert_eq!(syns[0].name, "EMP_SYN");
+        assert_eq!(syns[0].table_name, "EMP");
+
+        let mut cache = MetadataCache {
+            columns: fetch_columns_blocking(&mut db, true, "").unwrap(),
+            ..Default::default()
+        };
+        cache.synonyms.insert(
+            ("SCOTT".to_string(), "EMP_SYN".to_string()),
+            (Some("SCOTT".to_string()), "EMP".to_string()),
+        );
+        // A synonym name resolves to the underlying table's columns.
+        assert_eq!(cache.columns_for(Some("SCOTT"), "EMP_SYN").len(), 2);
+        assert_eq!(cache.columns_for(None, "emp_syn").len(), 2);
+        // An unknown name still returns nothing.
+        assert!(cache.columns_for(Some("SCOTT"), "NOPE").is_empty());
+    }
+
+    #[test]
+    fn package_members_fetch_and_lookup() {
+        let mut db = fake();
+        let members = fetch_package_members_blocking(&mut db, true, "").unwrap();
+        assert_eq!(members.len(), 2);
+        let mut cache = MetadataCache::default();
+        for m in members {
+            cache
+                .package_members
+                .entry((m.owner.to_ascii_uppercase(), m.package.to_ascii_uppercase()))
+                .or_default()
+                .push(m.name);
+        }
+        assert!(cache.is_package_name("UTIL"));
+        assert!(!cache.is_package_name("EMP"));
+        assert_eq!(
+            cache.package_member_names(None, "util"),
+            ["ADD_ONE", "TO_UPPER"]
+        );
+        assert_eq!(cache.package_member_names(Some("SCOTT"), "UTIL").len(), 2);
+        assert!(cache.package_member_names(Some("OTHER"), "UTIL").is_empty());
+    }
+
+    #[test]
     fn provider_for_dispatches_by_engine() {
-        // The browser only names the provider, never a concrete engine.
         let mut db = fake();
         let provider = provider_for(DbEngine::Oracle);
         assert_eq!(provider.fetch_tables(&mut db, true, "").unwrap().len(), 3);

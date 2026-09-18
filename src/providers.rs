@@ -13,8 +13,9 @@ use crate::complete::{
     detect_join_on, display_name, function_insert, insert_text_for, is_trivia_position,
     join_condition_candidates, owners_match, rank_candidates, resolve_qualifier, scope_label,
     short_comment, word_prefix, Candidate, CandidateKind, CompleteContext, DmlKind, ForeignKey,
-    FromOrigin, Relation, RelationKind, ScopeForest, ScopeTable, TableRef, FROM_FOLLOW,
-    INTO_FOLLOW, JOIN_FOLLOW, MERGE_FOLLOW, UPDATE_FOLLOW, USING_FOLLOW,
+    FromOrigin, Relation, RelationKind, ScopeForest, ScopeTable, TableRef, CASE_CONDITION_KEYWORDS,
+    CASE_RESULT_KEYWORDS, CASE_START_KEYWORDS, FROM_FOLLOW, INTO_FOLLOW, JOIN_FOLLOW, MERGE_FOLLOW,
+    SUBQUERY_START_KEYWORDS, UPDATE_FOLLOW, USING_FOLLOW, WINDOW_KEYWORDS,
 };
 use crate::metadata::{ColumnMeta, SharedCache};
 use crate::session::lock;
@@ -100,15 +101,21 @@ impl SqlHighlandView {
                 (aliases, tables)
             }
         };
-        // JOIN … ON with a fresh condition short-circuits everything else:
-        // FK-derived conditions or no popup at all.
+        // JOIN … ON: FK-derived conditions, minus any already typed. When none
+        // remain (or no FK links the pair), fall through to Predicate.
         let head_end = offset.min(text.len());
-        if let Some((right_alias, right)) = detect_join_on(&text[..head_end], &aliases) {
+        if let Some((right_alias, right, tail_start)) = detect_join_on(&text[..head_end], &aliases)
+        {
             let fks: Vec<ForeignKey> = cache
                 .as_ref()
                 .map(|c| lock(c).fks.clone())
                 .unwrap_or_default();
             let cands = join_condition_candidates(&right_alias, &right, &aliases, &fks);
+            let typed = normalize_condition(&text[tail_start.min(head_end)..head_end]);
+            let cands: Vec<Candidate> = cands
+                .into_iter()
+                .filter(|c| !typed.contains(&normalize_condition(&c.label)))
+                .collect();
             if !cands.is_empty() {
                 return (
                     Self::to_items(cands, text, word_start, offset),
@@ -127,6 +134,18 @@ impl SqlHighlandView {
                 && cache.as_ref().is_some_and(|c| lock(c).is_sequence(n))
         };
         let ctx = classify_context(text, offset, &is_seq);
+        // A qualifier that names a package completes its members (`pkg.`).
+        let ctx = match ctx {
+            CompleteContext::ColumnOf(q)
+                if cache.as_ref().is_some_and(|c| {
+                    let last = q.rsplit('.').next().unwrap_or(&q);
+                    lock(c).is_package_name(&last.to_ascii_uppercase())
+                }) =>
+            {
+                CompleteContext::PackageMember(q)
+            }
+            other => other,
+        };
         let show_system = self.show_system;
         let mut cands: Vec<Candidate> = Vec::new();
         let usage_of = |conn: &Option<String>, label: &str| {
@@ -285,6 +304,23 @@ impl SqlHighlandView {
                     });
                 }
             }
+            CompleteContext::PackageMember(q) => {
+                // `pkg.` — the package's callable members, inserted as calls.
+                let (owner, package) = crate::complete::split_dotted(q);
+                if let Some(cache) = &cache {
+                    let members = lock(cache).package_member_names(owner.as_deref(), &package);
+                    for m in members {
+                        cands.push(Candidate {
+                            label: function_insert(&m),
+                            detail: "PACKAGE MEMBER".to_string(),
+                            kind: CandidateKind::Function,
+                            owner: owner.clone(),
+                            usage: usage_of(&conn_id, &m),
+                            depth: 0,
+                        });
+                    }
+                }
+            }
             CompleteContext::ColumnOf(q) => {
                 if let Some(tref) = resolve_qualifier(q, &aliases) {
                     // A CTE/subquery relation carries its own columns; a base
@@ -330,7 +366,7 @@ impl SqlHighlandView {
                         let label = display_name(Some(&t.owner), &t.name, &own_schema);
                         cands.push(Candidate {
                             label,
-                            detail: "TABLE".to_string(),
+                            detail: kind_label(t.kind).to_string(),
                             kind: CandidateKind::Table,
                             owner: Some(t.owner.clone()),
                             usage: usage_of(&conn_id, &t.name),
@@ -349,7 +385,7 @@ impl SqlHighlandView {
                         }
                         cands.push(Candidate {
                             label: t.name.clone(),
-                            detail: format!("TABLE · {}", t.owner),
+                            detail: format!("{} · {}", kind_label(t.kind), t.owner),
                             kind: CandidateKind::Table,
                             owner: Some(t.owner.clone()),
                             usage: usage_of(&conn_id, &t.name),
@@ -411,6 +447,75 @@ impl SqlHighlandView {
                     FromOrigin::Table => &[],
                 };
                 push_keywords(&mut cands, kws);
+            }
+            CompleteContext::CaseStart => {
+                push_keywords(&mut cands, CASE_START_KEYWORDS);
+            }
+            CompleteContext::CaseCondition => {
+                // A WHEN condition is a predicate; `THEN` closes it. Functions
+                // are only offered once the user types (the full catalog would
+                // crowd out the case keywords at an empty prefix). No clause
+                // transitions here.
+                push_scope_columns(&mut cands);
+                if !prefix.is_empty() {
+                    push_functions(&mut cands);
+                }
+                push_keywords(&mut cands, CASE_CONDITION_KEYWORDS);
+            }
+            CompleteContext::CaseResult => {
+                // A THEN/ELSE result is an expression; the case keywords that
+                // follow a result close/branch it. Functions as above.
+                push_scope_columns(&mut cands);
+                if !prefix.is_empty() {
+                    push_functions(&mut cands);
+                }
+                push_keywords(&mut cands, CASE_RESULT_KEYWORDS);
+            }
+            CompleteContext::SubqueryStart => {
+                push_keywords(&mut cands, SUBQUERY_START_KEYWORDS);
+            }
+            CompleteContext::CastType => {
+                // `CAST(x AS |` — the dialect's data types only.
+                for ty in dialect.data_types() {
+                    cands.push(Candidate {
+                        label: ty.to_string(),
+                        detail: "TYPE".to_string(),
+                        kind: CandidateKind::Keyword,
+                        owner: None,
+                        usage: 0,
+                        depth: 0,
+                    });
+                }
+            }
+            CompleteContext::WindowClause => {
+                push_keywords(&mut cands, WINDOW_KEYWORDS);
+            }
+            CompleteContext::UsingColumns => {
+                // Columns common to every joined relation (intersection by
+                // name), in the first relation's order.
+                if let Some(first) = scope_tables.first() {
+                    let mut common: Vec<&String> = first
+                        .cols
+                        .iter()
+                        .map(|c| &c.name)
+                        .filter(|name| {
+                            scope_tables[1..]
+                                .iter()
+                                .all(|t| t.cols.iter().any(|c| c.name.eq_ignore_ascii_case(name)))
+                        })
+                        .collect();
+                    common.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+                    for name in common {
+                        cands.push(Candidate {
+                            label: name.clone(),
+                            detail: "USING".to_string(),
+                            kind: CandidateKind::ColumnInScope,
+                            owner: None,
+                            usage: usage_of(&conn_id, name),
+                            depth: 0,
+                        });
+                    }
+                }
             }
             CompleteContext::BareWord => {
                 // Ambiguous position: keywords + functions, minus the
@@ -529,7 +634,31 @@ impl SqlHighlandView {
         if self.browser.usage.len() > 5000 {
             self.browser.usage.clear();
         }
+        // Persist for the next session; a failure surfaces on the status bar.
+        if let Err(e) = crate::config::save_usage(&self.browser.usage) {
+            self.status = format!("Usage save failed: {e:#}").into();
+        }
     }
+}
+
+/// Popup detail label for a suggested object kind.
+fn kind_label(kind: crate::metadata::TableKind) -> &'static str {
+    use crate::metadata::TableKind;
+    match kind {
+        TableKind::Table => "TABLE",
+        TableKind::View => "VIEW",
+        TableKind::Sequence => "SEQUENCE",
+        TableKind::Synonym => "SYNONYM",
+    }
+}
+
+/// Case/whitespace-insensitive form of a condition, for "already typed"
+/// checks (so `ON a.x=b.y AND` does not re-suggest `a.x = b.y`).
+fn normalize_condition(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 
 /// Columns of a relation: base tables/views from the dictionary cache, a

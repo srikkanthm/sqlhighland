@@ -157,6 +157,24 @@ pub const MERGE_FOLLOW: &[&str] = &["USING"];
 /// After `MERGE … USING t |`.
 pub const USING_FOLLOW: &[&str] = &["ON"];
 
+/// Just after `CASE`: only `WHEN` can start a case.
+pub const CASE_START_KEYWORDS: &[&str] = &["WHEN"];
+
+/// Inside a `WHEN` condition: operators plus `THEN` to close it.
+pub const CASE_CONDITION_KEYWORDS: &[&str] = &[
+    "AND", "OR", "NOT", "IN", "LIKE", "BETWEEN", "IS", "NULL", "EXISTS", "CASE", "THEN",
+];
+
+/// Inside a `THEN`/`ELSE` result: the case keywords that may follow a result
+/// (plus `CASE` for a nested case).
+pub const CASE_RESULT_KEYWORDS: &[&str] = &["CASE", "WHEN", "ELSE", "END", "NULL"];
+
+/// A fresh query begins (`FROM (`, `IN (`, `UNION …`): only query starters.
+pub const SUBQUERY_START_KEYWORDS: &[&str] = &["SELECT", "WITH"];
+
+/// Inside `OVER (|`: the analytic window clauses.
+pub const WINDOW_KEYWORDS: &[&str] = &["PARTITION BY", "ORDER BY", "ROWS", "RANGE"];
+
 /// Oracle keywords worth completing. Multi-word clauses/joins are single
 /// entries (the true Oracle combinations), so accepting one inserts the whole
 /// phrase; matching stays case-insensitive.

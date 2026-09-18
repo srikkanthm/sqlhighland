@@ -225,6 +225,63 @@ worked this way.
 **Known limitation:** `MERGE INTO` is detected from the preceding token; the
 grammar has no `merge` node, so the rest of a `MERGE` stays on the lexical path.
 
+### CASE expressions `[x]`
+
+`scan_clause` tracks `CASE … END` nesting (with `case_depth`), so the case
+keywords resolve and the cursor after `END` returns to the **enclosing**
+clause:
+
+- `CASE ␣` → `CaseStart` (`WHEN`);
+- `WHEN ␣` / condition → `CaseCondition` (columns, functions, predicate
+  operators, `THEN`; no clause transitions);
+- `THEN ␣` / `ELSE ␣` → `CaseResult` (columns, functions, `CASE`, `WHEN`,
+  `ELSE`, `END`);
+- `END ␣` → the enclosing clause (select-list tail in a select item, predicate
+  in `WHERE`, …), handling nested cases.
+
+Functions are only pushed in the CASE contexts once a prefix is typed, so the
+90-entry function catalog can't crowd out (`COMPLETE_LIMIT`) the small case
+keyword set at an empty prefix. `allows_empty_prefix` fires for all three so
+the popup appears right after the space.
+
+Also fixed here: `tokenize` now skips single-quoted string literals (honoring
+`''`), so a literal like `'from'`/`'where'` no longer switches the detected
+clause and literals don't leak identifiers into the alias map.
+
+**Known limits:** `END` also closes PL/SQL blocks — `BEGIN`/`DECLARE` now bail
+clause scanning to `BareWord` rather than guess; `MERGE … WHEN MATCHED THEN`
+reads as a case condition/result (MERGE is lexical/partial anyway).
+
+### Structural expression contexts `[x]`
+
+- **Subquery start**: `FROM (`, `IN (`, `EXISTS (`, `JOIN (`, and after a set
+  operator (`UNION [ALL]`, `INTERSECT`, `MINUS`) → `SubqueryStart` offers
+  `SELECT`/`WITH` (never DML/DDL). Determined from the token before the `(`.
+- **CAST types**: `CAST(x AS |` → `CastType`, offering the dialect's
+  `data_types()` (`ORACLE_DATA_TYPES`) as `TYPE` candidates.
+- **Analytic window**: `OVER (|` → `WindowClause` (`PARTITION BY`, `ORDER BY`,
+  `ROWS`, `RANGE`).
+- **USING columns**: `USING (|` → `UsingColumns`, the intersection of the
+  joined relations' column names.
+- **JOIN … ON tails**: `detect_join_on` now also fires when conditions are
+  already present, returning the tail offset; the provider filters out
+  conditions already typed, so `… ON a = b AND |` offers the remaining FK
+  links instead of nothing, and a fully-typed condition falls through to the
+  predicate (so `AND` is still offered).
+
+### Metadata expansion `[x]`
+
+- **Synonyms** (`ALL_SYNONYMS`): fetched and offered after `FROM` as
+  `SYNONYM`; `MetadataCache::columns_for` resolves a synonym name to its
+  underlying table's columns.
+- **Materialized views** (`ALL_MVIEWS`) added to the table/view fetch.
+- **Package members** (`ALL_PROCEDURES`): `pkg.` now completes the package's
+  members as call skeletons (`MEMBER()`), via the new
+  `CompleteContext::PackageMember` (detected after `ColumnOf` when the
+  qualifier names a known package).
+- **Usage counts persist** (`~/.config/sqlhighland/usage.toml`): the frequency
+  ranking now survives relaunch (`config::load_usage`/`save_usage`).
+
 ### Phase E — Ranking & UX `[x]`
 
 Scope-proximity ranking (nearer scope higher), projection aliases top tier,

@@ -314,6 +314,8 @@ impl SqlHighlandView {
                 >,
                 sequences: Result<Vec<crate::metadata::TableId>, String>,
                 fks: Result<Vec<crate::complete::ForeignKey>, String>,
+                synonyms: Result<Vec<crate::metadata::Synonym>, String>,
+                packages: Result<Vec<crate::metadata::PackageMember>, String>,
             }
             let outcome = bg
                 .spawn(async move {
@@ -325,7 +327,9 @@ impl SqlHighlandView {
                             tables: Err(e.clone()),
                             columns: Err(e.clone()),
                             sequences: Err(e.clone()),
-                            fks: Err(e),
+                            fks: Err(e.clone()),
+                            synonyms: Err(e.clone()),
+                            packages: Err(e),
                         };
                     }
                     let parts = Parts {
@@ -340,6 +344,12 @@ impl SqlHighlandView {
                             .map_err(|e| e.to_string()),
                         fks: provider
                             .fetch_fks(&mut **s, include_system, &own_schema)
+                            .map_err(|e| e.to_string()),
+                        synonyms: provider
+                            .fetch_synonyms(&mut **s, include_system, &own_schema)
+                            .map_err(|e| e.to_string()),
+                        packages: provider
+                            .fetch_package_members(&mut **s, include_system, &own_schema)
                             .map_err(|e| e.to_string()),
                     };
                     // Data is owned; drop the server session now rather than
@@ -363,6 +373,7 @@ impl SqlHighlandView {
                     // failed keeps its previous content (possibly empty).
                     // fetched_at advances on tables (the core set) so a
                     // partial failure retries next TTL, not every keystroke.
+                    let tables_ok = outcome.tables.is_ok();
                     if let Ok(tables) = outcome.tables {
                         c.tables = tables;
                         c.fetched_at = Some(std::time::Instant::now());
@@ -375,6 +386,40 @@ impl SqlHighlandView {
                     }
                     if let Ok(fks) = outcome.fks {
                         c.fks = fks;
+                    }
+                    // Synonyms: resolution map + suggested like tables.
+                    if let Ok(syns) = outcome.synonyms {
+                        c.synonyms = syns
+                            .iter()
+                            .map(|s| {
+                                (
+                                    (s.owner.to_ascii_uppercase(), s.name.to_ascii_uppercase()),
+                                    (s.table_owner.clone(), s.table_name.clone()),
+                                )
+                            })
+                            .collect();
+                        if tables_ok {
+                            for s in &syns {
+                                c.tables.push(crate::metadata::TableId {
+                                    owner: s.owner.clone(),
+                                    name: s.name.clone(),
+                                    kind: crate::metadata::TableKind::Synonym,
+                                });
+                            }
+                        }
+                    }
+                    // Packages: member lists for `pkg.` completion.
+                    if let Ok(pkgs) = outcome.packages {
+                        c.package_members.clear();
+                        for m in pkgs {
+                            c.package_members
+                                .entry((
+                                    m.owner.to_ascii_uppercase(),
+                                    m.package.to_ascii_uppercase(),
+                                ))
+                                .or_default()
+                                .push(m.name);
+                        }
                     }
                     // Degrade silently: keywords + whatever is cached work.
                     this.status = "".into();

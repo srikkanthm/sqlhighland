@@ -129,7 +129,10 @@ impl SchemaProvider for OracleProvider {
                 columns: cols,
             };
             match t.kind {
-                TableKind::Table => tables.entry(t.owner.clone()).or_default().push(obj),
+                // Synonyms group with tables (queryable the same way).
+                TableKind::Table | TableKind::Synonym => {
+                    tables.entry(t.owner.clone()).or_default().push(obj)
+                }
                 TableKind::View => views.entry(t.owner.clone()).or_default().push(obj),
                 TableKind::Sequence => {}
             }
@@ -187,7 +190,7 @@ impl SchemaProvider for OracleProvider {
                 owner.replace('\'', "''"),
                 name.replace('\'', "''"),
             ),
-            TableKind::Table | TableKind::View => {
+            TableKind::Table | TableKind::View | TableKind::Synonym => {
                 format!("DESCRIBE {}", display_name(Some(owner), name, own_schema))
             }
         }
