@@ -36,8 +36,10 @@ async fn lexical_issue_marks_editor(cx: &mut TestAppContext) {
     });
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
-        // Unbalanced paren — caught lexically and pushed synchronously.
+        // Unbalanced paren — caught lexically and pushed synchronously. The
+        // editor auto-closes `(`, so delete the inserted closer first.
         window.input("SELECT (1 + 2", cx);
+        window.press("delete", cx);
         window.render_frame(cx);
     })
     .unwrap();

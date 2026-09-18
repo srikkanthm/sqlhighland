@@ -29,8 +29,7 @@ use crate::db::SharedSession;
 use crate::filetab::{self, FileStamp};
 use crate::metadata::SharedCache;
 use crate::model::{
-    csv_row, tab_name_from_sql, ColumnInfo, ConnectionConfig, Environment, OracleRole,
-    PasswordMode, ServiceKind,
+    csv_row, ColumnInfo, ConnectionConfig, Environment, OracleRole, PasswordMode, ServiceKind,
 };
 use crate::run::file_stem;
 use crate::schema::{DbEngine, OracleProvider, SchemaProvider as _};
@@ -57,7 +56,6 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use gpui_kit_assets::IconName as KitIcon;
 
-const DEFAULT_SQL: &str = "SELECT user, sysdate FROM dual;";
 /// Quiet period before an editor change is flushed to its draft file.
 const DRAFT_DEBOUNCE: Duration = Duration::from_millis(1500);
 gpui_kit::actions!(
@@ -622,7 +620,6 @@ pub struct SqlHighlandView {
     /// when no drag is over the strip. Drives the drop indicator only; the real
     /// reorder happens once, on drop.
     pub(crate) drag_slot: std::cell::Cell<Option<usize>>,
-    pub(crate) untitled_counter: usize,
     pub(crate) sidebar_collapsed: bool,
     /// Measured width of the main content area, updated by `on_prepaint` on
     /// the main root. Drives the responsive toolbars/headers (`ToolbarSize`).
@@ -1173,7 +1170,6 @@ impl SqlHighlandView {
                 size(px(0.), px(0.)),
             ))),
             drag_slot: std::cell::Cell::new(None),
-            untitled_counter: 0,
             sidebar_collapsed: false,
             // Starts wide; `on_prepaint` corrects it on the first frame.
             main_width: std::cell::Cell::new(1200.0),

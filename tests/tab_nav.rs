@@ -54,6 +54,45 @@ fn staged_named_tabs_dir(tag: &str, tabs: &[(&str, &str, &str)]) -> std::path::P
     dir
 }
 
+/// Config dir with a manifest whose saved active tab is `active`.
+fn staged_active_tabs_dir(
+    tag: &str,
+    tabs: &[(&str, &str, &str)],
+    active: Option<&str>,
+) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("sqlhighland-tabnav-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let tabs_dir = dir.join("tabs");
+    std::fs::create_dir_all(&tabs_dir).unwrap();
+    let mut toml = String::new();
+    if let Some(id) = active {
+        toml.push_str(&format!("active_tab = \"{id}\"\n"));
+    }
+    for (id, name, text) in tabs {
+        toml.push_str(&format!("[[tabs]]\nid = \"{id}\"\nname = \"{name}\"\n\n"));
+        std::fs::write(tabs_dir.join(format!("{id}.sql")), text).unwrap();
+    }
+    std::fs::write(dir.join("tabs.toml"), toml).unwrap();
+    dir
+}
+
+/// Config dir with no manifest (first launch).
+fn staged_empty_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("sqlhighland-tabnav-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Config dir with a lone draft and no manifest (recovery path).
+fn staged_orphan_dir(tag: &str, id: &str, text: &str) -> std::path::PathBuf {
+    let dir = staged_empty_dir(tag);
+    let tabs_dir = dir.join("tabs");
+    std::fs::create_dir_all(&tabs_dir).unwrap();
+    std::fs::write(tabs_dir.join(format!("{id}.sql")), text).unwrap();
+    dir
+}
+
 /// `SQLHIGHLAND_CONFIG_DIR` is process-global and cargo runs the tests in this
 /// binary on parallel threads, so serialize them: otherwise one test can
 /// redirect another's config lookups mid-run (and, for `persist_tabs`, its
@@ -343,8 +382,9 @@ async fn tab_nav_scrolls_active_into_view(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A dirty tab shows the amber dot and reports "(unsaved)" to accessibility,
-/// while its visible name stays plain (no asterisk).
+/// In-memory tabs (no external file) always carry the unsaved marker — a dot
+/// plus "(unsaved)" to accessibility — while a clean external file does not,
+/// and an edited external file does.
 #[gpui_kit::test]
 async fn dirty_tab_shows_dot(cx: &mut TestAppContext) {
     let _guard = env_guard();
@@ -362,25 +402,37 @@ async fn dirty_tab_shows_dot(cx: &mut TestAppContext) {
     let view = slot.borrow().clone().expect("view captured at window open");
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
-        assert!(
-            window.try_find(("tab-dirty", 0usize)).is_none(),
-            "a clean tab has no dirty dot"
-        );
-
-        view.update(cx, |this, cx| {
-            this.debug_mark_memory_dirty();
-            cx.notify();
-        });
-        window.render_frame(cx);
+        assert_eq!(tab_labels(window)[0], "T0", "visible name stays plain");
         assert!(
             window.try_find(("tab-dirty", 0usize)).is_some(),
-            "a dirty tab shows the dot"
+            "an in-memory tab is always unsaved"
         );
-        assert_eq!(tab_labels(window)[0], "T0", "visible name stays plain");
         assert_eq!(
             window.try_find(0usize).unwrap().label(),
             Some("T0 (unsaved)"),
             "accessibility carries the unsaved marker"
+        );
+
+        // A clean external file is not marked; editing it marks it dirty.
+        view.update(cx, |this, _| {
+            this.debug_mark_external_clean(dir.join("q.sql"))
+        });
+        window.render_frame(cx);
+        assert!(
+            window.try_find(("tab-dirty", 0usize)).is_none(),
+            "a clean external tab has no dirty dot"
+        );
+        assert_eq!(
+            window.try_find(0usize).unwrap().label(),
+            Some("T0"),
+            "a clean external tab reports no unsaved marker"
+        );
+
+        view.update(cx, |this, _| this.debug_mark_file_dirty(dir.join("q.sql")));
+        window.render_frame(cx);
+        assert!(
+            window.try_find(("tab-dirty", 0usize)).is_some(),
+            "a dirty external tab shows the dot"
         );
     })
     .unwrap();
@@ -433,5 +485,248 @@ async fn restore_keeps_saved_tab_names(cx: &mut TestAppContext) {
         .filter_map(|line| line.strip_suffix('"'))
         .collect();
     assert_eq!(names, ["Untitled 7", "Untitled 8"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// First launch (no manifest) starts with a single blank `Untitled 1` tab —
+/// no sample SQL, and the name is never derived from content.
+#[gpui_kit::test]
+async fn first_launch_starts_blank(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_empty_dir("first");
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let slot: std::rc::Rc<std::cell::RefCell<Option<gpui_kit::Entity<SqlHighlandView>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let for_window = slot.clone();
+    let handle = cx.open_window(size(px(1100.), px(780.)), move |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        *for_window.borrow_mut() = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let view = slot.borrow().clone().expect("view captured at window open");
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(tab_labels(window), ["Untitled 1"]);
+        let editor = view.read(cx).debug_active_editor();
+        assert_eq!(
+            editor.read(cx).value().to_string(),
+            "",
+            "the starter tab is blank"
+        );
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Closing the last tab spawns a fresh replacement — but it is numbered from
+/// the open set, so it is always `Untitled 1`, never a climbing counter.
+#[gpui_kit::test]
+async fn close_last_tab_names_untitled_1(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_tabs_dir("close-last");
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let handle = cx.open_window(size(px(1100.), px(780.)), |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(tab_labels(window).len(), 5);
+        // Close the first tab each time; the fifth close empties the strip and
+        // spawns the replacement, the sixth closes that replacement too.
+        for _ in 0..6 {
+            window.click(("tab-close", 0usize), cx);
+            window.render_frame(cx);
+        }
+        assert_eq!(tab_labels(window), ["Untitled 1"]);
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A new tab is numbered one past the highest `Untitled N` currently open.
+#[gpui_kit::test]
+async fn new_tab_after_untitled_ones_picks_next(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_named_tabs_dir(
+        "next-name",
+        &[
+            ("a", "Untitled 1", "SELECT 1;"),
+            ("b", "Untitled 2", "SELECT 2;"),
+        ],
+    );
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let handle = cx.open_window(size(px(1100.), px(780.)), |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("tab-add", cx);
+        window.render_frame(cx);
+        assert_eq!(
+            tab_labels(window),
+            ["Untitled 1", "Untitled 2", "Untitled 3"]
+        );
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The manifest's saved `active_tab` decides which tab is selected on launch.
+#[gpui_kit::test]
+async fn restore_selects_saved_active_tab(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_active_tabs_dir(
+        "active",
+        &[("t0", "T0", ""), ("t1", "T1", ""), ("t2", "T2", "")],
+        Some("t2"),
+    );
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let handle = cx.open_window(size(px(1100.), px(780.)), |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(active_tab(window), 2, "the saved active tab is selected");
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Selecting a tab is persisted immediately, so a relaunch reopens on it.
+#[gpui_kit::test]
+async fn active_tab_survives_relaunch(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_tabs_dir("active-roundtrip");
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let first = cx.open_window(size(px(1100.), px(780.)), |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update_window(first.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("tab-nav-forward", cx);
+        window.click("tab-nav-forward", cx);
+        window.render_frame(cx);
+        assert_eq!(active_tab(window), 2);
+    })
+    .unwrap();
+
+    let second = cx.open_window(size(px(1100.), px(780.)), |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update_window(second.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            active_tab(window),
+            2,
+            "relaunch reopens on the last active tab"
+        );
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Closing an in-memory tab with text prompts to Save As or Discard; Cancel
+/// keeps it, Discard closes it.
+#[gpui_kit::test]
+async fn closing_in_memory_tab_prompts(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_named_tabs_dir("close-memory", &[("u1", "Untitled 1", "SELECT 1;")]);
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let handle = cx.open_window(size(px(1100.), px(780.)), |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("tab-close", 0usize), cx);
+        window.render_frame(cx);
+        assert!(
+            window.try_find("close-memory-cancel").is_some()
+                && window.try_find("close-memory-discard").is_some()
+                && window.try_find("close-memory-save-as").is_some(),
+            "the in-memory close prompt offers Cancel / Discard / Save As"
+        );
+
+        // Cancel keeps the tab (and its text).
+        window.click("close-memory-cancel", cx);
+        window.render_frame(cx);
+        assert_eq!(tab_labels(window), ["Untitled 1"]);
+
+        // Discard closes it; the empty strip spawns the `Untitled 1` replacement.
+        window.click(("tab-close", 0usize), cx);
+        window.render_frame(cx);
+        window.click("close-memory-discard", cx);
+        window.render_frame(cx);
+        assert_eq!(tab_labels(window), ["Untitled 1"]);
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An empty in-memory tab closes without a prompt, so repeated Cmd+W on the
+/// blank replacement does not nag.
+#[gpui_kit::test]
+async fn empty_in_memory_tab_closes_silently(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_tabs_dir("close-empty");
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let handle = cx.open_window(size(px(1100.), px(780.)), |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("tab-close", 0usize), cx);
+        window.render_frame(cx);
+        assert!(
+            window.try_find("close-memory-discard").is_none(),
+            "a blank in-memory tab closes without a prompt"
+        );
+        assert_eq!(tab_labels(window).len(), 4);
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A draft with no manifest entry is adopted, named neutrally (`Untitled N`,
+/// never from its content), with its text restored.
+#[gpui_kit::test]
+async fn orphan_draft_adopts_with_neutral_name(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_orphan_dir("orphan", "u1", "SELECT 1 FROM dual;");
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let slot: std::rc::Rc<std::cell::RefCell<Option<gpui_kit::Entity<SqlHighlandView>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let for_window = slot.clone();
+    let handle = cx.open_window(size(px(1100.), px(780.)), move |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        *for_window.borrow_mut() = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let view = slot.borrow().clone().expect("view captured at window open");
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(tab_labels(window), ["Untitled 1"], "neutral, not content");
+        let editor = view.read(cx).debug_active_editor();
+        assert_eq!(
+            editor.read(cx).value().to_string(),
+            "SELECT 1 FROM dual;",
+            "draft text is restored"
+        );
+    })
+    .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

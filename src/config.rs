@@ -143,6 +143,12 @@ pub struct SavedTab {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TabsManifest {
+    /// Id of the tab that was active on last quit (query tabs only; a focused
+    /// viewer falls back to the nearest query tab). Declared before `tabs` so
+    /// TOML emits it above the `[[tabs]]` array — a bare key after an
+    /// array-of-tables would be absorbed into that table.
+    #[serde(default)]
+    pub active_tab: Option<String>,
     #[serde(default)]
     pub tabs: Vec<SavedTab>,
 }
@@ -820,6 +826,7 @@ mod tests {
         unsafe { std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir) };
 
         let manifest = TabsManifest {
+            active_tab: Some("tab-2".to_string()),
             tabs: vec![
                 SavedTab {
                     id: "tab-1".to_string(),
@@ -840,6 +847,7 @@ mod tests {
 
         let loaded = TabsManifest::load().unwrap();
         assert_eq!(loaded.tabs.len(), 2);
+        assert_eq!(loaded.active_tab.as_deref(), Some("tab-2"));
         assert_eq!(loaded.tabs[0].connection_id.as_deref(), Some("conn-1"));
         assert_eq!(
             loaded.tabs[0].path.as_deref(),
@@ -895,6 +903,7 @@ mod tests {
 
         // A manifest carrying a traversal id is rekeyed on load.
         let manifest = TabsManifest {
+            active_tab: None,
             tabs: vec![SavedTab {
                 id: "../../etc/passwd".to_string(),
                 name: "evil".to_string(),

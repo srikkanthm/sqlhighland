@@ -240,9 +240,13 @@ impl SqlHighlandView {
             let selected = self.active == ix;
             let close_id = tab.id.clone();
             let name = tab.name.clone();
+            // In-memory tabs (no external file) are always "unsaved": their
+            // text lives only in a recovery draft. External tabs signal on
+            // `dirty` alone.
+            let unsaved = tab.dirty || tab.path.is_none();
             // The unsaved marker is a dot, so the plain name alone would hide
             // it from assistive tech; the accessible label carries it instead.
-            let aria: SharedString = if tab.dirty {
+            let aria: SharedString = if unsaved {
                 format!("{} (unsaved)", tab.name).into()
             } else {
                 name.clone()
@@ -285,7 +289,7 @@ impl SqlHighlandView {
                 } else {
                     div().child(name)
                 })
-                .when(tab.dirty, |this| {
+                .when(unsaved, |this| {
                     this.child(
                         div()
                             .id(("tab-dirty", ix))

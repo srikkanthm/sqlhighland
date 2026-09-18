@@ -51,6 +51,9 @@ async fn pick_dialog_scrolls_tabs_and_picks(cx: &mut TestAppContext) {
     // input before focus settles.
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
+        // The starter tab is blank; a run needs a statement at the cursor.
+        window.input("SELECT 1 FROM dual", cx);
+        window.render_frame(cx);
         for _ in 0..20 {
             window.press("cmd-enter", cx);
             window.render_frame(cx);

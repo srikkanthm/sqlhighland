@@ -189,11 +189,9 @@ impl SqlHighlandView {
     pub(super) fn restore_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Corrupt manifests are renamed aside (never silently defaulted —
         // the next persist would otherwise overwrite them permanently).
-        let manifest_existed = TabsManifest::manifest_path()
-            .map(|p| p.exists())
-            .unwrap_or(false);
         let manifest = TabsManifest::load_preserving();
         let manifest_entries = manifest.tabs.len();
+        let saved_active = manifest.active_tab.clone();
         for saved in manifest.tabs {
             // Always start unbound after a restart so the user explicitly
             // picks a connection per tab; editor text still restores.
@@ -209,9 +207,8 @@ impl SqlHighlandView {
                 .as_ref()
                 .map(|(_, text, _)| text.clone())
                 .unwrap_or_else(|| TabsManifest::read_draft(&saved.id));
-            self.untitled_counter += 1;
             let name = if saved.name.is_empty() {
-                format!("Untitled {}", self.untitled_counter)
+                self.next_untitled_name()
             } else {
                 saved.name.clone()
             };
@@ -252,8 +249,8 @@ impl SqlHighlandView {
             ));
         }
         for (id, text) in orphans {
-            self.untitled_counter += 1;
-            let name = tab_name_from_sql(&text, &format!("Untitled {}", self.untitled_counter));
+            // Neutral name: never derive a title from the draft's content.
+            let name = self.next_untitled_name();
             self.make_tab(
                 NewTabSpec {
                     id,
@@ -267,19 +264,35 @@ impl SqlHighlandView {
             );
         }
         if self.tabs.is_empty() {
-            // First launch (or empty manifest): one starter tab, unbound so
-            // the user explicitly picks a connection.
-            let text = if manifest_existed {
-                String::new()
-            } else {
-                DEFAULT_SQL.to_string()
-            };
-            self.add_tab(None, text, window, cx);
+            // First launch (or empty manifest): one blank starter tab, unbound
+            // so the user explicitly picks a connection.
+            self.add_tab(None, String::new(), window, cx);
         } else if adopted {
             // Manifest now matches the adopted set on disk.
             self.persist_tabs(cx);
         }
-        self.active = 0;
+        // Restore the tab that was active on last quit, falling back to the
+        // first when it is gone (closed, unpersisted viewer, or none saved).
+        self.active = saved_active
+            .and_then(|id| self.tabs.iter().position(|t| t.id == id))
+            .unwrap_or(0);
+        self.scroll_tab_into_view(self.active);
+    }
+
+    /// Next neutral `Untitled N` label: one past the highest number currently
+    /// in use, or `Untitled 1` when no such tab is open. Deriving from the open
+    /// set (rather than a monotonic counter) means closing the last tab — which
+    /// leaves no `Untitled` tabs — spawns `Untitled 1` again. Names are never
+    /// derived from buffer content.
+    fn next_untitled_name(&self) -> String {
+        let max = self
+            .tabs
+            .iter()
+            .filter_map(|t| t.name.strip_prefix("Untitled "))
+            .filter_map(|n| n.parse::<usize>().ok())
+            .max()
+            .unwrap_or(0);
+        format!("Untitled {}", max + 1)
     }
 
     pub(crate) fn add_tab(
@@ -289,9 +302,9 @@ impl SqlHighlandView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> String {
-        self.untitled_counter += 1;
         let id = uuid::Uuid::new_v4().to_string();
-        let name = tab_name_from_sql(&text, &format!("Untitled {}", self.untitled_counter));
+        // Neutral name: tab titles are never derived from the buffer.
+        let name = self.next_untitled_name();
         self.make_tab(
             NewTabSpec {
                 id: id.clone(),
@@ -308,9 +321,10 @@ impl SqlHighlandView {
             self.status = format!("Draft save failed: {e:#}").into();
             cx.notify();
         }
-        self.persist_tabs(cx);
         self.active = self.tabs.len() - 1;
         self.scroll_tab_into_view(self.active);
+        // Persist after the selection so the new tab is the remembered one.
+        self.persist_tabs(cx);
         cx.notify();
         id
     }
@@ -354,6 +368,9 @@ impl SqlHighlandView {
         );
         self.active = self.tabs.len() - 1;
         self.scroll_tab_into_view(self.active);
+        // Viewers are not persisted, but persisting now records the nearest
+        // query tab as the remembered active tab.
+        self.persist_tabs(cx);
         let sql = OracleProvider.describe_sql(&owner, &name, &own, kind);
         self.start_run(&id, sql, window, cx);
         cx.notify();
@@ -393,9 +410,8 @@ impl SqlHighlandView {
             if self.tabs.is_empty() {
                 // Always keep one tab open. Untitled tabs remain internally
                 // auto-saved; external tabs are guarded before this path.
-                self.untitled_counter += 1;
                 let id = uuid::Uuid::new_v4().to_string();
-                let name = format!("Untitled {}", self.untitled_counter);
+                let name = self.next_untitled_name();
                 self.make_tab(
                     NewTabSpec {
                         id,
@@ -428,10 +444,27 @@ impl SqlHighlandView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+        let Some(ix) = self.tab_index(tab_id) else {
             return;
         };
-        if !tab.dirty || tab.path.is_none() {
+        // Viewers hold no recoverable text.
+        if !matches!(self.tabs[ix].kind, TabKind::Query) {
+            self.close_guard(tab_id, window, cx);
+            return;
+        }
+        if self.tabs[ix].path.is_none() {
+            // In-memory tab: closing deletes its recovery draft, so offer to
+            // save it as a file or discard it. Blank tabs (starter/close
+            // replacement) close silently so repeated Cmd+W does not nag.
+            let has_text = !self.tabs[ix].editor.read(cx).value().trim().is_empty();
+            if !has_text {
+                self.close_guard(tab_id, window, cx);
+                return;
+            }
+            self.confirm_close_in_memory(tab_id, window, cx);
+            return;
+        }
+        if !self.tabs[ix].dirty {
             self.close_guard(tab_id, window, cx);
             return;
         }
@@ -500,6 +533,72 @@ impl SqlHighlandView {
                                     .ok();
                             }
                         })),
+                )
+        });
+    }
+
+    /// Prompt for an in-memory (never-saved) tab with content: `Save As…`
+    /// writes it to a file and closes it, `Discard` drops the recovery draft
+    /// and closes, `Cancel` keeps the tab. Return does nothing, so the choice
+    /// is always explicit.
+    fn confirm_close_in_memory(
+        &mut self,
+        tab_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = cx.entity().downgrade();
+        let name = self
+            .tab_by_id(tab_id)
+            .map(|t| t.name.to_string())
+            .unwrap_or_default();
+        let tab_id = tab_id.to_string();
+        self.note_dialog_open();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let discard_view = view.clone();
+            let discard_id = tab_id.clone();
+            let save_view = view.clone();
+            let save_id = tab_id.clone();
+            alert
+                .title("Unsaved query")
+                .description(format!(
+                    "\u{201c}{name}\u{201d} is not saved to a file. Save it before closing?"
+                ))
+                .on_ok(|_, _, _| false)
+                .footer(
+                    h_flex()
+                        .gap_2()
+                        .justify_center()
+                        .child(
+                            Button::new("close-memory-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("close-memory-discard")
+                                .label("Discard")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    discard_view
+                                        .update(cx, |this, cx| {
+                                            this.close_guard(&discard_id, window, cx);
+                                        })
+                                        .ok();
+                                }),
+                        )
+                        .child(
+                            Button::new("close-memory-save-as")
+                                .primary()
+                                .label("Save As…")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    save_view
+                                        .update(cx, |this, cx| {
+                                            this.save_tab_as(&save_id, true, window, cx);
+                                        })
+                                        .ok();
+                                }),
+                        ),
                 )
         });
     }
@@ -632,6 +731,9 @@ impl SqlHighlandView {
         }
         self.active = ix;
         self.scroll_tab_into_view(ix);
+        // Persist the selection immediately so quitting right after a tab
+        // switch still remembers it.
+        self.persist_tabs(cx);
         // Viewers have no visible editor: don't steal focus.
         if matches!(self.tabs[ix].kind, TabKind::Query) {
             let editor = self.tabs[ix].editor.clone();
@@ -827,7 +929,25 @@ impl SqlHighlandView {
     }
 
     pub(crate) fn persist_tabs(&mut self, cx: &mut Context<Self>) {
+        // Remember the active tab: its id when it is a query tab, else the
+        // nearest preceding query tab (focusing a viewer keeps the query
+        // context), else the first query tab.
+        let active_tab = self
+            .tabs
+            .iter()
+            .enumerate()
+            .take(self.active.saturating_add(1))
+            .rev()
+            .find(|(_, t)| matches!(t.kind, TabKind::Query))
+            .map(|(_, t)| t.id.clone())
+            .or_else(|| {
+                self.tabs
+                    .iter()
+                    .find(|t| matches!(t.kind, TabKind::Query))
+                    .map(|t| t.id.clone())
+            });
         let manifest = TabsManifest {
+            active_tab,
             tabs: self
                 .tabs
                 .iter()
@@ -855,9 +975,31 @@ impl SqlHighlandView {
             return;
         }
         let tab_id = self.active_tab().id.clone();
-        let suggested = format!("{}.sql", file_stem(&self.active_tab().name));
+        self.save_tab_as(&tab_id, false, window, cx);
+    }
+
+    /// Save a tab's editor text to a new external `.sql` file (prompting for a
+    /// path). When `then_close` is set the tab is closed after a successful
+    /// save (the in-memory close prompt's `Save As…`). A cancelled prompt or a
+    /// failed write leaves the tab open.
+    pub(crate) fn save_tab_as(
+        &mut self,
+        tab_id: &str,
+        then_close: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.tab_index(tab_id) else {
+            return;
+        };
+        if !matches!(self.tabs[ix].kind, TabKind::Query) {
+            return;
+        }
+        let suggested = format!("{}.sql", file_stem(&self.tabs[ix].name));
         let dir = crate::fsutil::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
         let view = cx.entity().downgrade();
+        let tab_id = tab_id.to_string();
+        let window_handle = window.window_handle();
         cx.spawn_in(window, async move |_, cx| {
             let rx = match cx.update(|_, cx| cx.prompt_for_new_path(&dir, Some(&suggested))) {
                 Ok(rx) => rx,
@@ -871,34 +1013,40 @@ impl SqlHighlandView {
             } else {
                 path.with_extension("sql")
             };
-            view.update(cx, |this, cx| {
-                let Some(ix) = this.tab_index(&tab_id) else {
-                    return;
-                };
-                let text = this.tabs[ix].editor.read(cx).value().to_string();
-                match filetab::normalize(&path)
-                    .and_then(|path| filetab::write(&path, &text).map(|stamp| (path, stamp)))
-                {
-                    Ok((path, stamp)) => {
-                        this.tabs[ix].path = Some(path.clone());
-                        this.tabs[ix].file_stamp = Some(stamp);
-                        this.tabs[ix].dirty = false;
-                        this.tabs[ix].name = path
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("Untitled")
-                            .to_string()
-                            .into();
-                        this.persist_tabs(cx);
-                        cx.notify();
+            let _ = window_handle.update(cx, |_, window, cx| {
+                view.update(cx, |this, cx| {
+                    let Some(ix) = this.tab_index(&tab_id) else {
+                        return;
+                    };
+                    let text = this.tabs[ix].editor.read(cx).value().to_string();
+                    match filetab::normalize(&path)
+                        .and_then(|path| filetab::write(&path, &text).map(|stamp| (path, stamp)))
+                    {
+                        Ok((path, stamp)) => {
+                            this.tabs[ix].path = Some(path.clone());
+                            this.tabs[ix].file_stamp = Some(stamp);
+                            this.tabs[ix].dirty = false;
+                            this.tabs[ix].name = path
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("Untitled")
+                                .to_string()
+                                .into();
+                            this.persist_tabs(cx);
+                            if then_close {
+                                this.close_guard(&tab_id, window, cx);
+                            } else {
+                                cx.notify();
+                            }
+                        }
+                        Err(err) => {
+                            this.status = format!("Save failed: {err}").into();
+                            cx.notify();
+                        }
                     }
-                    Err(err) => {
-                        this.status = format!("Save failed: {err}").into();
-                        cx.notify();
-                    }
-                }
-            })
-            .ok();
+                })
+                .ok();
+            });
         })
         .detach();
     }
@@ -1355,6 +1503,15 @@ impl SqlHighlandView {
         let tab = &mut self.tabs[self.active];
         tab.path = None;
         tab.dirty = true;
+    }
+
+    /// Test hook: make the active tab a clean external SQL file (has a path, not
+    /// dirty), to contrast with the always-unsaved in-memory marker.
+    #[cfg(feature = "gui-test")]
+    pub fn debug_mark_external_clean(&mut self, path: std::path::PathBuf) {
+        let tab = &mut self.tabs[self.active];
+        tab.path = Some(path);
+        tab.dirty = false;
     }
 
     /// Test hook: bind the active tab to a live connection with uncommitted
