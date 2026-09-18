@@ -111,6 +111,7 @@ impl SqlHighlandView {
                 .row_selectable(false)
         });
         let tab_id = id.clone();
+        let editor_sub = editor.clone();
         let subs =
             vec![
                 cx.subscribe_in(&editor, window, move |this, _, ev: &InputEvent, _, cx| {
@@ -120,6 +121,32 @@ impl SqlHighlandView {
                         }
                         this.schedule_draft_save(&tab_id, cx);
                         this.schedule_diagnostics(&tab_id, cx);
+                        // Self-heal the editor's sticky completion offset. The
+                        // kit keeps `trigger_start_offset` and refuses to trigger
+                        // while the cursor is before it; clearing/replacing the
+                        // buffer leaves the cursor earlier, blocking every
+                        // auto-trigger until Ctrl+Space resets it. Reset only
+                        // when the cursor is actually before the offset (a
+                        // backward move), so ordinary forward typing allocates
+                        // nothing; the reset itself is deferred because the
+                        // editor is leased during its own change dispatch.
+                        let stale = {
+                            let editor = editor_sub.read(cx);
+                            let cursor = editor.cursor();
+                            editor
+                                .completion_menu_state()
+                                .trigger_start_offset
+                                .is_some_and(|start| cursor < start)
+                        };
+                        if stale {
+                            let editor = editor_sub.clone();
+                            cx.defer(move |cx| {
+                                editor.update(cx, |editor, cx| {
+                                    let cursor = editor.cursor();
+                                    editor.present_completion_items(cursor, "", Vec::new(), cx);
+                                });
+                            });
+                        }
                     }
                 }),
             ];
@@ -1248,6 +1275,12 @@ impl SqlHighlandView {
             .entry((owner.to_ascii_uppercase(), package.to_ascii_uppercase()))
             .or_default()
             .push(member.to_string());
+    }
+
+    /// Test hook: the active tab's editor entity.
+    #[cfg(feature = "gui-test")]
+    pub fn debug_active_editor(&self) -> Entity<EditorState> {
+        self.active_tab().editor.clone()
     }
 
     /// Test hook: completion (label, inserted text) pairs for the active tab

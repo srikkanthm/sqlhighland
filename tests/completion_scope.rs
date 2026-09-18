@@ -5,6 +5,7 @@
 #![recursion_limit = "256"]
 
 use gpui_kit::component::Root;
+use gpui_kit::test::TestWindowExt;
 use gpui_kit::{px, size, AppContext, TestAppContext};
 use sqlhighland::app::SqlHighlandView;
 
@@ -627,6 +628,55 @@ async fn empty_select_list_offers_table_templates(cx: &mut TestAppContext) {
                 "CTE name should be offered as a template: {items:?}"
             );
         });
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+/// A stale completion trigger offset (left after clearing the buffer) is
+/// reset on the next edit, so auto-complete resumes without Ctrl+Space.
+#[gpui_kit::test]
+async fn stale_completion_offset_is_reset_on_edit(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_dir("completion-reset");
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let slot: std::rc::Rc<std::cell::RefCell<Option<gpui_kit::Entity<SqlHighlandView>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let for_window = slot.clone();
+    let handle = cx.open_window(size(px(1100.), px(780.)), move |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        *for_window.borrow_mut() = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let view = slot.borrow().clone().expect("view captured at window open");
+    let editor_slot: std::rc::Rc<
+        std::cell::RefCell<Option<gpui_kit::Entity<gpui_kit::component::input::EditorState>>>,
+    > = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let editor_out = editor_slot.clone();
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        let editor = view.read(cx).debug_active_editor();
+        window.render_frame(cx);
+        // Simulate the wedge: a stale trigger offset far past the cursor.
+        editor.update(cx, |editor, cx| {
+            editor.present_completion_items(999, "stale", Vec::new(), cx);
+        });
+        assert_eq!(
+            editor.read(cx).completion_menu_state().trigger_start_offset,
+            Some(999)
+        );
+        // A real keystroke emits Change; the subscription resets the offset.
+        window.input("x", cx);
+        *editor_out.borrow_mut() = Some(editor);
+    })
+    .unwrap();
+
+    cx.run_until_parked();
+
+    let editor = editor_slot.borrow().clone().expect("editor captured");
+    cx.update_window(handle.into(), |_, _, cx| {
+        let offset = editor.read(cx).completion_menu_state().trigger_start_offset;
+        assert_ne!(offset, Some(999), "stale offset should be reset");
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);

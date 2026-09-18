@@ -341,6 +341,51 @@ completion.
 | DML extras | `MERGE` | `ON CONFLICT`, `RETURNING`, `UPDATE … FROM` |
 | Casts | `CAST(x AS t)` | `x::t` and `CAST` (data-type completion) |
 
+## Known issues & workarounds
+
+### Auto-complete wedges after clearing the buffer (kit sticky offset) `[x]`
+
+**Symptom:** after clearing (or replacing) the whole buffer, auto-complete
+stops firing until `Ctrl+Space` is pressed. Typing normal text produces no
+popup.
+
+**Root cause (upstream, `gpui-base`):** the editor keeps a sticky
+`CompletionMenuState::trigger_start_offset` and, on each change,
+`handle_completion_trigger` bails when the cursor is before it
+(`gpui-base/src/input/editor/lsp/completions.rs`):
+
+```rust
+let start_offset = ...completion.trigger_start_offset.unwrap_or(start);
+if new_offset < start_offset { return; }   // no trigger, and the offset is kept
+```
+
+The offset is only cleared by `completion_menu.hide()` (via the component's
+`sync_lsp` when `open` flips false) or reset by `present_completion_items`. The
+early return above — and the spawned-task path that finds **zero** items (sets
+`open = false` but leaves the offset) — both keep it. So a trigger at offset
+`N` followed by clearing the buffer (cursor → 0) makes every later keystroke
+satisfy `new_offset < N` and bail. `Ctrl+Space` works only because our
+`trigger_complete` calls `present_completion_items`, which rewrites the offset.
+
+**Local fix (`src/app/tabs.rs`, editor `Change` subscription):** after a text
+change, read `trigger_start_offset` and `cursor()` inline; if the cursor is
+before the offset (`cursor < start`), schedule a **deferred**
+`present_completion_items(cursor, "", vec![])` to reset it. Deferred because
+the editor is mutably leased during its own change dispatch (the reset mutates
+it). This is the same call `Ctrl+Space` uses, so no new API, and the kit's
+base offset is otherwise never reset.
+
+**Performance:** the check runs on every change but only does two cheap reads
+on an entity the same handler already reads (`schedule_diagnostics` clones the
+full buffer text just before). The `cursor < start` test is false for ordinary
+forward typing, and true only after a backward move (paste-over, clearing,
+large deletions), where a reset is genuinely needed — so nothing is allocated,
+deferred, or re-rendered on the common keystroke path.
+
+**Upstream suggestion:** clear `trigger_start_offset` in the early-return and
+zero-items paths (or store the last trigger offset and compare before bailing).
+Until the pin is bumped, the local reset above is the workaround.
+
 ## Cross-cutting
 
 - Pure logic + tests stay in `src/complete`; parser code GUI-gated.
