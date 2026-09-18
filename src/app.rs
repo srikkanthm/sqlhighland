@@ -36,7 +36,7 @@ use crate::schema::{DbEngine, OracleProvider, SchemaProvider as _};
 use crate::session::{lock, SessionPool};
 use crate::sql::{format_sql, line_at, parse_at_directive, statement_at, statement_at_range};
 use gpui_kit::base::TestSupportExt as _;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::{
     CompletionProvider, DefinitionProvider, Editor, EditorState, HoverProvider, InputEvent,
     InputState, Textarea, TextareaState,

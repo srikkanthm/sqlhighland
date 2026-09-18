@@ -228,6 +228,8 @@ impl SqlHighlandView {
         let warning = cx.theme().warning;
         // Inactive-tab hover fill: the same subtle accent the sidebar rows use.
         let tab_hover_bg = cx.theme().accent.opacity(0.5);
+        // New-tab bubble: a subtle neutral fill at rest, accent on hover.
+        let add_bg = cx.theme().muted;
         // Built before `tabs`: that map borrows `cx` for its listener
         // registrations, so a later `&mut cx` call would conflict.
         let nav = self.render_tab_nav(cx);
@@ -374,8 +376,13 @@ impl SqlHighlandView {
                 div().flex_shrink_0().child(
                     Button::new("tab-add")
                         .icon(KitIcon::Plus)
-                        .ghost()
+                        .custom(
+                            ButtonCustomVariant::new(cx)
+                                .color(add_bg)
+                                .hover(tab_hover_bg),
+                        )
                         .with_size(d.button_size)
+                        .rounded_full()
                         .tooltip("New tab")
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                             this.add_tab(None, String::new(), window, cx);
