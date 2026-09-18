@@ -43,6 +43,13 @@ impl SqlHighlandView {
             return empty;
         };
         let conn_id = tab.connection_id.clone();
+        let structural = tab.scope.clone().filter(|s| !s.is_empty());
+        // Any request that ends up empty must clear the accept flag; the
+        // non-empty returns below set it. Cleared here so every early return
+        // (trivia, short prefix, …) leaves it false.
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.pending_completion = false;
+        }
         if is_trivia_position(text, offset) {
             return empty;
         }
@@ -60,7 +67,6 @@ impl SqlHighlandView {
         // Structural scope from the last debounced pass (None/empty → lexical
         // fallback below). Cloned only after the cheap gates above, since the
         // completion callback runs synchronously on the UI thread.
-        let structural = tab.scope.clone().filter(|s| !s.is_empty());
         // Snapshot the cache (clone the Arc; never lock the session here).
         // Missing/stale cache kicks a background refresh; this request
         // completes from keywords + whatever is cached.
@@ -118,6 +124,9 @@ impl SqlHighlandView {
                 .filter(|c| !typed.contains(&normalize_condition(&c.label)))
                 .collect();
             if !cands.is_empty() {
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                    tab.pending_completion = true;
+                }
                 return (
                     Self::to_items(cands, text, word_start, offset),
                     word_start,
@@ -605,6 +614,9 @@ impl SqlHighlandView {
         let ranked = rank_candidates(&prefix, cands, &own_schema, COMPLETE_LIMIT);
         if ranked.is_empty() {
             return empty;
+        }
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.pending_completion = true;
         }
         (
             Self::to_items(ranked, text, word_start, offset),

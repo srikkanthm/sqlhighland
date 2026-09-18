@@ -121,6 +121,14 @@ impl SqlHighlandView {
                         }
                         this.schedule_draft_save(&tab_id, cx);
                         this.schedule_diagnostics(&tab_id, cx);
+                        // Accepting a completion inserts silently, so this is
+                        // the only signal it happened. A function completion
+                        // inserts `NAME()`, which the kit leaves the cursor
+                        // after; move it between the parens. Typing a call by
+                        // hand never reaches here with this shape (auto-close
+                        // already puts the cursor inside, and typing the closer
+                        // is a cursor-only move that emits no change).
+                        this.place_cursor_in_accepted_call(&tab_id, cx);
                         // Self-heal the editor's sticky completion offset. The
                         // kit keeps `trigger_start_offset` and refuses to trigger
                         // while the cursor is before it; clearing/replacing the
@@ -182,6 +190,7 @@ impl SqlHighlandView {
             diagnostics_task: None,
             last_structural: Vec::new(),
             scope: None,
+            pending_completion: false,
             _subs: subs,
         });
     }
@@ -1206,6 +1215,56 @@ impl SqlHighlandView {
         .detach();
     }
 
+    /// After a completion accept, place the cursor inside a function call's
+    /// parentheses.
+    ///
+    /// The editor kit has no snippet support, so accepting `LOWER()` leaves the
+    /// cursor after `)`. The change handler that calls this is the accept's
+    /// `InputEvent::Change` (silent inserts do not re-trigger). If the text now
+    /// ends at the cursor with a known `NAME()`, move the cursor one byte left.
+    ///
+    /// The flag is **not** cleared on ordinary keystrokes. The provider owns its
+    /// lifecycle (set when it builds a popup, cleared when a request yields no
+    /// items), because the editor emits `Change` for each typed character while
+    /// the popup stays open; clearing here would consume the flag before the
+    /// accept — which does not re-run the provider — ever arrives. It is cleared
+    /// here only once the move is actually made, so it acts at most once.
+    fn place_cursor_in_accepted_call(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
+            return;
+        };
+        if !tab.pending_completion {
+            return;
+        }
+        let editor = tab.editor.clone();
+        let conn_id = tab.connection_id.clone();
+        let dialect = self.engine_of(&conn_id).dialect();
+        // A read is safe during the editor's own change dispatch (the same
+        // reason the stale-offset check below reads the editor inline); only
+        // the mutation is deferred.
+        let target = {
+            let text = editor.read(cx).value().to_string();
+            let cursor = editor.read(cx).cursor();
+            crate::complete::cursor_inside_call(&text, cursor, |name| {
+                dialect
+                    .functions()
+                    .iter()
+                    .any(|(n, _)| n.eq_ignore_ascii_case(name))
+            })
+        };
+        let Some(target) = target else {
+            return;
+        };
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.pending_completion = false;
+        }
+        cx.defer(move |cx| {
+            editor.update(cx, |editor, cx| {
+                editor.set_selected_range(target..target, cx);
+            });
+        });
+    }
+
     /// Debounced draft flush: replaces any pending flush for the tab.
     ///
     /// Only in-memory tabs auto-save (a recovery draft under `tabs/`).
@@ -1474,6 +1533,43 @@ impl SqlHighlandView {
     #[cfg(feature = "gui-test")]
     pub fn debug_active_editor(&self) -> Entity<EditorState> {
         self.active_tab().editor.clone()
+    }
+
+    /// Test hook: run the real completion-accept path for `label` in the active
+    /// tab. Builds items at the current buffer/cursor, then inserts the matching
+    /// one through the editor's own `insert_completion` — the same call a popup
+    /// Enter/click makes — so the change subscription and any post-accept cursor
+    /// placement run exactly as in the app.
+    ///
+    /// Crucially it accepts the item from the **already-presented** completion
+    /// menu (what the popup is showing), not by re-running the provider: a
+    /// re-run would re-set `pending_completion` immediately before the insert
+    /// and mask any flag-lifecycle bug.
+    #[cfg(feature = "gui-test")]
+    pub fn debug_accept_completion(
+        &mut self,
+        label: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editor = self.active_tab().editor.clone();
+        let (item, start, cursor) = {
+            let editor = editor.read(cx);
+            let menu = editor.completion_menu_state();
+            assert!(menu.open, "no completion menu is open to accept");
+            let item = menu
+                .items
+                .iter()
+                .find(|i| i.label == label)
+                .unwrap_or_else(|| panic!("no completion item labelled {label:?}"))
+                .clone();
+            let start = menu.trigger_start_offset.unwrap_or(editor.cursor());
+            (item, start, editor.cursor())
+        };
+        let range = start..cursor;
+        editor.update(cx, |editor, cx| {
+            editor.insert_completion(&item, range, window, cx);
+        });
     }
 
     /// Test hook: completion (label, inserted text) pairs for the active tab

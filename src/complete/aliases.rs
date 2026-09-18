@@ -14,6 +14,35 @@ pub fn insert_text_for(kind: CandidateKind, label: &str) -> String {
         _ => label.to_string(),
     }
 }
+
+/// If `text` ends at `cursor` with `<FUNC>()`, where `FUNC` is a known
+/// function name, return the byte offset between the parentheses — where the
+/// cursor belongs after accepting a function completion. `None` when the
+/// trailing call is not a known function or the cursor is not immediately
+/// after `()`.
+///
+/// The editor kit has no snippet support (`$0`/tabstops are inserted
+/// literally), so a function completion leaves the cursor after `()`. Typing
+/// the call by hand never produces this shape with the cursor after `()`:
+/// auto-close inserts the pair with the cursor already inside, and typing the
+/// closer is a pure cursor move that emits no change.
+pub fn cursor_inside_call(
+    text: &str,
+    cursor: usize,
+    is_function: impl Fn(&str) -> bool,
+) -> Option<usize> {
+    let head = text.get(..cursor)?;
+    let stem = head.strip_suffix("()")?;
+    let start = stem
+        .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '#'))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let name = &stem[start..];
+    if name.is_empty() || !is_function(name) {
+        return None;
+    }
+    Some(cursor - 1)
+}
 /// Convert a byte offset into an LSP `(line, character)` pair (`character`
 /// in UTF-16 code units, matching `position_to_offset`). Floors mid-char
 /// offsets back to the boundary.

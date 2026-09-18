@@ -281,6 +281,11 @@ pub(crate) struct QueryTab {
     /// scope-correct completion. `None` (not yet computed, or diagnostics
     /// disabled) means completion uses its lexical fallback.
     pub(crate) scope: Option<crate::complete::ScopeForest>,
+    /// A completion popup has been populated for this tab since the last edit.
+    /// The next editor change is therefore an accepted completion (the kit
+    /// inserts silently, so it does not re-trigger); used to place the cursor
+    /// inside a function's parentheses after `NAME()` is inserted.
+    pub(crate) pending_completion: bool,
     pub(crate) _subs: Vec<Subscription>,
 }
 

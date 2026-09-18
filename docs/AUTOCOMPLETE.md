@@ -386,6 +386,48 @@ deferred, or re-rendered on the common keystroke path.
 zero-items paths (or store the last trigger offset and compare before bailing).
 Until the pin is bumped, the local reset above is the workaround.
 
+## Function completions put the cursor inside the parens
+
+Accepting a function candidate (`LOWER`, `UPPER`, `TO_DATE`, …) should leave the
+cursor between the parentheses: `LOWER(|)`. The editor kit cannot do this — it
+has **no snippet support at all**. `EditorState::insert_completion`
+(`gpui-base …/lsp/overlay.rs`) takes `text_edit.new_text` verbatim and leaves the
+cursor at `range.start + new_text.len()`, i.e. after `()`. `InsertTextFormat`,
+`Snippet`, `$0`/tabstops, and `additional_text_edits` are ignored (a grep of
+`gpui-base`/`gpui-component` `input/` finds no handling), so returning a snippet
+item would insert a literal `$0`.
+
+**Workaround (app-side):** the accept fires only a generic `InputEvent::Change`
+(no accept callback exists), so we detect it in the per-tab change subscription
+and move the cursor ourselves:
+
+1. `completion_items_for` sets `QueryTab.pending_completion` whenever it returns
+   a non-empty popup (and clears it on every empty/early return).
+2. The next `Change` whose text ends in a known `NAME()` is the accept — the kit
+   inserts **silently** (`replace_text_in_range_silent`), and silent inserts skip
+   `on_text_typed`, so they never re-trigger the provider.
+3. `place_cursor_in_accepted_call` checks whether the text now ends at the cursor
+   with `<FUNC>()` for a known function (`Dialect::functions`), and if so moves
+   the cursor one byte left, between the parens (deferred: the editor is leased
+   during its own change dispatch; the read is inline, the move is deferred).
+
+**Flag lifecycle matters:** the editor emits `Change` for every typed character
+while the popup stays open, and the accept itself does **not** re-run the
+provider. So the handler must *not* clear `pending_completion` on ordinary
+keystrokes — doing so consumes the flag before the accept arrives (this was the
+original bug). The provider owns the lifecycle (set on a non-empty result,
+cleared on an empty one); the handler clears it only once it actually moves the
+cursor, so the placement acts at most once.
+
+This never misfires on hand-typed calls: typing `lower(` auto-closes to `lower()`
+with the cursor already **inside**, and typing the closer to skip over is a
+cursor-only move that emits no change. So `<FUNC>()` with the cursor after `)` is
+produced only by a completion accept. Covered by the pure helper tests
+(`cursor_inside_call_*`), `tests/completion_scope.rs::
+function_completion_puts_cursor_inside_parens` (drives the real
+`insert_completion` path against the already-open popup), and
+`hand_typed_call_cursor_is_not_moved`.
+
 ## Cross-cutting
 
 - Pure logic + tests stay in `src/complete`; parser code GUI-gated.

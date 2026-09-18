@@ -842,6 +842,55 @@ fn byte_to_lsp_pos_counts_utf16() {
 }
 
 #[test]
+fn cursor_inside_call_finds_the_parens_of_a_known_function() {
+    let is_fn = |n: &str| {
+        ["LOWER", "UPPER", "TO_DATE", "COUNT"]
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case(n))
+    };
+    // Cursor right after the inserted `()`: lands between the parens.
+    let text = "SELECT LOWER()";
+    assert_eq!(
+        cursor_inside_call(text, text.len(), is_fn),
+        Some(text.len() - 1)
+    );
+    // Case-insensitive, and any surrounding SQL is irrelevant.
+    let text = "select lower()";
+    assert_eq!(
+        cursor_inside_call(text, text.len(), is_fn),
+        Some(text.len() - 1)
+    );
+    // Multiple words on the line: only the trailing call counts.
+    let text = "SELECT UPPER(ename) FROM emp WHERE TO_DATE()";
+    assert_eq!(
+        cursor_inside_call(text, text.len(), is_fn),
+        Some(text.len() - 1)
+    );
+    // Text after the cursor is irrelevant: the inserted call is still the one
+    // immediately before it.
+    let text = "SELECT LOWER(), ename FROM emp";
+    assert_eq!(
+        cursor_inside_call(text, "SELECT LOWER()".len(), is_fn),
+        Some("SELECT LOWER()".len() - 1)
+    );
+}
+
+#[test]
+fn cursor_inside_call_rejects_non_completion_shapes() {
+    let is_fn = |n: &str| ["LOWER", "UPPER"].iter().any(|f| f.eq_ignore_ascii_case(n));
+    // Unknown identifier is not a function.
+    let text = "SELECT FOO()";
+    assert_eq!(cursor_inside_call(text, text.len(), is_fn), None);
+    // Hand-typed call with the cursor already inside: not after `()`.
+    let text = "SELECT LOWER(";
+    assert_eq!(cursor_inside_call(text, text.len(), is_fn), None);
+    // Empty parens with no name.
+    assert_eq!(cursor_inside_call("()", 2, is_fn), None);
+    // No call at all.
+    assert_eq!(cursor_inside_call("SELECT ", 7, is_fn), None);
+}
+
+#[test]
 fn split_dotted_handles_quotes() {
     assert_eq!(
         split_dotted("scott.emp"),
