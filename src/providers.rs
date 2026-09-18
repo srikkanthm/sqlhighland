@@ -12,10 +12,11 @@ use crate::complete::{
     allows_empty_prefix, ambiguous_columns, build_alias_map, byte_to_lsp_pos, classify_context,
     detect_join_on, display_name, function_insert, insert_text_for, is_trivia_position,
     join_condition_candidates, owners_match, rank_candidates, resolve_qualifier, scope_label,
-    short_comment, word_prefix, Candidate, CandidateKind, CompleteContext, DmlKind, ForeignKey,
-    FromOrigin, Relation, RelationKind, ScopeForest, ScopeTable, TableRef, CASE_CONDITION_KEYWORDS,
-    CASE_RESULT_KEYWORDS, CASE_START_KEYWORDS, FROM_FOLLOW, INTO_FOLLOW, JOIN_FOLLOW, MERGE_FOLLOW,
-    SUBQUERY_START_KEYWORDS, UPDATE_FOLLOW, USING_FOLLOW, WINDOW_KEYWORDS,
+    select_list_is_empty, short_comment, word_prefix, Candidate, CandidateKind, CompleteContext,
+    DmlKind, ForeignKey, FromOrigin, Relation, RelationKind, ScopeForest, ScopeTable, TableRef,
+    CASE_CONDITION_KEYWORDS, CASE_RESULT_KEYWORDS, CASE_START_KEYWORDS, FROM_FOLLOW, INTO_FOLLOW,
+    JOIN_FOLLOW, MERGE_FOLLOW, SUBQUERY_START_KEYWORDS, UPDATE_FOLLOW, USING_FOLLOW,
+    WINDOW_KEYWORDS,
 };
 use crate::metadata::{ColumnMeta, SharedCache};
 use crate::session::lock;
@@ -206,6 +207,7 @@ impl SqlHighlandView {
                         (col.name.clone(), t.owner.clone())
                     };
                     cands.push(Candidate {
+                        insert: None,
                         label,
                         detail: column_detail(col, &t.table),
                         kind: CandidateKind::ColumnInScope,
@@ -219,6 +221,7 @@ impl SqlHighlandView {
         let push_keywords = |cands: &mut Vec<Candidate>, kws: &[&str]| {
             for kw in kws {
                 cands.push(Candidate {
+                    insert: None,
                     label: kw.to_string(),
                     detail: "KEYWORD".to_string(),
                     kind: CandidateKind::Keyword,
@@ -231,6 +234,7 @@ impl SqlHighlandView {
         let push_functions = |cands: &mut Vec<Candidate>| {
             for (name, sig) in dialect.functions() {
                 cands.push(Candidate {
+                    insert: None,
                     label: function_insert(name),
                     detail: sig.to_string(),
                     kind: CandidateKind::Function,
@@ -250,6 +254,7 @@ impl SqlHighlandView {
                     continue;
                 }
                 cands.push(Candidate {
+                    insert: None,
                     label: s.name.clone(),
                     detail: format!("SEQUENCE · {}", s.owner),
                     kind: CandidateKind::Sequence,
@@ -259,6 +264,50 @@ impl SqlHighlandView {
                 });
             }
         };
+        // Empty select list: offer tables (and CTE names) as `* FROM t`
+        // templates, so the query is populated and columns are available from
+        // the next completion on. Deduped by label (table + synonym clashes).
+        let push_table_templates = |cands: &mut Vec<Candidate>| {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            if let Some(cache) = &cache {
+                let cache = lock(cache);
+                for t in &cache.tables {
+                    if hide_system(&t.owner) {
+                        continue;
+                    }
+                    let label = display_name(Some(&t.owner), &t.name, &own_schema);
+                    if !seen.insert(label.to_ascii_uppercase()) {
+                        continue;
+                    }
+                    let target = qualified_ident(Some(&t.owner), &t.name, &own_schema);
+                    cands.push(Candidate {
+                        insert: Some(format!("* FROM {target} ")),
+                        label,
+                        detail: kind_label(t.kind).to_string(),
+                        kind: CandidateKind::Table,
+                        owner: Some(t.owner.clone()),
+                        usage: usage_of(&conn_id, &t.name),
+                        depth: 0,
+                    });
+                }
+            }
+            if let Some(forest) = structural.as_ref() {
+                for name in &forest.ctes {
+                    if !seen.insert(name.to_ascii_uppercase()) {
+                        continue;
+                    }
+                    cands.push(Candidate {
+                        insert: Some(format!("* FROM {name} ")),
+                        label: name.clone(),
+                        detail: "CTE".to_string(),
+                        kind: CandidateKind::Table,
+                        owner: None,
+                        usage: 0,
+                        depth: 0,
+                    });
+                }
+            }
+        };
         // DML positions: an INSERT column list or UPDATE SET body offers the
         // target table's columns only (plus expressions for UPDATE), instead
         // of the generic context's keyword noise.
@@ -266,6 +315,7 @@ impl SqlHighlandView {
             let mut dml: Vec<Candidate> = relation_columns(&anchor.target, &cache)
                 .into_iter()
                 .map(|col| Candidate {
+                    insert: None,
                     label: col.name.clone(),
                     detail: column_detail(&col, &anchor.target.name),
                     kind: CandidateKind::ColumnInScope,
@@ -295,6 +345,7 @@ impl SqlHighlandView {
             CompleteContext::SequenceMember(_) => {
                 for kw in dialect.sequence_members() {
                     cands.push(Candidate {
+                        insert: None,
                         label: kw.to_string(),
                         detail: "SEQUENCE".to_string(),
                         kind: CandidateKind::Keyword,
@@ -311,6 +362,7 @@ impl SqlHighlandView {
                     let members = lock(cache).package_member_names(owner.as_deref(), &package);
                     for m in members {
                         cands.push(Candidate {
+                            insert: None,
                             label: function_insert(&m),
                             detail: "PACKAGE MEMBER".to_string(),
                             kind: CandidateKind::Function,
@@ -340,6 +392,7 @@ impl SqlHighlandView {
                         .unwrap_or_default();
                     for col in cols {
                         cands.push(Candidate {
+                            insert: None,
                             label: col.name.clone(),
                             detail: column_detail(&col, &tref.name),
                             kind: CandidateKind::ColumnInScope,
@@ -365,6 +418,7 @@ impl SqlHighlandView {
                         }
                         let label = display_name(Some(&t.owner), &t.name, &own_schema);
                         cands.push(Candidate {
+                            insert: None,
                             label,
                             detail: kind_label(t.kind).to_string(),
                             kind: CandidateKind::Table,
@@ -384,6 +438,7 @@ impl SqlHighlandView {
                             continue;
                         }
                         cands.push(Candidate {
+                            insert: None,
                             label: t.name.clone(),
                             detail: format!("{} · {}", kind_label(t.kind), t.owner),
                             kind: CandidateKind::Table,
@@ -399,7 +454,14 @@ impl SqlHighlandView {
                 push_functions(&mut cands);
                 push_sequences(&mut cands);
                 push_keywords(&mut cands, dialect.expr_keywords());
-                push_keywords(&mut cands, dialect.select_follow());
+                if select_list_is_empty(text, offset) {
+                    // No projection yet: the useful move is to pick a table
+                    // (templates insert `* FROM t`). Clause transitions
+                    // (`FROM`/`WHERE`/…) are invalid here, so they're dropped.
+                    push_table_templates(&mut cands);
+                } else {
+                    push_keywords(&mut cands, dialect.select_follow());
+                }
             }
             CompleteContext::Predicate => {
                 push_scope_columns(&mut cands);
@@ -423,6 +485,7 @@ impl SqlHighlandView {
                             continue;
                         }
                         cands.push(Candidate {
+                            insert: None,
                             label: alias.clone(),
                             detail: "SELECT alias".to_string(),
                             kind: CandidateKind::Column,
@@ -478,6 +541,7 @@ impl SqlHighlandView {
                 // `CAST(x AS |` — the dialect's data types only.
                 for ty in dialect.data_types() {
                     cands.push(Candidate {
+                        insert: None,
                         label: ty.to_string(),
                         detail: "TYPE".to_string(),
                         kind: CandidateKind::Keyword,
@@ -507,6 +571,7 @@ impl SqlHighlandView {
                     common.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
                     for name in common {
                         cands.push(Candidate {
+                            insert: None,
                             label: name.clone(),
                             detail: "USING".to_string(),
                             kind: CandidateKind::ColumnInScope,
@@ -525,6 +590,7 @@ impl SqlHighlandView {
                         continue;
                     }
                     cands.push(Candidate {
+                        insert: None,
                         label: kw.to_string(),
                         detail: "KEYWORD".to_string(),
                         kind: CandidateKind::Keyword,
@@ -588,7 +654,10 @@ impl SqlHighlandView {
                             character: e_char,
                         },
                     },
-                    new_text: insert_text_for(c.kind, &c.label),
+                    new_text: c
+                        .insert
+                        .clone()
+                        .unwrap_or_else(|| insert_text_for(c.kind, &c.label)),
                 })),
                 ..Default::default()
             })
@@ -649,6 +718,35 @@ fn kind_label(kind: crate::metadata::TableKind) -> &'static str {
         TableKind::View => "VIEW",
         TableKind::Sequence => "SEQUENCE",
         TableKind::Synonym => "SYNONYM",
+    }
+}
+
+/// A quoted identifier when the bare spelling wouldn't preserve the name
+/// (a bare Oracle identifier folds to uppercase), else the name as-is.
+fn quote_ident(name: &str) -> String {
+    let bare = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_uppercase() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '_' | '$' | '#'));
+    if bare {
+        name.to_string()
+    } else {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    }
+}
+
+/// `[owner.]name` for a `FROM` target, baring the connected user's own schema
+/// (Oracle resolves unqualified names to it first) and quoting each segment
+/// only when needed.
+fn qualified_ident(owner: Option<&str>, name: &str, own_schema: &str) -> String {
+    match owner {
+        Some(o) if !o.is_empty() && !o.eq_ignore_ascii_case(own_schema) => {
+            format!("{}.{}", quote_ident(o), quote_ident(name))
+        }
+        _ => quote_ident(name),
     }
 }
 
@@ -798,6 +896,7 @@ mod tests {
                 order_group: vec![],
             }],
             dml: Vec::new(),
+            ctes: Vec::new(),
         }
     }
 

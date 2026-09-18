@@ -569,3 +569,65 @@ async fn package_member_completion(cx: &mut TestAppContext) {
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+/// An empty select list offers tables as `* FROM t` templates (and CTE names),
+/// so the query is populated and columns become available; a non-empty select
+/// list does not.
+#[gpui_kit::test]
+async fn empty_select_list_offers_table_templates(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_dir("select-template");
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let slot: std::rc::Rc<std::cell::RefCell<Option<gpui_kit::Entity<SqlHighlandView>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let for_window = slot.clone();
+    let handle = cx.open_window(size(px(1100.), px(780.)), move |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        *for_window.borrow_mut() = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let view = slot.borrow().clone().expect("view captured at window open");
+    cx.update_window(handle.into(), |_, _window, cx| {
+        view.update(cx, |this, _| {
+            this.debug_set_connection("c1");
+            this.debug_insert_meta("c1", "SCOTT", "EMP", &["EMPNO", "ENAME"]);
+
+            let empty = "SELECT ";
+            let items = this.debug_completion_texts(empty, empty.len());
+            assert!(
+                items
+                    .iter()
+                    .any(|(l, t)| l == "SCOTT.EMP" && t == "* FROM SCOTT.EMP "),
+                "empty select list should offer the table template: {items:?}"
+            );
+            // Prefix-filtered: the template still appears (prefix replaced).
+            let prefixed = "SELECT em";
+            let items = this.debug_completion_texts(prefixed, prefixed.len());
+            assert!(
+                items.iter().any(|(_, t)| t == "* FROM SCOTT.EMP "),
+                "prefixed empty select list should offer the template: {items:?}"
+            );
+
+            // A projection already exists → no template.
+            let filled = "SELECT EMPNO, ";
+            let items = this.debug_completion_texts(filled, filled.len());
+            assert!(
+                !items.iter().any(|(_, t)| t.starts_with("* FROM")),
+                "non-empty select list must not offer a FROM template: {items:?}"
+            );
+
+            // CTE names are offered as templates when the scope knows them.
+            let cte = "WITH recent AS (SELECT id FROM orders) SELECT ";
+            this.debug_set_scope_from_sql(cte);
+            let items = this.debug_completion_texts(cte, cte.len());
+            assert!(
+                items
+                    .iter()
+                    .any(|(l, t)| l == "recent" && t == "* FROM recent "),
+                "CTE name should be offered as a template: {items:?}"
+            );
+        });
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

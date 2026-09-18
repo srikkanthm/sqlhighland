@@ -23,10 +23,12 @@ pub fn extract(text: &str) -> ScopeForest {
     // name collisions across separate statements are rare and only affect
     // which columns are offered, never correctness of the SQL.
     let mut ctes: HashMap<String, Vec<String>> = HashMap::new();
+    let mut cte_names: Vec<String> = Vec::new();
     for node in descendants(root) {
         if node.kind() == "cte" {
             if let Some((name, cols)) = read_cte(node, text) {
                 ctes.insert(name.to_ascii_lowercase(), cols);
+                cte_names.push(name);
             }
         }
     }
@@ -56,7 +58,11 @@ pub fn extract(text: &str) -> ScopeForest {
     }
     dml.sort_by_key(|a| a.start);
 
-    ScopeForest { scopes, dml }
+    ScopeForest {
+        scopes,
+        dml,
+        ctes: cte_names,
+    }
 }
 
 /// `INSERT INTO t (col, …) …` → the column-list span + target `t`.
@@ -418,6 +424,7 @@ mod tests {
         let from_recent = sql.rfind("recent").unwrap();
         let cte = f.cte_at(from_recent, "recent").expect("CTE visible");
         assert_eq!(cte.columns, ["id", "total"]);
+        assert_eq!(f.ctes, ["recent"], "CTE names recorded for FROM templates");
         let scope = f.scope_at(from_recent).unwrap();
         assert_eq!(names(&scope.relations), ["recent"]);
     }

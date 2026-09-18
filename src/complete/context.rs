@@ -230,23 +230,11 @@ pub fn classify_context(
     offset: usize,
     sequence_names: &dyn Fn(&str) -> bool,
 ) -> CompleteContext {
-    use crate::sql::split_statements;
     let offset = offset.min(text.len());
     let (_, word_start) = word_prefix(text, offset);
     // Scope to the containing statement (multi-statement buffers); past the
     // end or in a gap, the head is empty → StatementStart.
-    let stmts = split_statements(text);
-    let base = stmts
-        .iter()
-        .find(|s| s.start <= offset && offset < s.end)
-        .or_else(|| {
-            stmts
-                .iter()
-                .rev()
-                .find(|s| s.start <= offset && offset <= s.end)
-        })
-        .map(|s| s.start)
-        .unwrap_or(offset);
+    let base = statement_base(text, offset);
     let ws = word_start.max(base).min(text.len());
     let toks = tokenize(&text[base..ws]);
     // Qualifier first: `x.|` completes members of x — tables when the
@@ -490,20 +478,8 @@ fn scan_clause(toks: &[String]) -> Clause {
 /// operand-expecting clause keyword (`FROM |`, `WHERE |`, `SELECT |`).
 /// Guards the space-trigger so post-identifier spaces stay quiet.
 pub fn allows_empty_prefix(text: &str, offset: usize) -> bool {
-    use crate::sql::split_statements;
     let offset = offset.min(text.len());
-    let stmts = split_statements(text);
-    let base = stmts
-        .iter()
-        .find(|s| s.start <= offset && offset < s.end)
-        .or_else(|| {
-            stmts
-                .iter()
-                .rev()
-                .find(|s| s.start <= offset && offset <= s.end)
-        })
-        .map(|s| s.start)
-        .unwrap_or(offset);
+    let base = statement_base(text, offset);
     let toks = tokenize(&text[base..offset]);
     matches!(
         scan_clause(&toks),
@@ -519,6 +495,128 @@ pub fn allows_empty_prefix(text: &str, offset: usize) -> bool {
             | Clause::UsingColumns
             | Clause::Predicate
     )
+}
+
+/// Byte offset where the statement containing `offset` starts. Past the end or
+/// in a gap between statements, resolves to the preceding statement (mirrors
+/// `sql::statement_at`). Used to scope clause scans to one statement.
+fn statement_base(text: &str, offset: usize) -> usize {
+    use crate::sql::split_statements;
+    let stmts = split_statements(text);
+    stmts
+        .iter()
+        .find(|s| s.start <= offset && offset < s.end)
+        .or_else(|| {
+            stmts
+                .iter()
+                .rev()
+                .find(|s| s.start <= offset && offset <= s.end)
+        })
+        .map(|s| s.start)
+        .unwrap_or(offset)
+}
+
+/// True when the cursor's select list has no projection yet — the ideal spot
+/// to offer a table and populate `* FROM t`. Comments are ignored, `DISTINCT`/
+/// `ALL` are transparent, and anything else (identifier, `*`, comma, `(`) means
+/// a projection already exists.
+pub fn select_list_is_empty(text: &str, offset: usize) -> bool {
+    let offset = offset.min(text.len());
+    let (_, word_start) = word_prefix(text, offset);
+    let base = statement_base(text, offset);
+    let head = &text[base..word_start.max(base)];
+    let blanked = blank_comments(head);
+    let Some(sel) = last_whole_word(&blanked, "SELECT") else {
+        return false;
+    };
+    let mut rest = blanked[sel + "SELECT".len()..].trim();
+    if let Some(r) = strip_word(rest, "DISTINCT").or_else(|| strip_word(rest, "ALL")) {
+        rest = r.trim();
+    }
+    rest.is_empty()
+}
+
+/// Replace `--` line and `/* */` block comments with spaces (length preserved
+/// so offsets stay valid), leaving string literals alone — a string is content,
+/// and `'--'` inside one is not a comment.
+fn blank_comments(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = b.to_vec();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\'' => {
+                // Skip the string literal untouched (handles `''`).
+                i += 1;
+                while i < b.len() {
+                    if b[i] == b'\'' {
+                        if b.get(i + 1) == Some(&b'\'') {
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'-' if b.get(i + 1) == Some(&b'-') => {
+                while i < b.len() && b[i] != b'\n' {
+                    out[i] = b' ';
+                    i += 1;
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                out[i] = b' ';
+                out[i + 1] = b' ';
+                i += 2;
+                while i < b.len() {
+                    if b[i] == b'*' && b.get(i + 1) == Some(&b'/') {
+                        out[i] = b' ';
+                        out[i + 1] = b' ';
+                        i += 2;
+                        break;
+                    }
+                    out[i] = b' ';
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    // Safe: only ASCII comment/quote bytes were blanked; other bytes copied.
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
+/// Start offset of the last whole-word (case-insensitive) `word` in `s`.
+fn last_whole_word(s: &str, word: &str) -> Option<usize> {
+    let (hb, kb) = (s.as_bytes(), word.as_bytes());
+    if kb.is_empty() || hb.len() < kb.len() {
+        return None;
+    }
+    let mut last = None;
+    let mut i = 0;
+    while i + kb.len() <= hb.len() {
+        if hb[i..i + kb.len()].eq_ignore_ascii_case(kb)
+            && (i == 0 || !is_word_char(hb[i - 1] as char))
+            && (i + kb.len() == hb.len() || !is_word_char(hb[i + kb.len()] as char))
+        {
+            last = Some(i);
+        }
+        i += 1;
+    }
+    last
+}
+
+/// `s` without a leading whole-word `word` (case-insensitive), else `None`.
+fn strip_word<'a>(s: &'a str, word: &str) -> Option<&'a str> {
+    let rest = s.get(word.len()..)?;
+    if s[..word.len()].eq_ignore_ascii_case(word) && !rest.chars().next().is_some_and(is_word_char)
+    {
+        Some(rest)
+    } else {
+        None
+    }
 }
 /// True when `offset` sits inside a string literal, quoted identifier, or
 /// comment — positions where suggestions must never trigger. A single

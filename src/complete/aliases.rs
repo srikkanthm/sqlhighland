@@ -429,6 +429,7 @@ pub fn join_condition_candidates(
                 .collect::<Vec<_>>()
                 .join(" AND ");
             out.push(Candidate {
+                insert: None,
                 label: cond,
                 detail: format!("JOIN · {}", fk.name),
                 kind: CandidateKind::JoinCondition,

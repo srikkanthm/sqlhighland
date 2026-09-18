@@ -1250,6 +1250,24 @@ impl SqlHighlandView {
             .push(member.to_string());
     }
 
+    /// Test hook: completion (label, inserted text) pairs for the active tab
+    /// at `offset` (manual trigger). Exposes the `insert` override.
+    #[cfg(feature = "gui-test")]
+    pub fn debug_completion_texts(&mut self, text: &str, offset: usize) -> Vec<(String, String)> {
+        let tab_id = self.active_tab().id.clone();
+        let (items, _, _) = self.completion_items_for(&tab_id, text, offset, true);
+        items
+            .into_iter()
+            .map(|item| {
+                let insert = match item.text_edit {
+                    Some(lsp_types::CompletionTextEdit::Edit(edit)) => edit.new_text,
+                    _ => item.label.clone(),
+                };
+                (item.label, insert)
+            })
+            .collect()
+    }
+
     /// Test hook: bind the active tab to `conn_id` so completion reads that
     /// connection's dictionary cache.
     #[cfg(feature = "gui-test")]

@@ -98,6 +98,9 @@ pub struct Candidate {
     /// between otherwise-equal candidates so a correlated column resolves to
     /// the nearest definition. 0 for candidates with no scope.
     pub depth: u8,
+    /// Overrides the inserted text (default: the label, plus a trailing space
+    /// for keywords). Used by table templates that insert `* FROM t`.
+    pub insert: Option<String>,
 }
 
 impl Candidate {

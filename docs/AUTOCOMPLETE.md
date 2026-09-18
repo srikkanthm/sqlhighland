@@ -282,6 +282,30 @@ reads as a case condition/result (MERGE is lexical/partial anyway).
 - **Usage counts persist** (`~/.config/sqlhighland/usage.toml`): the frequency
   ranking now survives relaunch (`config::load_usage`/`save_usage`).
 
+### Table-first select (Option A) `[x]`
+
+In an **empty select list** with no `FROM`/`JOIN` yet, the popup leads with the
+dictionary's tables (and CTE names), each inserting **`* FROM t `** via a new
+per-candidate `Candidate.insert` override. The statement is populated and the
+select list is then ready for column autocomplete — no column list is ever
+inserted automatically.
+
+- Trigger (`select_list_is_empty`): text between the nearest `SELECT` and the
+  word start is empty modulo whitespace, `--`/`/* */` comments, and
+  `DISTINCT`/`ALL`. `SELECT *` is therefore *not* empty (no `* * FROM t`), nor
+  is `SELECT a,`. A typed prefix (`SELECT em`) still counts as empty — the
+  prefix is replaced on accept.
+- Name insertion is fold-safe: `qualified_ident`/`quote_ident` bare the
+  connected user's schema and quote any segment that a bare identifier
+  wouldn't preserve.
+- While the select list is empty, `SELECT_FOLLOW` (`FROM`/`WHERE`/…) is
+  omitted (invalid there), so the list is tables + functions + `EXPR_KEYWORDS`.
+- Labels are deduped case-insensitively (a table and a same-named synonym
+  don't both appear).
+
+**Tabled:** an explicit "Expand Columns" action (`⌘⇧E`) to turn `*`/`alias.*`
+into the column list, and any auto-expansion.
+
 ### Phase E — Ranking & UX `[x]`
 
 Scope-proximity ranking (nearer scope higher), projection aliases top tier,

@@ -217,6 +217,29 @@ fn structural_expression_contexts() {
 }
 
 #[test]
+fn select_list_empty_detection() {
+    let e = |sql: &str| select_list_is_empty(sql, sql.len());
+    assert!(e("SELECT "));
+    assert!(e("SELECT DISTINCT "));
+    assert!(e("SELECT ALL "));
+    // Comments are transparent.
+    assert!(e("SELECT /* hint */ "));
+    assert!(e("SELECT -- note\n"));
+    // A typed prefix doesn't count (it's replaced on accept).
+    assert!(e("SELECT em"));
+    assert!(e("SELECT a"));
+    // Subquery and CTE main select lists.
+    assert!(e("SELECT * FROM (SELECT "));
+    assert!(e("WITH x AS (SELECT 1) SELECT "));
+    // Something already projected → not empty.
+    assert!(!e("SELECT * "));
+    assert!(!e("SELECT a, "));
+    assert!(!e("SELECT COUNT("));
+    assert!(!e("SELECT 'x' "));
+    assert!(!e("SELECT * FROM t "));
+}
+
+#[test]
 fn string_literals_do_not_shift_clause() {
     use CompleteContext::*;
     let no_seq = |_: &str| false;
@@ -297,6 +320,7 @@ fn resolve_qualifier_prefers_alias_then_bare() {
 #[test]
 fn ranking_prefers_scope_then_prefix_then_usage() {
     let cand = |label: &str, kind: CandidateKind, usage: u64| Candidate {
+        insert: None,
         label: label.into(),
         detail: "".into(),
         kind,
@@ -325,6 +349,7 @@ fn ranking_prefers_scope_then_prefix_then_usage() {
 #[test]
 fn ranking_prefers_the_nearest_scope() {
     let cand = |label: &str, depth: u8| Candidate {
+        insert: None,
         label: label.into(),
         detail: "".into(),
         kind: CandidateKind::ColumnInScope,
@@ -363,6 +388,7 @@ fn function_table_is_consistent() {
 #[test]
 fn ranking_prefers_own_schema() {
     let cand = |label: &str, owner: &str| Candidate {
+        insert: None,
         label: label.into(),
         detail: "".into(),
         kind: CandidateKind::Table,
@@ -378,6 +404,7 @@ fn ranking_prefers_own_schema() {
 #[test]
 fn ranking_prefers_functions_over_keywords() {
     let cand = |label: &str, kind: CandidateKind| Candidate {
+        insert: None,
         label: label.into(),
         detail: "".into(),
         kind,
@@ -397,6 +424,7 @@ fn ranking_prefers_functions_over_keywords() {
 #[test]
 fn dotted_labels_score_on_object_part() {
     let cand = |label: &str| Candidate {
+        insert: None,
         label: label.into(),
         detail: "".into(),
         kind: CandidateKind::Table,

@@ -66,6 +66,8 @@ pub struct ScopeForest {
     pub scopes: Vec<Scope>,
     /// DML positions (INSERT column list, UPDATE SET) with their target.
     pub dml: Vec<DmlAnchor>,
+    /// CTE names defined in the buffer (as written), for offering `FROM cte`.
+    pub ctes: Vec<String>,
 }
 
 /// Which DML position an anchor marks.
@@ -190,6 +192,7 @@ mod tests {
         ScopeForest {
             scopes,
             dml: Vec::new(),
+            ctes: Vec::new(),
         }
     }
 
@@ -292,6 +295,7 @@ mod tests {
                     target: rel("t", "t", RelationKind::Table, &[]),
                 },
             ],
+            ctes: Vec::new(),
         };
         assert_eq!(f.dml_at(15).unwrap().kind, DmlKind::InsertColumns);
         assert_eq!(f.dml_at(25).unwrap().kind, DmlKind::UpdateSet);
