@@ -891,6 +891,23 @@ fn cursor_inside_call_rejects_non_completion_shapes() {
 }
 
 #[test]
+fn usable_object_name_rejects_path_noise() {
+    // Ordinary identifiers pass (including mixed-case quoted names).
+    assert!(is_usable_object_name("EMP"));
+    assert!(is_usable_object_name("_PRIVATE"));
+    assert!(is_usable_object_name("MixedCase"));
+    assert!(is_usable_object_name("T$1"));
+    // XML DB component synonyms and other non-identifiers are rejected.
+    assert!(!is_usable_object_name(
+        "oracle/xml/xqxp/functions/builtIns/UpperCase"
+    ));
+    assert!(!is_usable_object_name("has space"));
+    assert!(!is_usable_object_name("1LEADING"));
+    assert!(!is_usable_object_name(""));
+    assert!(!is_usable_object_name("has.dot"));
+}
+
+#[test]
 fn split_dotted_handles_quotes() {
     assert_eq!(
         split_dotted("scott.emp"),

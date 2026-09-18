@@ -15,7 +15,7 @@ use std::time::Instant;
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
-use crate::complete::{ForeignKey, SYSTEM_SCHEMAS};
+use crate::complete::{is_usable_object_name, ForeignKey, SYSTEM_SCHEMAS};
 use crate::db::DbClient;
 use crate::schema::DbEngine;
 
@@ -458,7 +458,7 @@ pub fn fetch_tables_blocking(
     Ok(r.rows
         .iter()
         .filter_map(|row| match row.as_slice() {
-            [Some(o), Some(t), Some(k)] => {
+            [Some(o), Some(t), Some(k)] if is_usable_object_name(t) => {
                 let kind = if k.eq_ignore_ascii_case("VIEW") {
                     TableKind::View
                 } else {
@@ -497,6 +497,9 @@ pub fn fetch_columns_blocking(
     let mut map: HashMap<(String, String), Vec<ColumnMeta>> = HashMap::new();
     for row in &r.rows {
         if let [Some(o), Some(t), Some(c), dt, cm] = row.as_slice() {
+            if !is_usable_object_name(t) {
+                continue;
+            }
             map.entry((o.to_ascii_uppercase(), t.to_ascii_uppercase()))
                 .or_default()
                 .push(ColumnMeta {
@@ -583,7 +586,7 @@ pub fn fetch_sequences_blocking(
     Ok(r.rows
         .iter()
         .filter_map(|row| match row.as_slice() {
-            [Some(o), Some(t)] => Some(TableId {
+            [Some(o), Some(t)] if is_usable_object_name(t) => Some(TableId {
                 owner: o.clone(),
                 name: t.clone(),
                 kind: TableKind::Sequence,
@@ -608,7 +611,7 @@ pub fn fetch_synonyms_blocking(
     Ok(r.rows
         .iter()
         .filter_map(|row| match row.as_slice() {
-            [Some(o), Some(n), to, Some(t)] => Some(Synonym {
+            [Some(o), Some(n), to, Some(t)] if is_usable_object_name(n) => Some(Synonym {
                 owner: o.clone(),
                 name: n.clone(),
                 table_owner: to.clone(),
@@ -642,11 +645,13 @@ pub fn fetch_package_members_blocking(
     Ok(r.rows
         .iter()
         .filter_map(|row| match row.as_slice() {
-            [Some(o), Some(p), Some(m)] => Some(PackageMember {
-                owner: o.clone(),
-                package: p.clone(),
-                name: m.clone(),
-            }),
+            [Some(o), Some(p), Some(m)] if is_usable_object_name(p) && is_usable_object_name(m) => {
+                Some(PackageMember {
+                    owner: o.clone(),
+                    package: p.clone(),
+                    name: m.clone(),
+                })
+            }
             _ => None,
         })
         .collect())
@@ -843,6 +848,12 @@ mod tests {
                     vec![Some("SCOTT"), Some("DEPT"), Some("TABLE")],
                     vec![Some("SCOTT"), Some("EMPVW"), Some("VIEW")],
                     vec![None, Some("GHOST"), Some("TABLE")],
+                    // XML DB path object under PUBLIC: not a usable identifier.
+                    vec![
+                        Some("PUBLIC"),
+                        Some("oracle/xml/xqxp/functions/builtIns/UpperCase"),
+                        Some("SYNONYM"),
+                    ],
                 ],
             ),
             columns: qr(
@@ -921,6 +932,13 @@ mod tests {
                     vec![Some("SCOTT"), Some("EMP_SYN"), Some("SCOTT"), Some("EMP")],
                     // No table target → dropped.
                     vec![Some("SCOTT"), Some("BAD_SYN"), None, None],
+                    // XML DB component synonym: slash path → filtered.
+                    vec![
+                        Some("PUBLIC"),
+                        Some("oracle/xml/xqxp/functions/builtIns/UpperCase"),
+                        Some("XDB"),
+                        Some("UpperCase"),
+                    ],
                 ],
             ),
             packages: qr(
@@ -937,7 +955,7 @@ mod tests {
     fn tables_skip_null_owner() {
         let mut db = fake();
         let t = fetch_tables_blocking(&mut db, true, "").unwrap();
-        assert_eq!(t.len(), 3);
+        assert_eq!(t.len(), 3, "the XML DB path object is filtered out");
         assert_eq!(t[0].name, "EMP");
         assert_eq!(t[0].kind, TableKind::Table);
         assert_eq!(t[2].name, "EMPVW");
@@ -945,10 +963,29 @@ mod tests {
     }
 
     #[test]
+    fn fetchers_drop_non_identifier_names() {
+        let mut db = fake();
+        // The PUBLIC XML DB synonym is a slash path: never a usable identifier.
+        let names: Vec<String> = fetch_tables_blocking(&mut db, true, "")
+            .unwrap()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert!(
+            !names.iter().any(|n| n.contains('/')),
+            "slash-path objects are filtered: {names:?}"
+        );
+    }
+
+    #[test]
     fn synonyms_fetch_and_column_indirection() {
         let mut db = fake();
         let syns = fetch_synonyms_blocking(&mut db, true, "").unwrap();
-        assert_eq!(syns.len(), 1, "rows with no table target are dropped");
+        assert_eq!(
+            syns.len(),
+            1,
+            "no-target rows and XML DB path synonyms are dropped"
+        );
         assert_eq!(syns[0].name, "EMP_SYN");
         assert_eq!(syns[0].table_name, "EMP");
 

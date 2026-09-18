@@ -9,6 +9,20 @@ pub(super) fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '#'
 }
 
+/// True when `name` can be a normal Oracle identifier: a leading letter or
+/// `_`, then only identifier characters. Filters dictionary noise that is not
+/// addressable as a bare name — notably XML DB component synonyms such as
+/// `oracle/xml/xqxp/functions/builtIns/UpperCase` owned by `PUBLIC`, whose
+/// slash paths can never be typed unquoted. Mixed-case (quoted) names pass.
+pub fn is_usable_object_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(is_word_char)
+}
+
 /// Extract the word prefix ending at byte `offset`: returns (prefix, start).
 /// Completion semantics: only text *before* the cursor matters.
 /// Handles quoted identifiers (`"MixedCase|` → prefix `MixedCase`).
