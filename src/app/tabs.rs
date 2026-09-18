@@ -286,6 +286,18 @@ impl SqlHighlandView {
             .and_then(|id| self.tabs.iter().position(|t| t.id == id))
             .unwrap_or(0);
         self.scroll_tab_into_view(self.active);
+        // The call above runs before the strip has laid out: the scroll
+        // container only applies a pending scroll once `overflow` is known
+        // (set during its prepaint), so on the first frame it is consumed
+        // without moving. Re-issue it after the first frame renders.
+        let view = cx.entity().downgrade();
+        window.on_next_frame(move |_, cx| {
+            view.update(cx, |this, cx| {
+                this.scroll_tab_into_view(this.active);
+                cx.notify();
+            })
+            .ok();
+        });
     }
 
     /// Next neutral `Untitled N` label: one past the highest number currently
@@ -752,13 +764,39 @@ impl SqlHighlandView {
         cx.notify();
     }
 
-    /// Scroll the tab strip so tab `ix` is visible.
+    /// Scroll the tab strip so tab `ix` is visible, preferring to reveal the
+    /// tabs that follow it.
     ///
     /// The scroll container's only children are the tabs (the nav-arrow prefix
     /// and the `+` suffix sit outside it), so the scroll index is the tab
-    /// index. `tests/tab_nav.rs` guards that the active tab stays on screen.
+    /// index. The kit's `scroll_to_item` only scrolls the minimum amount and
+    /// would pin the tab to the nearest edge, hiding every tab after it; here
+    /// the tab is aligned to the left edge instead (clamped at the end), so its
+    /// right neighbours come into view too. A tab that is already fully visible
+    /// is left alone, so stepping through nearby tabs does not jump the strip.
+    /// `tests/tab_nav.rs` guards both the visibility and the reveal behavior.
     fn scroll_tab_into_view(&self, ix: usize) {
-        self.tab_scroll.scroll_to_item(ix);
+        let Some(item) = self.tab_scroll.bounds_for_item(ix) else {
+            // Strip not laid out yet: hand the target to the kit, which applies
+            // it once bounds exist (the next-frame re-issue in `restore_tabs`
+            // covers the startup case).
+            self.tab_scroll.scroll_to_item(ix);
+            return;
+        };
+        let viewport = self.tab_scroll.bounds();
+        let offset = self.tab_scroll.offset();
+        // `bounds_for_item` is content-space (the kit adds the offset itself),
+        // so the on-screen position is content + offset.
+        let left = item.left() + offset.x;
+        let right = item.right() + offset.x;
+        if left >= viewport.left() && right <= viewport.right() {
+            return;
+        }
+        // Align the tab to the left edge so the tabs after it come into view.
+        let max = self.tab_scroll.max_offset();
+        let mut next = offset;
+        next.x = (viewport.left() - item.left()).clamp(-max.x, px(0.));
+        self.tab_scroll.set_offset(next);
     }
 
     /// Tab-strip back/forward: move to the previous/next tab in display order.

@@ -77,6 +77,20 @@ fn staged_active_tabs_dir(
     dir
 }
 
+/// Config dir with `count` numbered tabs (`t0`..`t{count-1}`) and `active`
+/// selected — enough tabs to overflow the 1100px window.
+fn staged_numbered_tabs(tag: &str, count: usize, active: usize) -> std::path::PathBuf {
+    let tabs: Vec<(String, String, String)> = (0..count)
+        .map(|i| (format!("t{i}"), format!("T{i}"), String::new()))
+        .collect();
+    let refs: Vec<(&str, &str, &str)> = tabs
+        .iter()
+        .map(|(id, name, text)| (id.as_str(), name.as_str(), text.as_str()))
+        .collect();
+    let active_id = format!("t{active}");
+    staged_active_tabs_dir(tag, &refs, Some(active_id.as_str()))
+}
+
 /// Config dir with no manifest (first launch).
 fn staged_empty_dir(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("sqlhighland-tabnav-{tag}-{}", std::process::id()));
@@ -631,6 +645,64 @@ async fn active_tab_survives_relaunch(cx: &mut TestAppContext) {
             2,
             "relaunch reopens on the last active tab"
         );
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Relaunching with many tabs scrolls the strip to the restored active tab.
+/// The strip only knows it overflows after the first frame, so restore re-issues
+/// the scroll on the next frame; this asserts it actually lands on screen.
+#[gpui_kit::test]
+async fn restore_scrolls_active_tab_into_view(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_numbered_tabs("restore-scroll", 20, 19);
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let handle = cx.open_window(size(px(1100.), px(780.)), |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        // Deliver the frame the restore scheduled its re-scroll on.
+        window.simulate_next_frame(cx);
+        window.render_frame(cx);
+        assert_eq!(active_tab(window), 19, "the last tab is active");
+        let bounds = window.try_find(19usize).unwrap().bounds();
+        assert!(
+            bounds.left() >= px(0.) && bounds.right() <= px(1100.),
+            "the restored active tab should be scrolled into view, got {bounds:?}"
+        );
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Restoring onto a tab that is not the last one reveals the tabs after it,
+/// rather than pinning the active tab to the right edge and hiding them.
+#[gpui_kit::test]
+async fn restore_reveals_tabs_after_active(cx: &mut TestAppContext) {
+    let _guard = env_guard();
+    cx.update(gpui_kit::init);
+    let dir = staged_numbered_tabs("restore-reveal", 20, 15);
+    std::env::set_var("SQLHIGHLAND_CONFIG_DIR", &dir);
+    let handle = cx.open_window(size(px(1100.), px(780.)), |window, cx| {
+        let view = cx.new(|cx| SqlHighlandView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.simulate_next_frame(cx);
+        window.render_frame(cx);
+        assert_eq!(active_tab(window), 15);
+        for ix in [15usize, 16] {
+            let bounds = window.try_find(ix).unwrap().bounds();
+            assert!(
+                bounds.left() >= px(0.) && bounds.right() <= px(1100.),
+                "tab {ix} should be visible after restore, got {bounds:?}"
+            );
+        }
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
