@@ -98,3 +98,18 @@ idle sessions from timing out. Off by default.
 Enable OS-level TCP `SO_KEEPALIVE` in the fork's `Transport`. It prevents
 middlebox idle drops but can't detect app-level death or reflect UI state.
 Could be layered in later if wanted.
+
+---
+
+## TNS aliases, connect descriptors, and connection properties
+
+Status: **planned, not started** (2026-09-18). Full research and plan in
+[`TNS.md`](TNS.md). Summary:
+
+- Support connection-string **modes** (Basic / TNS alias / raw Connect
+  Descriptor) plus a curated set of Oracle Net and session **properties**.
+- The driver does **not** support RADIUS, Kerberos, external, or token auth;
+  only password auth, TLS/mTLS/wallets, `tnsnames.ora`, and the descriptor
+  options it recognizes.
+- Open questions (see `TNS.md`): the real need, raw descriptor vs alias-only,
+  `config_dir` scope, curated vs free-form properties, and wallet support.
