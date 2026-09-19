@@ -12,9 +12,11 @@ the GUI's platform toolchain (Xcode/Metal on the current macOS target).
 
 - **GUI-free core** (no `gui` feature needed): `db`, `config`, `model`,
   `session`, `metadata`, `schema`, `complete`, `sql`, `export`, `filetab`,
-  `fsutil`, `keychain`.
-- **GUI** (`#[cfg(feature = "gui")]`): `app`, `guitheme`, dialogs, `run`,
-  `providers`, `browser`, `sidebar`.
+  `fsutil`, `keychain`, `logging`.
+- **GUI** (`#[cfg(feature = "gui")]`): `app`, `guitheme`, `fonts`, dialogs
+  (`bind_dialog`, `conn_picker`, `connection_dialog`, `settings_dialog`), `run`,
+  `providers`, `browser`, `sidebar`, and the tree-sitter-backed `sqlparse` +
+  `sqlscope`.
 
 The binary (`main.rs`) is a thin launcher over `app::SqlHighlandView`.
 
@@ -43,20 +45,23 @@ Platform seams: `keychain` (OS keychain via the `keyring` crate) and `fsutil`
 
 ```
 src/
-  app/            the main view (was one 3,491-line app.rs)
+  app/            the main view
     mod (app.rs)  shared view types + struct + core methods + re-exports
-    tabs.rs       tab lifecycle, SQL files, autosave drafts
+    tabs.rs       tab lifecycle, SQL files, autosave drafts, close guards
+    tab_drag.rs   tab drag-reorder state + drop indicator
     connections.rs connection CRUD, sessions, connect/disconnect
     actions.rs    run/commit/format/copy/zoom/dismiss + suggestions
     lsp.rs        editor definition/hover/completion providers
     results.rs    grid data, held cursor, table delegate
     render.rs     all render_* builders + Render impl + env tags
-  sql/            statement text helpers (was one 1,721-line sql.rs)
+  sql/            statement text helpers
     mod (sql.rs)  format_sql + shared lexers + re-exports
     split.rs      statement splitting / caret selection
-    classify.rs   statement kind, DML detection, exec summaries
+    classify.rs   statement kind, DML detection, exec summaries, is_plsql
     substitute.rs &name substitution and :name binds
     script.rs     @/@@/START directives + include expansion
+    diagnostics.rs lexical problem checks (GUI-free)
+    order.rs      ORDER BY wrap for grid sorting
     tests.rs      unit tests
   complete/       completion engine (types + re-exported submodules)
     mod (complete.rs) shared types + re-exports + tests decl
@@ -64,12 +69,17 @@ src/
     catalog.rs    scope tables + hover/describe cards
     aliases.rs    dotted names, alias maps, JOIN…ON detection
     ranking.rs    keyword/function tables + candidate ranking
+    dialect.rs    per-engine dialect seam
+    scope.rs      ScopeForest consumer (relations/CTEs/DML/ORDER BY)
     tests.rs      unit tests
   run/            query/script/export pipeline
     mod (run.rs)  shared imports + re-exports
     query.rs      run entry gates, SQL executor, cancellation
     script.rs     `@` gates, buffer-as-script, sequential runner
+    count.rs      `SELECT COUNT(*)` on a throwaway session
     export.rs     streaming CSV/XLSX drain
+  sqlparse.rs     tree-sitter walk -> structural diagnostics (gui-only)
+  sqlscope.rs     tree-sitter walk -> distilled ScopeForest (gui-only)
   ...             one module per remaining concern (db, config, ...)
 ```
 
@@ -120,7 +130,10 @@ cargo test --features gui-test --test menus --test browser_tree --test themes
 
 ## Remaining large files
 
-Everything is now under ~1,000 lines. The largest are `app/render.rs`
-(~1,000) and `app/tabs.rs` (~830), each a single cohesive concern; `db.rs`
-(~830) is one driver adapter. Split further only if a responsibility seam
-appears (e.g. `render.rs` could become `app/render/{mod,editor,grid}.rs`).
+The < ~800-line target has drifted as features landed; the current largest
+files are `app.rs` (~1,770), `app/tabs.rs` (~1,760), `app/render.rs` (~1,600),
+`settings_dialog.rs` (~1,290), and `metadata.rs` (~1,250). Each is a single
+cohesive concern, but `app.rs`/`tabs.rs`/`render.rs` are the next split
+candidates if a responsibility seam appears (e.g. `render.rs` could become
+`app/render/{mod,editor,grid}.rs`, and `tabs.rs` could separate lifecycle from
+autosave/persistence).

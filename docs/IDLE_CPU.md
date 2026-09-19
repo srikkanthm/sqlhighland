@@ -19,15 +19,14 @@ A static sweep of SQLHighland's own code found nothing that should spin at idle:
 
 - **No unconditional loops/ticks.** Every `cx.spawn(...)` is event-driven
   (connect, run, export, fetch, save, metadata). The only repeating tasks are
-  three 500 ms `Running…` tickers that self-exit when `!busy`:
-  `src/run/query.rs:197`, `src/run/script.rs:276`, `src/run/export.rs:440`.
-  The draft-save debounce is one-shot (`src/app/tabs.rs:775`, 1500 ms).
+  the 500 ms `Running…` tickers in `run::query`, `run::script`, and
+  `run::export`, each of which self-exits when `!busy`. The draft-save debounce
+  is one-shot (`DRAFT_DEBOUNCE` in `app.rs`, flush in `app::tabs`, 1500 ms).
 - **No unconditional `cx.notify()` in a render/prepaint path.** The two
   `on_prepaint`s only act when a measured value changes:
-  - `src/app/render.rs:1042` (toolbar size) notifies only when `ToolbarSize`
+  - `app::render` `render_main` (toolbar size) notifies only when `ToolbarSize`
     crosses a threshold.
-  - `src/app/render.rs:1260` (sidebar re-pin) only `defer`s when the window
-    width changes.
+  - `app::render` sidebar re-pin only `defer`s when the window width changes.
 - **No `request_animation_frame` / `with_animation` / `Animation` in app code.**
 - **No driver/session background thread.** The `rust-oracledb` fork spawns a
   thread only inside its *pool* (`src/pool/mod.rs:73`), which the app does not
@@ -36,7 +35,7 @@ A static sweep of SQLHighland's own code found nothing that should spin at idle:
 - **No LSP/provider polling** — providers are snapshot-only, triggered by
   input/hover (`src/app/lsp.rs`).
 - **Theme/appearance is observer-driven**, not polled (`src/guitheme.rs`,
-  `window.observe_window_appearance` in `src/app.rs:997`).
+  `window.observe_window_appearance` in `app::SqlHighlandView::new`).
 
 Conclusion: the idle cost is most likely in the UI toolkit's frame/animation
 scheduling (or a platform frame pump), not in application logic.
@@ -81,20 +80,22 @@ Profiling (decisive):
 
 Temporarily flip one thing at a time and watch idle CPU:
 
-1. Tab bar back to `TabVariant::Tab` (drops the spring indicator).
-2. Drop `with_handle_appearance(resize_grip())` on the splits
+1. Drop `with_handle_appearance(resize_grip())` on the splits
    (`src/app/render.rs`).
-3. Open a fresh empty tab / close the results grid.
-4. Unfocus the editor (click the sidebar).
+2. Open a fresh empty tab / close the results grid.
+3. Unfocus the editor (click the sidebar).
+4. If on an older build, the kit `TabBar` sliding indicator (removed in the
+   tab-strip rework) was a known animation source — no longer applicable.
 
 Whichever stops the spin identifies the source.
 
 ## Candidate fixes (by finding)
 
-- **Indicator spring:** render the active indicator statically (no `spring`),
-  or gate it on `!cx.reduce_motion()`.
+- **Indicator spring:** *resolved* — the tab-strip rework replaced the kit
+  `TabBar`'s spring indicator with a static 2px underline.
 - **Scrollbar:** pin `ScrollbarMode::Always` (motionless) on the grid, or
-  disable toolkit motion for the app theme.
+  disable toolkit motion for the app theme. (The results grid already draws
+  always-visible scrollbars over the library's handles.)
 - **Editor focus/caret:** don't auto-focus the editor at launch, or disable the
   caret animation.
 - **GPUI frame pump:** add an app-side idle-repaint guard and/or fix in the

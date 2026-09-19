@@ -3,17 +3,26 @@
 Cross-platform SQL GUI client in Rust + GPUI (Oracle is the first engine;
 macOS is the current target). Started 2026-09-08. Older entries below say
 "Oracle-only"/"macOS-only", reflecting the original v1 scope.
-Plan: `HISTORY.md` (Part 1). Status: working MVP — connect, edit, run, page through results.
+Plan: `HISTORY.md` (Part 1). Status: working MVP — connect, edit, run, page
+through results, export, schema browser, scoped autocomplete, live diagnostics,
+and safe exit (transaction/unsaved-file guards). This file is a chronological
+build log: the newest entries are at the bottom, and older entries reflect the
+state at the time they were written.
 
 ## Stack (all pinned)
 
 | Crate | Version | Notes |
 |---|---|---|
-| `oracledb` | `26.0.0-beta.4` (fork) | Pure-Rust thin driver, no Instant Client. Pinned via `[patch.crates-io]` to `srikkanthm/rust-oracledb@49bb38a` for real query cancellation (see `CANCELLATION.md`). Beta — API churn expected, isolated in `db.rs` |
+| `oracledb` | `26.0.0-beta.4` (fork) | Pure-Rust thin driver, no Instant Client. Pinned via `[patch.crates-io]` to `srikkanthm/rust-oracledb@528a79a` for real query cancellation (see `CANCELLATION.md`). Beta — API churn expected, isolated in `db.rs` |
 | `gpui` (`gpui-pre`) | `=0.3.4` | Zed snapshot from crates.io |
 | `gpui-kit` | `=0.6.1` + `tree-sitter-sql` | Component library (sidebar/dialog/table/editor). Grammar feature required or the editor is plain text |
 | `gpui-kit-assets` | `=0.6.1` | `AllAssets` bundle registered at startup; the default bundle lacks Database/Plug/etc. icons |
+| `tree-sitter` + `tree-sitter-sequel` | `0.26` / `0.3` | Live diagnostics + structural scope for completion (gui-only) |
 | `sqlformat` | `=0.5.0` | Query formatting (uppercase keywords, 2-space indent) |
+| `rust_xlsxwriter` | `=0.99.0` | Native `.xlsx` export (`constant_memory` streaming) |
+| `keyring` | `=4.2.0` | OS secret storage (Keychain/Credential Manager/Secret Service) |
+| `zeroize` | `1` | Zeroize in-memory secrets on drop |
+| `serde_json` + `flate2` | `1` | On-disk suggestions cache (gzipped JSON) |
 | `uuid` v4 | `1` | Stable ids for saved connections |
 | `anyhow`, `serde`, `toml` | — | Errors, saved-connections file |
 
@@ -23,21 +32,18 @@ Rust ≥ 1.89 (toolchain: 1.98). macOS-only. Full Xcode + Metal toolchain requir
 
 ## Layout
 
-```
-src/lib.rs      # library: config, db, model, sql (GUI-free, fully testable)
-src/main.rs     # thin GPUI bootstrap (window + Root + dialog layer)
-src/app.rs      # all UI: sidebar, editor, results, status bar, dialogs
-src/db.rs       # DbClient trait + OracledbSession (blocking; bg executor only)
-src/model.rs    # ConnectionConfig (+ stable id), ColumnInfo, QueryResult
-src/sql.rs      # format_sql + statement splitter (pure, unit-tested)
-src/config.rs   # SavedConfig TOML load/save (~/.config/sqlhighland/connections.toml)
-tests/live.rs   # integration tests against a real Oracle DB
-```
+`src/lib.rs` is the module map. The GUI-free core (`config`, `db`, `model`,
+`session`, `metadata`, `schema`, `complete`, `sql`, `export`, `filetab`,
+`fsutil`, `keychain`, `logging`) builds and tests without the platform
+toolchain; GPUI (`app/`, dialogs, `run/`, `providers`, `browser`, `sidebar`,
+`sqlparse`, `sqlscope`, `fonts`, `guitheme`) is gated behind the `gui` feature.
+`src/main.rs` is a thin launcher over `app::SqlHighlandView`.
 
-`gui` cargo feature gates all GPUI deps: plain `cargo test` never touches the
-Metal toolchain; the app builds/runs with `cargo run --features gui`.
-Always run the **release** binary for real use (`./target/release/sqlhighland`) —
-debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
+See [`ARCHITECTURE.md`](../ARCHITECTURE.md) for the full module map, the
+code-split pattern, and the engine/platform seams. `cargo run --features gui`
+builds/runs; always use the **release** binary for real use
+(`./target/release/sqlhighland`) — debug GPUI-on-Metal is sluggish (hover lag,
+stuttering dividers).
 
 ## What was built
 
@@ -1038,6 +1044,11 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   localized — see [`docs/TTC_DESYNC.md`](TTC_DESYNC.md) for the analysis,
   diagnostics (`SQLHIGHLAND_ANO_TRACE`, `RSO_DEBUG_PACKETS`) and the planned
   on-desync dump / query-only auto-retry.
+- **Resolved (later 2026-09-14).** Root cause was an upstream TTC bit-vector
+  decode bug, not the ANO/marker paths: re-pinning the driver fork to `528a79a`
+  picked up the per-row bit-vector reset and the correct bitmap length on the
+  initial execute, and the failure stopped reproducing. The poisoning +
+  reconnect handling remains as a safety net. See [`TTC_DESYNC.md`](TTC_DESYNC.md).
 
 ## Responsive toolbars/headers (2026-09-14)
 
@@ -1081,3 +1092,335 @@ debug GPUI-on-Metal is sluggish (hover lag, stuttering dividers).
   bypassing the TTL.
 - Disconnecting marks the connection's cache stale, so a reconnect refetches
   the dictionary even when the TTL is "never".
+
+## Interface density + compact dialogs (2026-09-14)
+
+- **Global `UiDensity` preference** (Compact default / Comfortable) sizes tabs,
+  toolbar buttons, sidebar rows, the status bar, pane padding, env badges, and
+  dialog spacing; the picker lives under Settings → Themes → Appearance. Editor
+  font size and grid row height keep their own dedicated controls.
+- Dialogs follow the density (Small form controls/footers on Compact, Medium on
+  Comfortable); the connection picker matches.
+- Run/Script gained **per-button spinners** driven by a tab run-kind flag
+  (Script no longer spins when a statement runs). Run-as-Script is info (cyan);
+  Format is warning (amber).
+- Suggestions are fetched on a **throwaway session** (connect → fetch →
+  disconnect) so a dictionary refresh never blocks a run on the pooled session;
+  the in-memory cache is unaffected.
+- The results toolbar row was removed; **Export and Dismiss moved into the
+  status bar** and show only when relevant (status-bar height 26/32).
+- The query editor split now defaults to half the window height; the sidebar
+  width is pinned on window resize (own `ResizableState` + remembered width),
+  fixing the over-wide sidebar on first launch.
+
+## Grid polish + tab underline + compact picker (2026-09-14)
+
+- Body cells and headers are vertically centered (`h_full` + `flex` +
+  `items_center`); the row-number header is right-aligned to match its column.
+- The active tab uses the tab bar's **Underline** variant (the filled default
+  resolved to `tab_active == background`, i.e. invisible); a density-aware left
+  inset clears the split handle and lines up with the pane content.
+- Resize dividers (sidebar and editor/results) paint a transparent ~6px strip
+  with a small pill grip that brightens on hover and while dragging.
+- The connections database icon is a plain indicator again (not focusable, not
+  clickable, no hover surface).
+- Connection-picker rows span the dialog's full width (the right gutter moved
+  onto each row's content) so the hover/first-match wash reaches the edge while
+  text stays clear of the scrollbar; the picker follows density.
+
+## Configurable fetch sizes + tab navigation (2026-09-15)
+
+- **Grid fetch size** is a preference (`Settings → Results → Rows → Fetch size`),
+  default **50**, clamped 1..=10000; it replaces the hard-coded
+  `FETCH_CHUNK = 1000` and applies to the initial load, each scroll fetch, and
+  the export drain. The grid's prefetch look-ahead is now one page instead of a
+  fixed 200-row threshold (which over-buffered ~300 rows on the first frame).
+- **Export fetch size** is its own preference (default **1000**, clamped
+  1..=10000), so a large export is not throttled to the grid page size.
+- A re-run resets the results scroll to the top (vertical and horizontal).
+- Title bar no longer shows the app name.
+
+## Tab strip back/forward (2026-09-15)
+
+- Previous/next tab in display order as the tab bar's prefix, enabled from
+  adjacency (`active > 0` / `active + 1 < len`), so it works at launch.
+- Selection scrolls the strip so the active tab is visible; the kit's tab
+  scroll area tracks two leading children before the tabs, so the scroll child
+  index is display index + 2.
+- Adds headless `tests/tab_nav.rs` (adjacency, no-ops at the ends, add-tab, and
+  Forward-step visibility).
+
+## Live SQL diagnostics (2026-09-15)
+
+- Underlines SQL problems as you type, with a hover message (SQL Developer
+  style). Two passes:
+  - **Lexical** (core, no deps): unterminated string / quoted identifier /
+    block comment and unbalanced parentheses (`src/sql/diagnostics.rs`).
+  - **Structural** (gui): tree-sitter + tree-sitter-sequel walk for `ERROR`
+    nodes (Error) and `MISSING` nodes (Warning), with a parse budget and an
+    issue cap (`src/sqlparse.rs`). Messages name the offending token
+    ("Unexpected 'SELEC'"), read dangling clauses as "Incomplete statement",
+    and prettify expected tokens.
+- Wiring pushes lexical + last-structural issues immediately on edit (so
+  squiggles don't flicker off), then runs the tree pass debounced (300ms) on the
+  background executor.
+- Settings → Editor → Syntax: enable toggle (default on) and scope picker
+  (whole buffer default / current statement).
+- Adds gui-gated tree-sitter deps and headless `tests/sql_diagnostics.rs`.
+
+## Grid sorting + selection (2026-09-15 → 2026-09-16)
+
+- **Server-side sorting.** Double-click a data column header re-runs the query
+  wrapped in `ORDER BY` (Asc → Desc → clear), so Oracle sorts instead of the
+  buffered page. `FOR UPDATE`/`DESCRIBE` results stay unsortable. Sort re-runs
+  hide the toolbar Cancel and don't flash the Run spinner.
+- **Cell/row/column selection with native copy.** Click a data cell to select
+  it; click the left row strip to select the row (Shift extends a range, Cmd
+  toggles rows); click a column header to select the column (double-click still
+  sorts). Cmd+A selects every buffered row; Cmd+C copies the selection honoring
+  the configured CSV delimiter (rows → CSV lines, column → one value per line,
+  cell → raw value); clicking the grid background clears. Selection state lives
+  in `ResultsDelegate`, and the kit's single selection is bypassed
+  (`row_selectable(false)`).
+- Refinements: rows paint their own full-width background band (hover no longer
+  changes a row); the pointer cursor lives on the row (no cell/padding
+  flicker), the inert `#` column shows the default cursor; clicking a cell
+  defers to the library's current cell so arrow keys navigate from it; a
+  selected column tints only its body cells, not the header; the column
+  highlight is a negative-inset overlay that reaches the column edges.
+- Header row is bold; columns size to fit their header name (≥180px, cap 800px)
+  with a trailing gutter for the overlay scrollbar; body values still ellipsize.
+- Results-grid scrollbars are drawn always-visible over the table's public
+  scroll handles (the library auto-hides them).
+
+## Run selection + toolbar/status polish (2026-09-16)
+
+- **Run with a selection** (Cmd+Enter) executes exactly the selected text
+  (trimmed) via the normal statement path, so a fragment picked out of a longer
+  statement runs on its own. No selection keeps statement-at-cursor behavior;
+  Script (Shift+Cmd+Enter) is unchanged.
+- Toolbar Cancel removed (the status bar already offers Cancel during a
+  run/export).
+- Status-bar Cancel no longer shifts: the run clock is fixed-width
+  `HH:MM:SS` and the running/export status label has a fixed width.
+
+## PL/SQL diagnostics fix (2026-09-16)
+
+- tree-sitter-sequel only accepts SQL statements inside `BEGIN...END` and its
+  `CREATE FUNCTION` body is Postgres-shaped, so PL/SQL was reported as errors
+  (e.g. "Unexpected 'DBMS_SESSION'"). Added `sql::is_plsql` (anonymous blocks
+  and `CREATE PROCEDURE`/`FUNCTION`/`PACKAGE`/`TRIGGER` bodies) plus
+  `is_plsql_fragment` for package-body pieces; they are skipped in the Statement
+  scope and masked (byte-length preserving, with lone `/` terminators) in the
+  WholeBuffer scope so offsets stay exact. Lexical checks still run.
+- `db::sanitize_statement` now uses `is_plsql` so object bodies keep their
+  `END;`.
+
+## Transaction + close guards (2026-09-16)
+
+- **Commit/rollback guard.** Closing a tab or quitting with uncommitted DML now
+  prompts to commit or roll back. Transactions are session-scoped, so the
+  prompt names the affected connection and, on a shared connection, warns that
+  the choice affects every tab using it; a disconnected session has already
+  rolled back and closes without prompting. Commit/rollback across connections
+  runs sequentially on the background executor; a partly-succeeded batch clears
+  the pending flag only for the connections that actually settled; a failed
+  commit/rollback keeps the tab open (or aborts the quit) so the user can retry.
+- **Window-close guard.** The native red-button close routes through the same
+  predicate (`quit_needs_guard`) and orchestrator as Cmd+Q / menu Quit —
+  uncommitted transactions are settled first, then unsaved external SQL files,
+  and only then does the app quit. External SQL files no longer auto-save (the
+  debounced flush writes only in-memory drafts), so the guard can actually see
+  a dirty external edit. `QuitMode::LastWindowClosed` makes an unguarded close
+  quit the single-window app. Adds headless `tests/quit_guard.rs`.
+- **Disconnect active tab** (`Shift+Cmd+D`) disconnects the connection bound to
+  the active tab (session-scoped) after a confirmation that names uncommitted
+  work when present; silent no-op when nothing is bound/connected.
+- `Return` is wired to the primary action on every confirm dialog that only had
+  clickable footers (Delete Connection, Quit Save-and-Quit, Close Tab Save,
+  File-changed-on-disk Reload), sharing `save_all_and_quit`,
+  `save_tab_and_close`, and `reload_tab` helpers.
+
+## Editor fonts + Theme default (2026-09-16)
+
+- Bundled JetBrains Mono, Fira Code, Hack, and Cascadia Code (OFL/MIT) into the
+  binary and registered them with the text system before the first window lays
+  out text, so a picked family always resolves. The remaining families stay
+  OS-provided and are offered only when installed, so a pick never silently
+  renders in a substitute.
+- Fixed Theme default not reverting: `apply_config` left `mono_font_family`
+  untouched when a theme declares none, so re-applying a theme could not clear
+  an explicit pick. The platform default is captured once and restored when the
+  preference is empty, and the font dropdown routes through
+  `apply_preferences`.
+- Adds asset-parsing tests for the embedded faces and headless tests for the
+  revert round-trip, explicit-family persistence, and the availability
+  predicate.
+
+## Tab strip rework: drag-reorder + Move Tab (2026-09-17)
+
+- Replaced the kit `TabBar` with a custom strip of `gpui_base::Tabs` so tabs can
+  be dragged. A drag never reorders the model: it moves a **drop indicator** to
+  the insertion slot, computed from the stable pre-reorder tab bounds, and the
+  reorder happens once on drop (live reordering mutated the layout the hit test
+  read, which cascaded into full-strip flicker).
+- **Move Tab Left/Right** actions (Cmd+Alt+←/→, alias Ctrl+Shift+PageUp/Down)
+  wired through the main root and both sidebar roots, with View menu items.
+  `move_tab` keeps the moved tab active, remaps the active slot, scrolls it into
+  view, and persists the new order.
+- The strip keeps per-tab selection accessibility, adds a static 2px primary
+  underline for the active tab, and drops the kit's sliding indicator (also
+  removing an idle-CPU animation source).
+- Registering the Cmd+Alt chord first makes the menu show it (the menu shows the
+  first binding for an action; the PageUp/Down alias still works).
+- Tests cover keyboard move, drag reorder, persistence, the alias, nav, and
+  scroll-into-view; a per-binary env lock serializes the config-dir-global
+  tests.
+
+## Tab pills + dirty dot (2026-09-17)
+
+- The active tab is a filled primary capsule with primary-foreground text;
+  inactive tabs are transparent and brighten on hover. Inactive tabs also fill
+  with the sidebar's subtle accent (50%) on hover so the capsule affordance
+  shows before selection; the drag ghost matches the pill.
+- The `*` dirty marker is replaced by an **amber dot** (the accessible label
+  carries an "(unsaved)" note; the visible name stays plain).
+- The new-tab `+` is a filled circular bubble using a custom button variant:
+  the ghost variant installs its own hover, and setting a second one trips a
+  debug assertion.
+
+## Autocomplete: scope-aware, dialect-ready engine (2026-09-17)
+
+- Added a per-engine **`Dialect` seam** (catalogs, folding, system schemas,
+  sequence members, preferred schemas) and routed the completion path through
+  it, so a second database is additive.
+- Added structural scope from tree-sitter-sequel: a distilled `ScopeForest`
+  (relations, CTEs, subquery projection, DML anchors, ORDER BY spans) produced
+  by the existing debounced pass and consumed by `providers.rs`, with the
+  lexical scanner as an exact fallback. Delivers CTE/subquery columns,
+  nearest-scope resolution (no alias bleed), INSERT/UPDATE target-only columns,
+  and ORDER BY projection aliases.
+- Replaced the bare escape with **origin-aware tail contexts**: after a table
+  reference only the valid continuations are offered (phrases, not fragments),
+  with JOIN adding ON/USING, UPDATE adding SET, INSERT INTO adding
+  VALUES/SELECT, plus the full Oracle join/order/group/connect-by combinations
+  in the catalog. A cursor in trailing whitespace is tolerated, so
+  columns/continuations still resolve (fixes columns missing after WHERE).
+- **Expression contexts**: subquery starts (FROM `/` IN `/` EXISTS `/` set
+  operators) offer SELECT/WITH; `CAST(x AS |)` offers dialect data types;
+  `OVER (|)` offers window clauses; `USING (|)` offers common columns; JOIN ON
+  keeps offering FK conditions after AND/OR (filtering what is already typed).
+- **Richer metadata**: synonyms from `ALL_SYNONYMS` (suggested as SYNONYM and
+  resolved to their table's columns), materialized views from `ALL_MVIEWS`, and
+  package members from `ALL_PROCEDURES` so `pkg.` completes its members. Usage
+  counts persist to `usage.toml` so frequency ranking survives relaunch.
+- **Table-first select list**: in an empty `SELECT` list with no FROM yet, lead
+  with the dictionary's tables (and CTE names); accepting one inserts
+  `* FROM t ` via a `Candidate.insert` override, so columns become available
+  from the next completion. The trigger ignores whitespace, `--`/`/* */`
+  comments, and DISTINCT/ALL.
+- Tests: dialect/scope/extractor units, provider mapping, and end-to-end
+  `tests/completion_scope.rs` (CTE, DML, ORDER BY alias, WHERE trailing space,
+  FROM tail); serializes config-dir tests. `docs/AUTOCOMPLETE.md` records the
+  remaining gaps (standalone routines at call sites, CTE explicit column lists,
+  quoted identifiers on insert, grouping-set/nulls-ordering phrases,
+  scope-driven hover/definition, fuzzy matching).
+
+## Completion cursor + stale-offset fix (2026-09-17)
+
+- Accepting a function candidate (LOWER, UPPER, TO_DATE, …) now leaves the
+  cursor **between the parentheses**. The editor kit has no snippet support — it
+  inserts `text_edit.new_text` verbatim and leaves the cursor after `()`, and
+  ignores `InsertTextFormat`/Snippet/tabstops — so the app places the cursor
+  itself. `QueryTab.pending_completion` is set on a non-empty popup (cleared on
+  an empty result); the next editor Change ending in a known `NAME()` moves the
+  cursor one byte left. The provider owns the flag lifecycle, because the editor
+  emits Change for every typed character while the popup is open and the accept
+  does not re-run the provider.
+- Fixed auto-complete wedging after clearing or replacing the buffer: the kit
+  keeps a sticky `CompletionMenuState::trigger_start_offset` and
+  `handle_completion_trigger` bails whenever the cursor is before it, and the
+  base offset is never reset. The editor Change subscription now reads the
+  offset and cursor inline and, when `cursor < start`, schedules a deferred
+  `present_completion_items(cursor, empty)` to reset it (the same call
+  Ctrl+Space uses; deferred because the editor is leased during its own change
+  dispatch). Ordinary forward typing does not hit the path. Root cause and the
+  upstream suggestion are documented in `docs/AUTOCOMPLETE.md`.
+
+## Tab lifecycle: neutral titles, restore, rogue drafts (2026-09-17)
+
+- First launch opens one blank tab (no sample SQL); titles are never derived
+  from buffer content — they use **`Untitled N`**. New tabs number from the open
+  set (highest `Untitled N` + 1, else `Untitled 1`), replacing the monotonic
+  counter, so closing the last tab spawns `Untitled 1` instead of a climbing
+  number.
+- The active tab id is recorded in `tabs.toml` and reselected on launch (the
+  nearest query tab when a viewer was focused).
+- Closing an in-memory tab with text prompts **Save As / Discard / Cancel**;
+  blank tabs close silently; in-memory tabs always show the unsaved marker.
+- **Rogue-tab fix.** Two sources of unwanted tabs were closed: orphan adoption
+  no longer resurrects whitespace-only drafts (drafts with text still recover),
+  and the debounced draft flush does its existence check and write together
+  under the entity so a write in flight when a tab closes can't recreate its
+  draft. `write_atomic` also uses a pid+sequence temp name, so two writers can't
+  share a fixed `<path>.tmp` and rename a half-written manifest into place.
+  Regression tests `closed_tab_leaves_no_orphan_draft` and
+  `empty_orphan_drafts_are_not_adopted`.
+- `restore_keeps_saved_tab_names` pins byte-identical restore across two
+  launches; orphan adoption now logs its evidence (count, ids, byte size) —
+  never query text.
+
+## Tab strip scroll reveal (2026-09-18)
+
+- `scroll_tab_into_view` now aligns the target to the **left edge** (clamped at
+  the end) from the scroll handle's measured geometry, instead of the kit's
+  minimal `ScrollStrategy`, which pinned an off-screen target flush-right and
+  hid every tab after it. An already-visible tab is left alone, so stepping
+  through nearby tabs doesn't jump the strip.
+- The strip doesn't know it overflows until after the first frame, so restore
+  also re-issues the scroll on the next frame.
+
+## On-disk suggestions cache + dictionary cleanup (2026-09-18)
+
+- **Opt-in per-connection on-disk cache** (`ConnectionConfig.cache_metadata_to_disk`,
+  default off; "Cache suggestions on disk" switch in the connection dialog).
+  Persists a connection's dictionary so a restart loads suggestions and the
+  schema browser instead of refetching; turning it off deletes the file.
+- `MetadataCacheDisk` (serde) + `CacheFingerprint` (connection params + system
+  filter) + `version`, written as gzipped JSON to `metadata/<conn_id>.json.gz`
+  with an atomic, owner-only write. Tuple-keyed maps become entry vectors (JSON
+  keys must be strings); `fetched_at` is unix millis. `load_cache` treats
+  missing/corrupt/version/fingerprint mismatch as a miss; `save_cache` skips a
+  cache above `Preferences.metadata_disk_cap_mb` (default 20, 0 = uncapped,
+  edited in Settings). A session loads the disk copy once on first use (skipped
+  on a forced refresh); a successful fetch persists on the background executor.
+  Disconnect keeps the disk copy; delete-connection removes it; the
+  system-schema toggle invalidates it.
+- **Non-identifier dictionary objects are dropped.** Oracle XML DB component
+  synonyms owned by PUBLIC (e.g. `oracle/xml/xqxp/functions/builtIns/UpperCase`)
+  no longer appear, since `PUBLIC` is not a system schema and their slash paths
+  can never be typed unquoted. `is_usable_object_name` (leading letter/`_`, then
+  only identifier chars) is applied in every dictionary fetcher — tables/views/
+  mviews, columns, sequences, synonyms, package members — so the cache is clean
+  at the source and completion, hover, and the browser all benefit. Mixed-case
+  quoted names still pass.
+- Adds `serde_json` + `flate2` (already in the lock), a shared crate-level test
+  lock for the process-global config dir, and `tests/browser_tree` coverage that
+  loads a persisted cache with no database.
+
+## TNS / connect-descriptor plan (2026-09-18)
+
+- Documented the research and plan for connection-string **modes** (Basic / TNS
+  alias / raw Connect Descriptor) and a curated set of Oracle Net/session
+  **properties** in [`TNS.md`](TNS.md), linked from [`TODO.md`](TODO.md) so the
+  work can resume without re-investigating the driver.
+- Key finding: the pinned oracledb fork does **not** support RADIUS, Kerberos,
+  external, or token authentication — only password auth, TLS/mTLS/wallets,
+  `tnsnames.ora`, and the descriptor options it recognizes (the parser drops
+  unknown nodes). Open questions are listed in `TNS.md`.
+
+## Releases in this stretch
+
+v0.5.0, v0.5.1, v0.5.2, v0.5.5 (2026-09-14/15), v0.6.0, v0.6.3 (2026-09-16),
+v0.10.0, v0.10.1 (2026-09-18). Release tags are pushed to trigger the DMG
+workflow in `.github/workflows/release.yml`.

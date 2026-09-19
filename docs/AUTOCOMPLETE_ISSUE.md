@@ -165,5 +165,16 @@ set instead. Check, in order:
 - `src/app/tabs.rs` (provider installation), `src/app/render.rs` (TriggerComplete).
 - `src/complete/tests.rs` (`trivia_positions_detected`,
   `trivia_respects_scope_nesting`).
-- Ruled out: `gpui-base` `CompletionMenuState.trigger_start_offset` is never
-  cleared (a real latent kit bug, but not this symptom).
+- The kit's sticky `CompletionMenuState.trigger_start_offset` is still not
+  cleared by the kit, but the app now **self-heals** it (deferred
+  `present_completion_items` when the cursor moves before the offset). That
+  wedge produced a *different* symptom — auto-complete dead after
+  clearing/replacing the buffer, recoverable with Ctrl+Space — and was fixed on
+  2026-09-17; see `docs/AUTOCOMPLETE.md`. It is not this issue (Ctrl+Space is
+  also dead here).
+
+> **Status update (2026-09-18):** the trivia false-positive in `scan_head`
+> remains the leading hypothesis; the underlying `is_trivia_position` early
+> return is still in place (`src/app/lsp.rs`), so this issue stays **open**.
+> The scope-aware completion engine later reworked the surrounding context
+> detection but did not change the trivia gate.

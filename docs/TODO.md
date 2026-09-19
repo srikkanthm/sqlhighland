@@ -113,3 +113,80 @@ Status: **planned, not started** (2026-09-18). Full research and plan in
   options it recognizes.
 - Open questions (see `TNS.md`): the real need, raw descriptor vs alias-only,
   `config_dir` scope, curated vs free-form properties, and wallet support.
+
+---
+
+## Parallel GUI-test isolation (config-dir env race)
+
+Status: **known issue, not fixed** (found 2026-09-18).
+
+### Symptoms
+
+`cargo test --features gui-test --test browser_tree` fails intermittently:
+
+```
+---- disk_cached_metadata_loads_without_a_database stdout ----
+assertion `left == right` failed: the persisted dictionary is loaded from disk
+  left: []
+ right: ["SCOTT.EMP"]
+```
+
+It passes with `--test-threads=1`.
+
+### Cause
+
+Both tests in `tests/browser_tree.rs` (`browser_expand_shows_tree` and
+`disk_cached_metadata_loads_without_a_database`) set and then remove the
+process-global `SQLHIGHLAND_CONFIG_DIR` with **no lock**. Cargo runs the tests
+in one binary on parallel threads, so one test's `set_var`/`remove_var`
+redirects the other's config lookups mid-run.
+
+This is the same class of bug the rest of the suite already guards against:
+`tests/tab_nav.rs` has a static `ENV_LOCK` and `src/testenv.rs` exposes
+`config_dir_lock` for unit tests. `browser_tree.rs` predates the disk-cache test
+and never picked up the pattern.
+
+### Fix
+
+- [ ] Add a `static ENV_LOCK: Mutex<()>` and a guard (same shape as
+  `tests/tab_nav.rs:111-119`) to `tests/browser_tree.rs`; acquire it at the top
+  of both tests and hold it through cleanup.
+- [ ] Re-run `cargo test --features gui-test --test browser_tree` (default
+  parallelism) several times to confirm it is green.
+
+### Notes
+
+- A repo-wide alternative is one process per test binary, but the existing
+  per-binary lock is the established convention here.
+
+---
+
+## CI runs only some headless GUI test suites
+
+Status: **known issue, not fixed** (found 2026-09-18).
+
+### Cause
+
+The blocking `gui` job in `.github/workflows/ci.yml` runs only:
+
+```sh
+cargo test --features gui-test \
+  --test menus --test browser_tree --test themes --test ui_picker
+```
+
+The suites added later are not listed, so they never run in CI:
+
+- `fonts` (3), `tab_nav` (19), `quit_guard` (8), `completion_scope` (14),
+  `sql_diagnostics` (2) — ~46 tests, plus the `browser_tree` race above.
+
+### Fix
+
+- [ ] Add the missing `--test` flags to the CI headless step
+  (`.github/workflows/ci.yml`), or switch to an explicit list of every
+  gui-test binary.
+- [ ] Do **not** use a blanket `--tests`: it would also build/run `live` and
+  `cancel_live`, which need a live Oracle (and `cancel_live` is `#[ignore]`d).
+- [ ] Land the `browser_tree` lock first so the lane stays green with default
+  parallelism.
+- [ ] The two `#[ignore]`d `ui_picker` tests are unrelated and stay as-is
+  (see `REVIEW.md` §4.5).

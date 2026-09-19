@@ -1,10 +1,27 @@
 # Intermittent TTC desync on encrypted (ANO) sessions
 
-Status: **open — desync confirmed; root cause not yet localized**
+Status: **resolved (2026-09-14)** — root cause localized upstream and fixed by
+re-pinning the driver fork to `528a79a`; not an ANO/marker path (see
+[Resolution](#resolution)).
 Date: 2026-09-14
 Area: driver response parsing / ANO transport
 (`rust-oracledb/src/client/mod.rs`, `rust-oracledb/src/transport.rs`,
 `rust-oracledb/src/encryption.rs`)
+
+## Resolution
+
+The desync was an **upstream TTC bit-vector decode bug**, not the ANO transport
+or the cancellation marker/recovery machinery suspected below. Re-pinning the
+fork to `528a79a` picked up two upstream fixes:
+
+- **per-row bit-vector reset**, and
+- **correct bitmap length on the initial execute**.
+
+After the re-pin the `unknown TTC message type` failure no longer reproduces.
+The analysis below is kept as the historical investigation; its "candidate
+causes" were not the culprit. The app's poisoning handling
+(`src/db.rs::is_poisoned` → disconnect + lazy reconnect) remains as a safety net
+for any future stream desync.
 
 ## Symptom
 

@@ -67,6 +67,10 @@ for real. An explicit sidebar Connect stores the token up front.
   - `9a4fcb1` Use out-of-band break for cancellation; map ORA-01013 to Cancelled
   - `49bb38a` Advertise OOB capability and fix interrupt recovery
   - `52993b5` Advertise OOB only on plain TCP; never panic in the connect path
+- Current pin `528a79a` also picks up two **upstream** TTC bit-vector fixes
+  (per-row bit-vector reset; correct bitmap length on the initial execute) that
+  resolved the intermittent `unknown TTC message type` desync — see
+  [`TTC_DESYNC.md`](TTC_DESYNC.md).
 
 Pinned from `Cargo.toml`:
 
