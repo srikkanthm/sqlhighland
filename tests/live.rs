@@ -351,3 +351,68 @@ fn live_native_sort_orders_server_side() {
     assert_eq!(vals, ["5", "4", "3", "2", "1"], "descending order");
     assert!(!is_sortable_sql("SELECT * FROM dual FOR UPDATE"));
 }
+
+#[test]
+fn live_lob_columns_fetch_as_locators() {
+    // Regression guard for the slow-LOB path: without the statement's
+    // `fetch_lobs()` the driver defines CLOB/BLOB as LONG and the server
+    // streams the whole value with every row. The app must show the size
+    // placeholder instead (SQL Developer parity), report the true Oracle
+    // types, and page through the cursor without pulling content.
+    let mut s = OracledbSession::new();
+    s.connect(&cfg()).expect("connect");
+    let table = "sh_test_lob";
+    let _ = s.exec(&format!("DROP TABLE {table}"), &[]);
+    s.exec(
+        &format!("CREATE TABLE {table} (id NUMBER, doc CLOB, payload BLOB)"),
+        &[],
+    )
+    .expect("create");
+    s.exec(
+        &format!(
+            "INSERT INTO {table} \
+             SELECT level, \
+                    to_clob(rpad('x',4000,'x')) || to_clob(rpad('x',4000,'x')) \
+                        || to_clob(rpad('x',4000,'x')) || to_clob(rpad('x',4000,'x')) \
+                        || to_clob(rpad('x',4000,'x')), \
+                    to_blob(hextoraw(rpad('A',4000,'A'))) \
+             FROM dual CONNECT BY level <= 20"
+        ),
+        &[],
+    )
+    .expect("insert");
+    // A NULL row exercises the empty-cell path for both LOB types.
+    s.exec(&format!("INSERT INTO {table} VALUES (99, NULL, NULL)"), &[])
+        .expect("insert null");
+    s.commit().expect("commit");
+
+    // Page through in 10-row pages so the locator path is exercised across
+    // fetch messages, not just the initial execute.
+    let (columns, first, id) = s
+        .start_query(
+            &format!("SELECT id, doc, payload FROM {table} ORDER BY id"),
+            10,
+            &[],
+        )
+        .expect("start");
+    assert_eq!(columns[1].db_type, "DB_TYPE_CLOB");
+    assert_eq!(columns[2].db_type, "DB_TYPE_BLOB");
+    assert_eq!(first.rows.len(), 10);
+
+    let mut rows = first.rows;
+    rows.extend(s.fetch_more(id, 10).expect("page 2").rows);
+    let p3 = s.fetch_more(id, 10).expect("page 3");
+    rows.extend(p3.rows);
+    assert!(p3.exhausted);
+
+    assert_eq!(rows.len(), 21);
+    for row in &rows[..20] {
+        assert_eq!(row[1].as_deref(), Some("<CLOB, 20000 chars>"));
+        assert_eq!(row[2].as_deref(), Some("<BLOB, 2000 bytes>"));
+    }
+    assert_eq!(rows[20][1], None);
+    assert_eq!(rows[20][2], None);
+
+    let _ = s.exec(&format!("DROP TABLE {table}"), &[]);
+    s.commit().expect("commit drop");
+}

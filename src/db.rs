@@ -227,7 +227,7 @@ impl OracledbSession {
             }
             None => sql,
         };
-        let cursor = query_with_binds(conn, sql, binds).map_err(|e| {
+        let cursor = query_with_binds(conn, sql, binds, first_n).map_err(|e| {
             // A TTC desync poisons the connection: the driver and server no
             // longer agree on the response stream, so every later run on this
             // pooled session would fail too. Drop it; the next run reconnects
@@ -672,13 +672,30 @@ fn is_poisoned(err: &oracledb::Error) -> bool {
 /// Run a query with native binds. All-numeric placeholders (`:1`, `:2`) go
 /// through the positional API (ordered by number); anything else uses named
 /// binds. All values are sent as VARCHAR2 strings — SQL Developer parity.
+///
+/// `prefetch` is the caller's first-page size (see
+/// [`OracledbSession::start_query`]).
 fn query_with_binds(
     conn: &oracledb::Connection,
     sql: &str,
     binds: &[BindParam],
+    prefetch: usize,
 ) -> Result<oracledb::Cursor, oracledb::Error> {
+    // `fetch_lobs`: LOB columns arrive as locators, not inline data. Without
+    // it the driver defines CLOB/BLOB columns as LONG/LONG_RAW and the server
+    // streams the whole LOB with every row — a multi-MB LOB over thousands of
+    // rows is what makes those queries crawl. The locator carries the size,
+    // so `cell_to_display`'s `<CLOB, N chars>` placeholder costs no round
+    // trip. `prefetch_rows`: LOB statements set the driver's no_prefetch, so
+    // the initial execute otherwise returns just the driver default (2 rows)
+    // before the first full page — matching it to the page size keeps the
+    // first paint to one round trip. Neither changes non-LOB statements
+    // (plain columns keep the default fetch-array path).
+    let mut stmt = conn.statement(sql)?;
+    stmt.fetch_lobs()
+        .prefetch_rows(prefetch.clamp(1, 1_000) as u32);
     if binds.is_empty() {
-        return conn.query(sql, &[]);
+        return stmt.query(&[]);
     }
     if binds
         .iter()
@@ -690,13 +707,13 @@ fn query_with_binds(
             .iter()
             .map(|b| &b.value as &dyn oracledb::ToDbValue)
             .collect();
-        conn.query(sql, &refs)
+        stmt.query(&refs)
     } else {
         let refs: Vec<(&str, &dyn oracledb::ToDbValue)> = binds
             .iter()
             .map(|b| (b.name.as_str(), &b.value as &dyn oracledb::ToDbValue))
             .collect();
-        conn.query_named(sql, &refs)
+        stmt.query_named(&refs)
     }
 }
 
