@@ -652,20 +652,6 @@ impl SqlHighlandView {
                     .min_w_0()
                     .gap(px(d.gap))
                     .items_center()
-                    .when(pending, |this| {
-                        this.child(
-                            h_flex()
-                                .gap_1()
-                                .items_center()
-                                .child(div().size(px(d.dot)).rounded_full().bg(cx.theme().warning))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().warning)
-                                        .child("Uncommitted"),
-                                ),
-                        )
-                    })
                     .child(
                         Button::new("run")
                             .primary()
@@ -731,6 +717,21 @@ impl SqlHighlandView {
                     // flight (see `render_status_bar`), so the toolbar no
                     // longer carries one.
                     .child(div().flex_1())
+                    .when(pending, |this| {
+                        this.child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .flex_shrink_0()
+                                .child(div().size(px(d.dot)).rounded_full().bg(cx.theme().warning))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().warning)
+                                        .child("Uncommitted"),
+                                ),
+                        )
+                    })
                     .child(self.render_connection_picker(size, cx)),
             )
             .child(
